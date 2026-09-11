@@ -34,10 +34,25 @@ def test_unknown_device():
         classify(100, 100, "tablet")
 
 
-def test_pure_module_imports_nothing_with_side_effects():
-    """Global architecture property: the decision layer never touches the world."""
+def test_classify_imports_only_sizes():
+    """The decision layer never touches the world. Enforced by parsing the
+    imports, not by matching strings: `from os import path` would slip past
+    a substring check for "import os"."""
     import paperhanger.classify as module
 
-    text = open(module.__file__).read()
-    for forbidden in ("import os", "import subprocess", "import shutil", "from pathlib"):
-        assert forbidden not in text, f"{forbidden} in classify.py"
+    from tests.conftest import assert_pure_module
+
+    assert_pure_module(module, allowed={"sizes"})
+
+
+def test_purity_helper_catches_a_from_style_import(tmp_path):
+    """The case the previous substring check let through."""
+    import types
+
+    from tests.conftest import assert_pure_module
+
+    fake = tmp_path / "impure.py"
+    fake.write_text("from os import path\n")
+    module = types.SimpleNamespace(__file__=str(fake))
+    with pytest.raises(AssertionError, match="imports"):
+        assert_pure_module(module, allowed={"sizes"})
