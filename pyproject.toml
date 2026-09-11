@@ -1,0 +1,24 @@
+[project]
+name = "paperhanger"
+version = "0.1.0"
+description = "Turn a folder of images into desktop and phone wallpapers on macOS"
+requires-python = ">=3.14"
+dependencies = []
+
+[project.scripts]
+paperhanger = "paperhanger.cli:main"
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "real_upscaler: requires upscayl-bin installed (Tier 3); deselected by default",
+    "corpus: requires ~/Pictures/wallpaper (Tier 2); skips cleanly when absent",
+]
+addopts = "-m 'not real_upscaler'"
