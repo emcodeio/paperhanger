@@ -56,3 +56,21 @@ def test_purity_helper_catches_a_from_style_import(tmp_path):
     module = types.SimpleNamespace(__file__=str(fake))
     with pytest.raises(AssertionError, match="imports"):
         assert_pure_module(module, allowed={"sizes"})
+
+
+def test_purity_helper_reports_the_module_not_the_imported_names(tmp_path):
+    """`from .classify import CROP, classify` must record the MODULE
+    `classify`, not the names `CROP` and `classify`. Branching on
+    node.level instead of node.module silently inverts this."""
+    import types
+
+    from tests.conftest import assert_pure_module
+
+    fake = tmp_path / "submodule_import.py"
+    fake.write_text("from .classify import CROP, classify\n")
+    module = types.SimpleNamespace(__file__=str(fake))
+
+    assert_pure_module(module, allowed={"classify"})        # the module is allowed
+
+    with pytest.raises(AssertionError, match="classify"):
+        assert_pure_module(module, allowed={"CROP"})        # a NAME is not a module

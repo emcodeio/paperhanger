@@ -39,10 +39,10 @@ def assert_pure_module(module, allowed):
         if isinstance(node, ast.Import):
             imported.update(alias.name.split(".")[0] for alias in node.names)
         elif isinstance(node, ast.ImportFrom):
-            if node.level:                      # from . import sizes
-                imported.update(alias.name.split(".")[0] for alias in node.names)
-            elif node.module:                   # from os import path
+            if node.module:          # from os import path / from .classify import CROP
                 imported.add(node.module.split(".")[0])
+            else:                    # from . import sizes
+                imported.update(alias.name.split(".")[0] for alias in node.names)
     forbidden = imported - set(allowed)
     assert not forbidden, (
         f"{Path(module.__file__).name} imports {sorted(forbidden)}; "
