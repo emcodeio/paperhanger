@@ -24,10 +24,10 @@ dependencies: `sips` ships with macOS and `upscayl-bin` is invoked as a subproce
 paperhanger/
   sizes.py       thresholds and the ideal/floor table         pure
   classify.py    (w, h) -> device, axis, ideal, floor         pure
-  plan.py        Plan dataclasses and the recursive planner   pure
+  plan.py        OutputPlan dataclass and the planner         pure
   imaging.py     sips and upscayl-bin subprocess wrappers     effects
   toolchain.py   locate / verify / download binary and model  effects
-  execute.py     walks a Plan, calls imaging, files results   effects
+  execute.py     runs plans, calls imaging, files results     effects
   cli.py         argument parsing, dry-run report, progress
 ```
 
@@ -35,15 +35,16 @@ Installed with `uv tool install .`; developed with `uv run paperhanger`.
 
 ## 3. Architecture: plan, then execute
 
-Measuring and deciding produce an immutable `Plan`; a separate executor runs it. Every
-decision is made before anything is written.
+Measuring and deciding produce an immutable list of plans; a separate executor runs them.
+Every decision is made before anything is written.
 
 ```
 input path
   -> scan       candidate files, filtered by probing with sips (not by extension)
   -> measure    imaging.probe() -> (w, h, source_format)   one sips call per file
   -> classify   pure: device(s), axis, ideal, floor
-  -> plan       pure: a Plan tree. Crop slices are planned, not written, because
+  -> plan       pure: a flat list of OutputPlans, grouped by source photo. Crop
+                slices are planned, not written, because
                 slice dimensions follow arithmetically from source dimensions.
                 Both output axes, the format, and the destination path are fixed
                 here; so is the decision to skip a plan whose output already
@@ -51,21 +52,29 @@ input path
                 on this side of the line.
   ---- every decision is now made; nothing has been written ----
   -> --dry-run? render the report and exit
-  -> execute    per plan: normalize -> crop -> upscale -> resize+encode -> file
-                cheapest plans first, so an interrupted run leaves the most behind:
-                974 of the corpus's 3441 outputs need no upscaler at all
+  -> execute    per photo: normalize -> upscale the whole frame once
+                per plan:  crop -> resize+encode -> file
+                cheapest photos first, so an interrupted run leaves the most
+                behind: 974 of the corpus's 3441 outputs need no upscaler at all
 ```
 
-A `Plan` leaf carries the source path, the operations to run, the output path, the output
-format and quality, and the reason it exists. A `CropPlan` carries three slice rectangles
-and three child plans.
+An `OutputPlan` carries the source path, the crop rectangle if any, the operations to run,
+both output dimensions, the output path, format and quality, the band it came from, and the
+net enlargement factor. Plans are grouped by source photo, because two things are decided
+per photo rather than per output: whether the upscaler runs (section 7) and where the
+original is archived (section 12).
+
+The list is flat, not a tree. A tree would only be justified by recursion, and section 6
+removed it — slices are planned directly rather than re-classified, so nesting could never
+be more than one level deep. A flat list is also what makes the work sortable, which the
+cheapest-first ordering needs.
 
 This shape is chosen for three reasons. The decision tree becomes pure functions over
 integers, so the whole rule set is testable as a table with no image files. The dry-run
 report and the executor read the same structure, so the report cannot drift from what
 actually happens. And because upscaling is slow, seeing what a batch will cost before
 committing to it has real value: a full run over the author's 894-image corpus is
-estimated at 37 hours.
+estimated at 24 hours.
 
 ## 4. Classification
 
@@ -145,8 +154,9 @@ Band 2 is also what makes the runtime tractable. Upscayl's cost scales with *sou
 pixels, so the images needing the least enlargement cost the most to run: without band 2, a
 full run over the author's corpus is 59 hours, 40% of it spent on images that are already
 at or above their floor.
-With it, 37 hours, and 544 of the 3441 outputs are produced at native resolution having
-been resampled not at all.
+With it, 37 hours — and 24 once the upscaler runs once per photo rather than once per
+output (section 7). 544 of the 3441 outputs are produced at native resolution, having been
+resampled not at all.
 
 The legacy `lt_3x` / `3x` / `4x` tiers and the 4.25x acceptance ceiling do not survive.
 They were artifacts of Pixelmator's 3x model and of its ability to resize to an arbitrary
@@ -190,23 +200,28 @@ directory and deleted them from `originals/` afterward, orphaning any slice that
 rejected.
 
 **A plan's intermediates are deleted as soon as its output is in place**, not at process
-exit. Peak temp usage is therefore one plan's working set rather than the whole run's. The
-largest single 4x intermediate in the corpus is about 300 MB as PNG; retaining all 2467
-upscaler outputs until exit would need roughly 169 GB. With 27 GiB free, deferring cleanup
-to exit fills the volume around the 400th upscale and then spends thirty more hours
-recording failures.
+exit, and a photo's enlarged frame is released as soon as the last plan drawing on it is
+filed. Peak temp usage is therefore one photo's working set rather than the whole run's.
+Retaining all 756 enlarged frames until exit would need about 114 GB; with about 28 GB free, that
+fills the volume roughly a fifth of the way in and then spends twenty more hours recording
+failures. The 300 Mpx fallback cap also bounds any single intermediate at about 311 MB — the
+largest whole frame in the corpus would otherwise be 622 Mpx.
 
 Per-image sequence, with the steps each band skips:
 
 ```
-source
-  |> normalize  whenever an upscale is needed, not only for unreadable formats:
+once per source photo, only if some plan of its needs the upscaler:
+  |> normalize  convert to PNG and force the pixels into sRGB:
                 sips --matchTo '/System/Library/ColorSync/Profiles/sRGB Profile.icc' \
                      -s format png
+  |> upscale    the WHOLE frame, once:
+                upscayl-bin -i in.png -o 4x.png -m <models> -n upscayl-standard-4x -s 4
+
+then once per output plan:
   |> crop       slice plans only, and always its own invocation:
                 sips -c H W --cropOffset Y X
-  |> upscale    bands 3 and 4 only:
-                upscayl-bin -i in.png -o 4x.png -m <models> -n upscayl-standard-4x -s 4
+                cut from the 4x frame for bands 3 and 4, from the source for bands
+                1 and 2 — so the rectangle is scaled by 4 on the upscaled path
   |> resize     bands 1 and 3 only
   +  encode     resize and encode are one invocation, with BOTH axes explicit:
                 sips --resampleHeightWidth <H> <W> \
@@ -244,9 +259,31 @@ Three measured constraints produced that block. Each fails silently if ignored:
 There is no copy-instead-of-encode shortcut for band 2. It would fire on 1 of 3441 corpus
 plans, and for a slice triple it would bypass `crop` and emit three identical full frames.
 
-**One upscayl process per image.** Directory mode would work, since the scale is always 4,
-but it buys only process startup against a 10-30 second run and costs per-image progress and
-failure isolation.
+**One upscale per source photo, not per output plan.** When any plan from a photo needs the
+upscaler, the *whole frame* is enlarged once and every slice is cut from that result. The
+alternative — enlarging each slice separately, which is what the legacy script did — enlarges
+the same pixels two or three times, because the three slices are overlapping windows on one
+photo. It also duplicates work across devices, since a photo cropped for desktop usually
+needs its whole frame for the phone pass anyway.
+
+Measured on the corpus: **2467 upscaler runs become 756, and 37.2 hours become 24.3.**
+Enlarging the whole frame is cheaper than enlarging its slices for every photo in the corpus;
+there is no case where per-slice wins.
+
+This also makes the three siblings consistent. Today each slice's overlapping region is
+enlarged independently and the results can differ slightly, so the three files being compared
+at sorting time are not strictly comparable. Cut from one enlargement, the overlaps are
+identical.
+
+**Two qualifications.** Above a 300 Mpx cap on the enlarged frame, the photo falls back to
+per-slice upscaling; 92 of the 756 whole-frame jobs exceed it. And this rests on the
+assumption that enlarging then cutting equals cutting then enlarging — true if the model has
+no whole-image context, which is how this architecture works, but **not measured**, because
+`upscayl-bin` is not installed on the author's machine. Section 13 gates it on a test.
+
+**One process per upscale.** Directory mode would work, since the scale is always 4, but it
+buys only process startup against a 10-30 second run and costs per-photo progress and failure
+isolation.
 
 **Outputs are staged as `<name>.partial` in the destination folder and renamed into place.**
 Staging beside the destination rather than in the temp tree makes the rename atomic whatever
@@ -268,15 +305,35 @@ import is measured in hours.
     below_target/
 ```
 
-Output name: `<basename>_<device>_<W>x<H>.<ext>`, where crop slices carry their position in
-the basename so the three cannot collide.
+Output name: `<basename>_<device>_<W>x<H>_<factor>.<ext>`, where crop slices carry their
+position in the basename so the three cannot collide.
 
 ```
-rowan_desktop_7680x4800.heic
-sunset_top_desktop_7680x4800.heic
-sunset_middle_desktop_7680x4800.heic
-moth_desktop_6400x4800.heic        (in below_target/)
+cliffs_desktop_7680x4800_native.heic     band 1, real pixels, downscaled
+lichen_desktop_6000x3750_native.heic     band 2, real pixels, untouched
+rowan_desktop_7680x4800_1.6x.heic        band 3, enlarged 4x then reduced
+sunset_top_desktop_7680x4800_2.6x.heic   band 3, a crop slice
+moth_desktop_6400x4800_4x.heic           band 4, in below_target/
 ```
+
+`<factor>` is the **net** enlargement in the finished file, to one decimal: `native` for
+bands 1 and 2, where the model never ran, and `I/d` for bands 3 and 4 — which is `4x` exactly
+in band 4 and between `1.5x` and `4x` in band 3. Net rather than the model's own factor,
+because a photo enlarged 4x and then reduced carries less invented detail into the result
+than one left at 4x.
+
+This exists because the dimensions alone cannot answer the question that matters at sorting
+time. 475 of the corpus's desktop outputs are all exactly 7680x4800, produced from sources
+ranging from 8000 px wide (every pixel real) to 1920 px wide (most pixels invented), and
+they would otherwise be indistinguishable by name. `below_target/` is worse: it holds 544
+untouched originals — the highest-fidelity output in the run — beside 324 that the model
+enlarged and that still fell short.
+
+The legacy script carried this information in the `_ml_res_lt_3x_` part of its filenames.
+It was dropped when the tiers collapsed, and the dimensions that replaced it answer a
+different question. Finder tags were considered as an alternative that keeps names short;
+rejected because tags do not survive a copy to another volume and are invisible from a
+terminal.
 
 ## 9. Output formats
 
@@ -441,6 +498,12 @@ moved rather than copied.
 - One test asserts that the dimensions in every output filename equal the dimensions `sips`
   reports for that file. This is the check that keeps section 3's no-drift claim honest.
 - One real-binary end-to-end test, marked and skipped by default.
+- **The whole-frame upscale is gated on an equivalence test**, also marked and run once
+  against the real binary: upscale a photo whole and cut a slice from the result; separately
+  cut the same slice from the source and upscale that; the two must match within a small
+  tolerance. Section 7's largest saving depends on this holding, and it is currently argued
+  from the model's architecture rather than measured. If it fails, section 7 reverts to
+  per-plan upscaling and the estimate returns to 37 hours.
 - The 894-image corpus at `~/Pictures/wallpaper` is a **read-only** validation asset.
   Validation runs copy a subset to scratch and always pass `--processing-dir`.
 
@@ -475,8 +538,11 @@ Recorded for provenance. A full `-b` run over the 894 readable images at
 | 4, 4x only | 324 |
 | 5, reject | 165 |
 | **outputs** | **3441** |
-| **upscaler runs** | **2467** |
-| **estimated upscale time** | **~37 hours** |
+| **upscaler runs** (one per source photo) | **756** |
+| **estimated upscale time** | **~24 hours** |
+
+Per-plan upscaling would instead need 2467 runs and about 37.2 hours; enlarging each photo's
+whole frame once accounts for the difference (section 7).
 
 The multiplication from 894 inputs to 3441 outputs is the crop-into-thirds behavior, which
 fires on 318 images in the desktop pass and 591 in the phone pass.
