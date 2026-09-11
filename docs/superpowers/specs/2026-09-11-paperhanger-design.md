@@ -492,6 +492,18 @@ moved rather than copied.
 
 ## 13. Testing
 
+Four tiers, and **only the first three are part of "implemented".** The full-corpus run is
+the author's acceptance pass, deliberately outside the definition of done:
+
+| Tier | What | Cost | When |
+|---|---|---|---|
+| 1 | generated fixtures, pure functions, stubbed upscaler | milliseconds | every commit |
+| 2 | 27 real corpus images, stubbed upscaler | seconds | every commit |
+| 3 | the same 27 images, real upscaler | ~25 min | once, before calling it done |
+| 4 | all 894 images | ~24 h | the author, when he chooses |
+
+### 13.1 Tiers 1 and 2
+
 - `test_classify`, `test_plan` — table-driven, no filesystem. Every band boundary gets an
   exact pair (`d*4 == I`, `d*4 == F`, `d == I`, `d == F`) and every ratio boundary gets one
   (`w*10 == h*16`, `w*3 == h*2`, `w == h`). `d*4 == I` must land in band 3, not band 4. The two threshold corrections in section 4.1
@@ -516,8 +528,48 @@ moved rather than copied.
   tolerance. Section 7's largest saving depends on this holding, and it is currently argued
   from the model's architecture rather than measured. If it fails, section 7 reverts to
   per-plan upscaling and the estimate returns to 37 hours.
-- The 894-image corpus at `~/Pictures/wallpaper` is a **read-only** validation asset.
-  Validation runs copy a subset to scratch and always pass `--processing-dir`.
+### 13.2 The 27-image sample
+
+The corpus at `~/Pictures/wallpaper` is a **read-only** asset. Every tier that uses it copies
+files to scratch and passes `--processing-dir`; nothing writes to the corpus, and nothing
+relies on the originals still being there afterward.
+
+The images themselves are not committed — per `CLAUDE.md`, wallpapers stay out of this repo.
+Instead `tests/corpus_sample.txt` holds 27 filenames, and the tests that need them copy from
+the corpus at run time and **skip cleanly when it is absent**, so the suite still passes on a
+machine that has never seen these photos.
+
+The 27 were chosen to cover every coverage tag the corpus contains — 36 of them: each of the
+six routing branches paired with each band it actually reaches, each input format, and each
+colour-profile class. They produce 102 outputs and 19 upscaler runs. Specific reasons some
+are in the list:
+
+| Image | Why |
+|---|---|
+| `snowy_forest_landscape_9522.jpg` | **is actually a WebP.** A real file whose extension lies — the case section 12's probe rule exists for |
+| `moss_with_pine_needles_5324.jpg` | ProPhoto RGB, the widest gamut present; the colour-conversion case in section 7 |
+| `red_tulips_with_mountain_background_4338.jpg` | Adobe RGB |
+| `katana_with_tag_2369.jpg` | greyscale profile |
+| `dark_stones_7236.png`, `blade_runner_2049_concept_poseter_.webp` | no embedded profile at all |
+| `green_grass_texture_3997.png` | 9072x12096; the only sample image that trips the 300 Mpx fallback |
+| `purple_nebula_glow_0312_x.heic` | HEIC already at 7680x4800, so band 1 and 2 with no conversion |
+| `foggy_forest_path_7098.JPG` | 620x1102; the only band 5 rejection in the sample |
+| `cityscape_illustration_4562.gif` | the one GIF; readable by `sips`, not by `upscayl-bin` |
+| `man_with_car_in_fog_1158.jpg` | 8392x4721, above the desktop ideal, so a pure downscale |
+
+Tier 2 runs these through the real `sips` with the upscaler stubbed, which is where almost
+all of the value is: it exercises format detection, colour conversion, crop geometry, naming
+and filing against genuinely messy input in seconds. Tier 3 repeats it with the real binary
+to confirm the two things a stub cannot check — that `upscayl-bin` accepts what we hand it,
+and the whole-frame equivalence this section gates section 7 on.
+
+### 13.3 What the full corpus run is for
+
+Tier 4 is **not** a test and does not gate implementation. It is the author running the
+finished tool over all 894 images once, on purpose, and looking at the results. Its value is
+in the things no assertion covers — whether the crops are worth keeping, whether HEIC 80 was
+the right call, whether `below_target/` is a useful distinction in practice. Pinning it to
+"done" would mean a 24-hour wait on every change, and would still not answer those questions.
 
 ## 14. Out of scope
 
