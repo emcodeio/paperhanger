@@ -1,0 +1,18 @@
+# macOS
+.DS_Store
+
+# superpowers plugin scratch (subagent-driven-development ledger, briefs, review packages)
+.superpowers/
+
+# git worktrees created during plan execution
+.worktrees/
+
+# Python
+__pycache__/
+.venv/
+*.pyc
+
+# Downloaded upscaler binary and model files are not committed.
+# The exact directory is a design decision; uncomment once settled.
+# vendor/
+# models/
