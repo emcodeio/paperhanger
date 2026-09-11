@@ -6,6 +6,9 @@
 
 # git worktrees created during plan execution
 .worktrees/
+# ...and where the native worktree tool puts them. Not all of .claude/:
+# settings.json is meant to be committed.
+.claude/worktrees/
 
 # Python
 __pycache__/
