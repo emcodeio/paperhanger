@@ -85,8 +85,8 @@ Aspect-ratio thresholds are integer comparisons. No floats, no `bc`, no rounding
 | desktop, by width | `w > h and w*10 <= h*16` | width | 7680 | 5120 |
 | desktop, by height | `w*10 > h*16` | height | 4800 | 3200 |
 | desktop, crop | `w <= h` | — | — | — |
-| phone, by height | `w < h and w*3 >= h*2` | height | 3840 | 2880 |
-| phone, by width | `w*3 < h*2` | width | 2560 | 1920 |
+| phone, by height | `w < h and w*3 >= h*2` | height | 4320 | 2880 |
+| phone, by width | `w*3 < h*2` | width | 2880 | 1920 |
 | phone, crop | `w >= h` | — | — | — |
 
 Each set of three is exhaustive and disjoint.
@@ -114,10 +114,27 @@ revived. Measured against current hardware:
 - Perspective Zoom renders wallpaper at roughly 1.1x and crops ~100-200 px per edge. It is
   still in use: iOS 26's Spatial Scenes require it to be enabled.
 
-An ideal of 3840 is therefore 1.46x the Pro panel's long edge, covering a future panel a
-third larger with parallax headroom intact. 7680 would be 2.9x the panel, which iOS would
-simply downsample. The floor of 2880 is the panel plus parallax headroom (~2884), and 1920
-is the matching value on the width axis.
+The two phone numbers are therefore derived from different things, in this order:
+
+**The floor comes from the hardware.** 2880 is the Pro panel's long edge plus parallax
+headroom (~2884 needed), and 1920 is the matching value on the width axis, the two being a
+2:3 frame. At or above that, an image fills the panel with room for Perspective Zoom to
+move, so it is worth keeping as-is.
+
+**The ideal is the floor times 1.5**, which is the enlargement rule in section 5, giving
+4320 x 2880. Setting it this way makes `I/F` exactly 1.5 on all four device-axis pairs
+rather than 1.5 on desktop and 1.33 on phone, so "needs less than 1.5x enlargement" and "is
+at or above the floor" are one condition everywhere instead of nearly everywhere.
+
+4320 is 1.65x the Pro panel's long edge — more headroom than any announced phone needs, and
+detail no current iPhone will display. Two measurements justify carrying it anyway: it costs
+**no additional upscaler time at all** (24.3 hours either way, because the model's cost
+scales with the size of the source and not the target), and it moves 163 more outputs into
+band 2, where they keep their real pixels instead of being reduced to 3840. The only price
+is about 27% more pixels per phone file.
+
+The legacy 7680 would have been 2.9x the panel, which iOS would simply downsample. That is
+why those constants are not revived even though the ideal moved up.
 
 ## 5. Bands
 
@@ -136,16 +153,11 @@ Two rules govern this table:
 **No image is ever enlarged except by the ML model.** There is no non-AI upsampling path.
 `sips` only ever reduces.
 
-**No image is enlarged by less than `I/F`.** An image already at or above its floor keeps
-its real pixels rather than gaining invented ones. The cutoff needs no separate constant
-because it *is* the floor: `I/F` is exactly 1.5 on both desktop axes and 1.33 on both phone
-axes. Band 2 is that case, and it does no resampling at all.
-
-The phone ratio is 1.33 rather than 1.5 because the phone floors in section 4.2 are derived
-from panel size plus parallax headroom, not chosen as an enlargement ratio. A phone source
-just under its floor is therefore enlarged by about 1.33x. Making phone a true 1.5x cutoff
-would require a height floor of 2560, which is below the iPhone 18 Pro panel's 2622 long
-edge; the panel-derived floor wins and the ratio follows from it.
+**No image is enlarged by less than 1.5x.** An image already at or above its floor keeps its
+real pixels rather than gaining invented ones. The cutoff needs no separate constant because
+it *is* the floor: `I/F` is exactly 1.5 on all four device-axis pairs, by construction —
+section 4.2 sets each phone ideal at its floor times 1.5 for precisely this reason. Band 2
+is that case, and it does no resampling at all.
 
 Each row's condition is exhaustive and disjoint, so no evaluation order is implied and each
 band is testable in isolation.
@@ -155,7 +167,7 @@ pixels, so the images needing the least enlargement cost the most to run: withou
 full run over the author's corpus is 59 hours, 40% of it spent on images that are already
 at or above their floor.
 With it, 37 hours — and 24 once the upscaler runs once per photo rather than once per
-output (section 7). 544 of the 3441 outputs are produced at native resolution, having been
+output (section 7). 707 of the 3441 outputs are produced at native resolution, having been
 resampled not at all.
 
 The legacy `lt_3x` / `3x` / `4x` tiers and the 4.25x acceptance ceiling do not survive.
@@ -325,8 +337,8 @@ than one left at 4x.
 This exists because the dimensions alone cannot answer the question that matters at sorting
 time. 475 of the corpus's desktop outputs are all exactly 7680x4800, produced from sources
 ranging from 8000 px wide (every pixel real) to 1920 px wide (most pixels invented), and
-they would otherwise be indistinguishable by name. `below_target/` is worse: it holds 544
-untouched originals — the highest-fidelity output in the run — beside 324 that the model
+they would otherwise be indistinguishable by name. `below_target/` is worse: it holds 707
+untouched originals — the highest-fidelity output in the run — beside 351 that the model
 enlarged and that still fell short.
 
 The legacy script carried this information in the `_ml_res_lt_3x_` part of its filenames.
@@ -532,10 +544,10 @@ Recorded for provenance. A full `-b` run over the 894 readable images at
 
 | Band | Count |
 |---|---|
-| 1, downscale to ideal | 430 |
-| 2, native, no resampling | 544 |
-| 3, 4x then downscale | 2143 |
-| 4, 4x only | 324 |
+| 1, downscale to ideal | 267 |
+| 2, native, no resampling | 707 |
+| 3, 4x then downscale | 2116 |
+| 4, 4x only | 351 |
 | 5, reject | 165 |
 | **outputs** | **3441** |
 | **upscaler runs** (one per source photo) | **756** |
