@@ -1,0 +1,126 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>AMApplicationBuild</key>
+	<string>523</string>
+	<key>AMApplicationVersion</key>
+	<string>2.10</string>
+	<key>AMDocumentVersion</key>
+	<string>2</string>
+	<key>actions</key>
+	<array>
+		<dict>
+			<key>action</key>
+			<dict>
+				<key>AMAccepts</key>
+				<dict>
+					<key>Container</key>
+					<string>List</string>
+					<key>Optional</key>
+					<true/>
+					<key>Types</key>
+					<array>
+						<string>public.image</string>
+						<string>public.item</string>
+					</array>
+				</dict>
+				<key>AMActionVersion</key>
+				<string>1.0</string>
+				<key>AMApplication</key>
+				<array>
+					<string>Pixelmator Pro</string>
+				</array>
+				<key>AMParameterProperties</key>
+				<dict>
+					<key>format</key>
+					<dict/>
+				</dict>
+				<key>AMProvides</key>
+				<dict>
+					<key>Container</key>
+					<string>List</string>
+					<key>Types</key>
+					<array>
+						<string>public.image</string>
+					</array>
+				</dict>
+				<key>AMRequiredResources</key>
+				<array/>
+				<key>ActionBundlePath</key>
+				<string>/Applications/Pixelmator Pro.app/Contents/Library/Automator/Change Type of Images.action</string>
+				<key>ActionName</key>
+				<string>Change Type of Images</string>
+				<key>ActionParameters</key>
+				<dict>
+					<key>format</key>
+					<string>public.heic</string>
+				</dict>
+				<key>BundleIdentifier</key>
+				<string>com.pixelmatorteam.pixelmator.x.automator.change-type-of-images</string>
+				<key>CFBundleVersion</key>
+				<string>1.0</string>
+				<key>CanShowSelectedItemsWhenRun</key>
+				<true/>
+				<key>CanShowWhenRun</key>
+				<true/>
+				<key>Category</key>
+				<array>
+					<string>AMCategoryPhotos</string>
+				</array>
+				<key>Class Name</key>
+				<string>AMRemoteAction</string>
+				<key>InputUUID</key>
+				<string>B8CEAB62-6D85-4543-9F55-97C4AA986F44</string>
+				<key>Keywords</key>
+				<array>
+					<string>pxd</string>
+					<string>psd</string>
+					<string>pxm</string>
+				</array>
+				<key>OutputUUID</key>
+				<string>3499C8DA-A2B9-436F-B679-428C925D4585</string>
+				<key>UUID</key>
+				<string>20891155-2FFF-4AC0-B2EF-D0EE3C9B32CD</string>
+				<key>UnlocalizedApplications</key>
+				<array>
+					<string>Pixelmator Pro</string>
+				</array>
+				<key>arguments</key>
+				<dict>
+					<key>0</key>
+					<dict>
+						<key>default value</key>
+						<string>com.pixelmatorteam.pixelmator.document.binary</string>
+						<key>name</key>
+						<string>format</string>
+						<key>required</key>
+						<string>0</string>
+						<key>type</key>
+						<string>0</string>
+						<key>uuid</key>
+						<string>0</string>
+					</dict>
+				</dict>
+				<key>conversionLabel</key>
+				<integer>0</integer>
+				<key>isViewVisible</key>
+				<integer>1</integer>
+				<key>location</key>
+				<string>271.750000:105.000000</string>
+				<key>nibPath</key>
+				<string>/Applications/Pixelmator Pro.app/Contents/Library/Automator/Change Type of Images.action/Contents/Resources/Base.lproj/Change Type of Images.nib</string>
+			</dict>
+			<key>isViewVisible</key>
+			<integer>1</integer>
+		</dict>
+	</array>
+	<key>connectors</key>
+	<dict/>
+	<key>workflowMetaData</key>
+	<dict>
+		<key>workflowTypeIdentifier</key>
+		<string>com.apple.Automator.workflow</string>
+	</dict>
+</dict>
+</plist>
