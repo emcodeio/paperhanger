@@ -334,31 +334,52 @@ The second qualification: this rests on enlarging then cutting being as good as 
 enlarging. **Measured against ground truth, it is — by a margin too small to matter, in the
 design's favour.** Section 13 records both measurements.
 
-Scored against original photograph pixels, on the 12 sample images that can supply a
-2048x2988 ground-truth window (`tests/test_real_upscaler.py`). The truth window is downscaled
-4x by `sips` to make the model's input, both arms enlarge it back, and each is scored against
-the truth slice cut from the untouched original — the protocol section 2 of the research
-document used to choose this upscaler:
+Scored against original photograph pixels (`tests/test_real_upscaler.py`). A ground-truth
+window is taken at native resolution, downscaled 4x by `sips` to make the model's input, and
+both arms enlarge it back; each is then scored against the truth slice cut from the untouched
+window — the protocol section 6 of the research document used to choose this upscaler. Two
+window sizes and both slice positions, **56 measurements in all**:
 
-| | whole-then-cut vs per-slice, against truth |
-|---|---|
-| PSNR | whole-frame closer on **11 of 12**; median **+0.02 dB**, best +0.14, worst −0.05 |
-| DSSIM | whole-frame closer on **9 of 12**; median **−0.00050** (lower is better) |
+| window | images | slice | PSNR: whole-frame closer | median Δ | DSSIM: whole-frame closer |
+|---|---|---|---|---|---|
+| 2048x2988 | 12 | middle | 11 of 12 | +0.023 dB | 9 of 12 |
+| 2048x2988 | 12 | top | 11 of 12 | +0.021 dB | 10 of 12 |
+| 1440x2160 | 16 | middle | 13 of 16 | +0.037 dB | 14 of 16 |
+| 1440x2160 | 16 | top | 15 of 16 | +0.020 dB | 14 of 16 |
+| **overall** | | | **50 of 56** | **+0.025 dB** | **47 of 56** |
 
-The margin is the point, and it is nearly zero. On the widest-gap image the two arms differ
-from *each other* by 43.18 dB — a mean absolute difference of 0.71 levels — while each differs
-from the *truth* by about 30 dB, a mean of 4.53 and 4.63 levels respectively. The arms agree
-with one another roughly six times more closely than either agrees with the truth, and their
-error maps are visually indistinguishable: both miss in the same places, on the same rock
-texture. Whatever this upscaler gets wrong at 4x, it gets wrong identically whether it saw the
-whole frame or one slice of it. **Choosing the whole frame costs no quality, and section 7's
-saving is accepted on that evidence rather than on the architecture argument it started with.**
+Extremes across all 56: the largest margin for whole-frame is +0.54 dB, the largest against it
+−0.24 dB.
 
-Two limits on the claim. The 2048x2988 window is the largest at least twelve sample images
-can supply, and the height requirement excludes both of the photographs that scored lowest in
-the arms-against-each-other measurement below, so those two are untested against truth. And
-the absolute reconstruction quality is unremarkable — 19.6 to 35.4 dB against truth, which is
-4x enlargement being hard, not a fact about which arm was used.
+The margin is the point, and it is nearly zero. On the first window's widest-gap image the two
+arms differ from *each other* by 43.18 dB — a mean absolute difference of 0.71 levels — while
+each differs from the *truth* by about 30 dB, a mean of 4.53 and 4.63 levels respectively. The
+arms agree with one another roughly six times more closely than either agrees with the truth,
+and their error maps are visually indistinguishable: both miss in the same places, on the same
+rock texture. Whatever this upscaler gets wrong at 4x, it gets wrong almost identically whether
+it saw the whole frame or one slice of it. **Choosing the whole frame costs no quality, and
+section 7's saving is accepted on that evidence rather than on the architecture argument it
+started with.**
+
+Two things the second window and the top slice were added to check, and what they found. The
+1440x2160 window admits four more photographs, **including both of the two that disagreed most
+between the arms** — `mountain_lake_reflection_4788.jpg`, where whole-frame wins by +0.18 and
++0.20 dB, and `snowy_forest_landscape_9522.jpg`, the one image where per-slice wins by a
+visible margin at −0.10 dB on the middle slice and −0.01 on the top. Neither moves the
+aggregate. A 360x540 model input is also a smaller regime than 512x747, and it widens the
+spread a little (−0.24 to +0.42 against −0.05 to +0.54) without shifting its centre.
+
+The top slice was added because it is the boundary case: its origin is `0,0`, so every cut of
+it goes through `crop`'s pad-and-shift path, and whole-frame's slice edge is interior to its
+frame where per-slice's is a real image boundary. The prediction was that per-slice should win
+there if anywhere. **It does not** — whole-frame wins the top slice 11 of 12 and 15 of 16, its
+best single margin anywhere. Nor is the advantage located at the boundary: on the widest-gap
+top slice the outermost 8 rows show the two arms equally distant from truth, at 2.0 levels
+each, and per-slice's whole deficit is spread across the interior at 0.16 levels a row. The
+edge is not where this lives.
+
+One limit remains: absolute reconstruction quality is unremarkable — 18.4 to 40.1 dB against
+truth across the 56 — which is 4x enlargement being hard, not a fact about which arm was used.
 
 The earlier measurement, kept because it is what the gate originally asked and because it
 explains why the question had to be re-asked. It scores the two arms **against each other**,
@@ -654,15 +675,22 @@ the author's acceptance pass, deliberately outside the definition of done:
   reports for that file. This is the check that keeps section 3's no-drift claim honest.
 - One real-binary end-to-end test, marked and skipped by default.
 - **The whole-frame upscale is settled against ground truth**, marked and deselected by
-  default. Take a 2048x2988 window of original pixels, downscale it 4x with `sips` to make the
-  model's input, enlarge it back both ways, and score each arm against the truth slice cut
-  from the untouched window. Whole-frame is closer on **11 of 12 images by PSNR** (median
-  +0.02 dB) and **9 of 12 by DSSIM**, and the gap is negligible beside the model's own
-  reconstruction error — the arms sit 43.18 dB from each other where each sits about 30 dB
-  from the truth. Both metrics are reported because the research document warns that PSNR
-  inverts the visual ranking for this upscaler; answering a perceptual question with PSNR
-  alone is the mistake that cost this task two review rounds. Section 7's saving is accepted
-  on this.
+  default. Take a window of original pixels, downscale it 4x with `sips` to make the model's
+  input, enlarge it back both ways, and score each arm against the truth slice cut from the
+  untouched window. Run at two window sizes and both slice positions: **56 measurements**, of
+  which whole-frame is closer on **50 by PSNR** (pooled median +0.025 dB) and **47 by DSSIM**.
+  The gap is negligible beside the model's own reconstruction error — the arms sit 43.18 dB
+  from each other where each sits about 30 dB from the truth. Both metrics are reported
+  because the research document warns that PSNR inverts the visual ranking for this upscaler;
+  answering a perceptual question with PSNR alone is the mistake that cost this task two
+  review rounds. Section 7's saving is accepted on this.
+- **Two windows and two slice positions, each for a reason.** The 2048x2988 window is the
+  largest twelve sample photographs can supply; the 1440x2160 window admits sixteen, including
+  the two that disagreed most between the arms and that the larger window cannot fit. The
+  middle third sits in the interior of the 4x frame; the top third sits at `0,0`, which is both
+  the offset `sips` silently mis-crops and the boundary case where per-slice upscaling has no
+  context beyond the edge. Neither addition moves the conclusion, and the boundary case goes
+  the opposite way from the prediction — whole-frame wins the top slice 11 of 12 and 15 of 16.
 - **The older arms-against-each-other measurement is kept, and asserts no threshold.** It
   spans **33.43 to 52.61 dB, median 42.86** over 18 real photographs — 12 above the
   once-proposed 40 dB bar, 4 in the 35-40 dB band, 2 below the 35 dB floor. That spread is

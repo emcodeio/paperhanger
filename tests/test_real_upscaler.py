@@ -575,29 +575,43 @@ def test_sample_runs_with_the_real_binary(tmp_path, real_toolchain):
 # native pixels. Both G axes are divisible by four so that S = G/4 is exact,
 # and the middle third of S scales to 2048x1280 -- 16:10 to the digit, which is
 # a real desktop wallpaper shape rather than an approximation of one.
-GT_WINDOW_WIDTH, GT_WINDOW_HEIGHT = 2048, 2988
-GT_SOURCE_WIDTH, GT_SOURCE_HEIGHT = 512, 747
+
+# Two windows, and the model input each reduces to. Both are measured, because
+# they are different regimes and the smaller one is not a subset of the
+# question the larger one answers.
+#
+#   LARGE  2048x2988, chosen by sweeping window ratios 1.25-3.2 for the largest
+#          window at least TWELVE sample photographs can supply from native
+#          pixels. One pixel bigger on either axis and only eleven qualify.
+#   SMALL  1440x2160, which sixteen can supply -- including the two photographs
+#          that disagreed MOST between the arms and that the large window
+#          excludes, both being 3840x2160 and so unable to give up 2988 rows.
+#
+# Both G axes divide by four so S = G/4 is exact, and in both the middle third
+# of S scales to a true 16:10 rectangle -- 2048x1280 and 1440x900, real desktop
+# wallpaper shapes rather than approximations of one.
+GT_LARGE = ((2048, 2988), (512, 747))
+GT_SMALL = ((1440, 2160), (360, 540))
+
+# Both slice positions, because they are not the same test. The MIDDLE third
+# has a non-zero origin and sits in the interior of the 4x frame. The TOP third
+# sits at 0,0 -- the offset `sips` silently replaces with a centred crop, so
+# every cut of it goes the pad-and-shift way -- and it is the boundary case:
+# arm A's slice edge is interior to its frame, where the model had context on
+# both sides of it, while arm B's is a real image boundary, where it had none.
+# If the two arms diverge in quality anywhere, it should be here.
+GT_SLICES = ((1, "middle"), (0, "top"))
 
 GT_ARTIFACTS_ENV = "PAPERHANGER_GROUND_TRUTH_ARTIFACTS"
 
 
-def ground_truth_selection() -> list:
-    """The twelve, by the same shape of rule as `selection()`.
+def ground_truth_selection(window_width: int, window_height: int) -> list:
+    """Sample images whose NATIVE pixels can supply the ground-truth window.
 
-    Every name in `tests/corpus_sample.txt` whose NATIVE pixels can host the
-    2048x2988 ground-truth window, in manifest order. Exactly twelve qualify,
-    which is what pins the window size: one pixel larger on either axis and it
-    would be eleven.
-
-    Note what the size rule costs, because it is not nothing. The two
-    photographs that scored worst in the arms-against-each-other measurement --
-    `snowy_forest_landscape_9522.jpg` at 33.43 dB and
-    `mountain_lake_reflection_4788.jpg` at 35.19 -- are both 3840x2160, and a
-    2988-row window does not fit in 2160 rows. So this experiment cannot speak
-    to either of them. A 1440x2160 window would admit sixteen images including
-    both, at the cost of a 360x540 model input; that trade was decided the
-    other way, toward the largest window, and the exclusion is a real limit on
-    what these twelve can conclude.
+    The same shape of rule as `selection()`: a deterministic filter over
+    `tests/corpus_sample.txt` in manifest order, so the set is reproducible and
+    is not one I could have curated toward an answer. Twelve qualify at
+    2048x2988; sixteen at 1440x2160.
     """
     chosen = []
     for name in sample_names():
@@ -605,25 +619,26 @@ def ground_truth_selection() -> list:
         if measured is None:
             continue
         width, height, _fmt = measured
-        if width >= GT_WINDOW_WIDTH and height >= GT_WINDOW_HEIGHT:
+        if width >= window_width and height >= window_height:
             chosen.append(name)
     return chosen
 
 
-def _ground_truth_window(source: Path, out_png: Path) -> Path:
-    """A centred 2048x2988 window of ORIGINAL pixels, normalized to sRGB PNG.
+def _ground_truth_window(source: Path, out_png: Path,
+                         window_width: int, window_height: int) -> Path:
+    """A centred window of ORIGINAL pixels, normalized to sRGB PNG.
 
-    Normalized here, once, before anything derives from it: S, both arms and T
-    all descend from this file, so the colour conversion happens on the truth
-    and never between the truth and the thing being compared to it. That is
-    also the order `execute.py` uses -- normalize the source, then enlarge.
+    Normalized here, once, before anything derives from it: S, both arms and
+    the truth slice all descend from this file, so the colour conversion
+    happens on the truth and never between the truth and the thing being
+    compared against it. That is also the order `execute.py` uses -- normalize
+    the source, then enlarge.
     """
     measured = imaging.probe(source)
     assert measured is not None, f"{source.name} is not a readable image"
     width, height, _fmt = measured
-    rect = geometry.Rect((width - GT_WINDOW_WIDTH) // 2,
-                         (height - GT_WINDOW_HEIGHT) // 2,
-                         GT_WINDOW_WIDTH, GT_WINDOW_HEIGHT)
+    rect = geometry.Rect((width - window_width) // 2, (height - window_height) // 2,
+                         window_width, window_height)
     cut = out_png.with_name(out_png.name + ".cut.png")
     try:
         imaging.crop(source, rect, cut)
@@ -633,167 +648,174 @@ def _ground_truth_window(source: Path, out_png: Path) -> Path:
     return out_png
 
 
-def _against_truth(window: Path, binary, models, workdir: Path):
-    """Build S, A, B and T from one ground-truth window and score both arms.
+def _score_slice(window: Path, small: Path, frame: Path, which: int,
+                 source_size, binary, models, workdir: Path, tag: str):
+    """Score both arms against truth at one slice position.
 
-    Returns a dict of the four scores plus the three paths worth keeping.
+    `frame` is arm A's whole-frame enlargement, built once per image and shared
+    across slice positions. It is the expensive step, so reusing it is what
+    makes measuring the second position nearly free.
+
+    ONE rect: `rect` cuts arm B out of S, and `rect.scaled(4)` cuts arm A out
+    of the 4x frame AND the truth out of G. The factor of four is construction,
+    not coincidence, since G is exactly 4x S on both axes. Every cut goes
+    through `imaging.crop` -- the top slice's 0,0 origin would otherwise hand
+    back a centred crop at exactly the right dimensions, with no error anywhere.
     """
-    # S: the model's input, a real 4x reduction of the truth. Both axes passed
-    # explicitly -- imaging fact 3; a single --resample flag derives the other
-    # axis and rounds it inconsistently.
-    small = workdir / "small_source.png"
-    imaging.resize_and_encode(window, GT_SOURCE_WIDTH, GT_SOURCE_HEIGHT,
-                              "png", None, small, resize=True)
-
-    # ONE rect. `rect` cuts from S; `scaled` cuts from the 4x frame AND from G.
-    rect = geometry.horizontal_thirds(GT_SOURCE_WIDTH, GT_SOURCE_HEIGHT)[1]
+    rect = geometry.horizontal_thirds(*source_size)[which]
     scaled = rect.scaled(4)
 
-    # T: truth, cut from the original pixels. Never a model output.
-    truth = workdir / "truth_slice.png"
-    imaging.crop(window, scaled, truth)
+    truth = workdir / f"truth_{tag}.png"
+    arm_a = workdir / f"arm_a_{tag}.png"
+    arm_b = workdir / f"arm_b_{tag}.png"
+    small_slice = workdir / f"small_slice_{tag}.png"
 
-    # A: whole-then-cut.
-    frame = workdir / "frame_4x.png"
-    arm_a = workdir / "arm_a_whole_then_cut.png"
+    imaging.crop(window, scaled, truth)          # truth: original pixels only
+    imaging.crop(frame, scaled, arm_a)           # arm A: whole-then-cut
     try:
-        imaging.upscale(small, frame, binary, models)
-        imaging.crop(frame, scaled, arm_a)
-    finally:
-        frame.unlink(missing_ok=True)
-
-    # B: cut-then-upscale.
-    small_slice = workdir / "small_slice.png"
-    arm_b = workdir / "arm_b_cut_then_upscale.png"
-    try:
-        imaging.crop(small, rect, small_slice)
+        imaging.crop(small, rect, small_slice)   # arm B: cut-then-upscale
         imaging.upscale(small_slice, arm_b, binary, models)
     finally:
         small_slice.unlink(missing_ok=True)
-        small.unlink(missing_ok=True)
 
     dimensions = {imaging.probe(p)[:2] for p in (arm_a, arm_b, truth)}
-    assert dimensions == {(GT_WINDOW_WIDTH, scaled.height)}, (
-        f"A, B and T must be the same shape to be comparable; got {dimensions}"
+    assert dimensions == {(scaled.width, scaled.height)}, (
+        f"A, B and T must share a shape to be comparable; got {dimensions}"
     )
-
     return {
         "psnr_a": _compare(arm_a, truth, "PSNR"),
         "psnr_b": _compare(arm_b, truth, "PSNR"),
         "dssim_a": _compare(arm_a, truth, "DSSIM"),
         "dssim_b": _compare(arm_b, truth, "DSSIM"),
-        "arm_a": arm_a,
-        "arm_b": arm_b,
-        "truth": truth,
-        "dimensions": (GT_WINDOW_WIDTH, scaled.height),
+        "arm_a": arm_a, "arm_b": arm_b, "truth": truth,
+        "dimensions": (scaled.width, scaled.height),
     }
 
 
-@pytest.mark.real_upscaler
-def test_both_arms_against_ground_truth(tmp_path, real_toolchain):
-    """THE GATE, in its settled form: which arm is closer to the truth.
+def _ground_truth_pass(inbox: Path, geometry_pair, binary, models,
+                       workdir: Path, artifacts: Path):
+    """Both arms against truth, every qualifying image, both slice positions.
 
-    Asserts the invariants only -- A, B and T share a shape, and every image
-    yields four scores. Which arm wins, and whether the gap means anything, is
-    reported rather than adjudicated here; `paperhanger/execute.py` is not
-    touched either way.
+    Returns the rows. Prints the table and the aggregate; asserts nothing about
+    which arm wins -- that is reported for a human, here as everywhere in this
+    file.
     """
-    binary, models = real_toolchain
-    inbox = copy_sample(corpus_or_skip(), tmp_path / "inbox")
-    names = ground_truth_selection()
+    (window_w, window_h), source_size = geometry_pair
+    label = f"{window_w}x{window_h}"
+    names = ground_truth_selection(window_w, window_h)
     assert len(names) >= 12, (
-        f"only {len(names)} of the sample can supply a "
-        f"{GT_WINDOW_WIDTH}x{GT_WINDOW_HEIGHT} ground-truth window"
+        f"only {len(names)} of the sample can supply a {label} ground-truth window"
     )
 
-    processing = tmp_path / "processing"
-    artifacts = Path(os.environ.get(GT_ARTIFACTS_ENV,
-                                    processing / "ground_truth_worst_case"))
-    artifacts.mkdir(parents=True, exist_ok=True)
-    workdir = tmp_path / "gt_work"
-    workdir.mkdir()
-
-    rect = geometry.horizontal_thirds(GT_SOURCE_WIDTH, GT_SOURCE_HEIGHT)[1]
-    scaled = rect.scaled(4)
-    print(f"\nground truth G {GT_WINDOW_WIDTH}x{GT_WINDOW_HEIGHT} (native pixels, "
-          f"centred, normalized to sRGB PNG)")
-    print(f"model input  S {GT_SOURCE_WIDTH}x{GT_SOURCE_HEIGHT} (G downscaled 4x by sips)")
-    print(f"one rect: {rect.width}x{rect.height}+{rect.x}+{rect.y} cuts B from S; "
-          f"{scaled.width}x{scaled.height}+{scaled.x}+{scaled.y} cuts A from the "
-          f"4x frame and T from G")
-    print(f"{len(names)} images. PSNR higher is better; DSSIM LOWER is better.\n")
-    header = (f"{'PSNR(A,T)':>10} {'PSNR(B,T)':>10} {'delta':>8}   "
-              f"{'DSSIM(A,T)':>11} {'DSSIM(B,T)':>11} {'delta':>10}   image")
-    print(header)
+    print(f"\n{'=' * 92}")
+    print(f"ground truth G {label} (native pixels, centred, normalized to sRGB PNG)")
+    print(f"model input  S {source_size[0]}x{source_size[1]} (G downscaled 4x by sips)")
+    for which, slice_name in GT_SLICES:
+        rect = geometry.horizontal_thirds(*source_size)[which]
+        scaled = rect.scaled(4)
+        print(f"  {slice_name:<6} rect {rect.width}x{rect.height}+{rect.x}+{rect.y} "
+              f"cuts B from S; {scaled.width}x{scaled.height}+{scaled.x}+{scaled.y} "
+              f"cuts A from the 4x frame and T from G")
+    print(f"{len(names)} images x {len(GT_SLICES)} slice positions. "
+          f"PSNR higher is better; DSSIM LOWER is better.\n")
+    print(f"{'slice':<7}{'PSNR(A,T)':>10} {'PSNR(B,T)':>10} {'delta':>8}   "
+          f"{'DSSIM(A,T)':>11} {'DSSIM(B,T)':>11} {'delta':>10}   image")
 
     rows = []
-    started = time.monotonic()
+    widest = 0.0
     for name in names:
-        window = _ground_truth_window(inbox / name, workdir / f"gt_{name}.png")
+        window = _ground_truth_window(inbox / name, workdir / f"gt_{name}.png",
+                                      window_w, window_h)
+        small = workdir / "small_source.png"
+        frame = workdir / "frame_4x.png"
         try:
-            scored = _against_truth(window, binary, models, workdir)
+            # S: the model's input, a real 4x reduction of the truth. Both axes
+            # explicit -- imaging fact 3, a single --resample flag derives the
+            # other axis and rounds it inconsistently.
+            imaging.resize_and_encode(window, source_size[0], source_size[1],
+                                      "png", None, small, resize=True)
+            imaging.upscale(small, frame, binary, models)
+            for which, slice_name in GT_SLICES:
+                scored = _score_slice(window, small, frame, which, source_size,
+                                      binary, models, workdir,
+                                      f"{slice_name}_{name}")
+                psnr_delta = scored["psnr_a"] - scored["psnr_b"]
+                dssim_delta = scored["dssim_a"] - scored["dssim_b"]
+                rows.append({"name": name, "slice": slice_name,
+                             "psnr_a": scored["psnr_a"], "psnr_b": scored["psnr_b"],
+                             "psnr_delta": psnr_delta,
+                             "dssim_a": scored["dssim_a"], "dssim_b": scored["dssim_b"],
+                             "dssim_delta": dssim_delta,
+                             "dimensions": scored["dimensions"]})
+                print(f"{slice_name:<7}{scored['psnr_a']:10.2f} {scored['psnr_b']:10.2f} "
+                      f"{psnr_delta:+8.2f}   {scored['dssim_a']:11.5f} "
+                      f"{scored['dssim_b']:11.5f} {dssim_delta:+10.5f}   {name}")
+                if abs(psnr_delta) >= widest:
+                    widest = abs(psnr_delta)
+                    _preserve_ground_truth(scored, artifacts, name, slice_name,
+                                           label, psnr_delta)
+                for key in ("arm_a", "arm_b", "truth"):
+                    scored[key].unlink(missing_ok=True)
         finally:
-            window.unlink(missing_ok=True)
+            for path in (window, small, frame):
+                path.unlink(missing_ok=True)
 
-        psnr_delta = scored["psnr_a"] - scored["psnr_b"]
-        dssim_delta = scored["dssim_a"] - scored["dssim_b"]
-        rows.append((name, scored["psnr_a"], scored["psnr_b"], psnr_delta,
-                     scored["dssim_a"], scored["dssim_b"], dssim_delta,
-                     scored["dimensions"]))
-        print(f"{scored['psnr_a']:10.2f} {scored['psnr_b']:10.2f} "
-              f"{psnr_delta:+8.2f}   {scored['dssim_a']:11.5f} "
-              f"{scored['dssim_b']:11.5f} {dssim_delta:+10.5f}   {name}")
-
-        if abs(psnr_delta) >= max(abs(r[3]) for r in rows):
-            _preserve_ground_truth(scored, artifacts, name, psnr_delta)
-        for key in ("arm_a", "arm_b", "truth"):
-            scored[key].unlink(missing_ok=True)
-    elapsed = time.monotonic() - started
-
-    psnr_deltas = [r[3] for r in rows]
-    dssim_deltas = [r[6] for r in rows]
-    a_wins_psnr = sum(1 for d in psnr_deltas if d > 0)
-    a_wins_dssim = sum(1 for d in dssim_deltas if d < 0)   # lower DSSIM is better
-    widest = max(rows, key=lambda r: abs(r[3]))
-
-    print(f"\n{'-' * 78}")
-    print(f"PSNR  : arm A closer to truth on {a_wins_psnr} of {len(rows)}; "
-          f"delta min {min(psnr_deltas):+.2f}, median "
-          f"{statistics.median(psnr_deltas):+.2f}, max {max(psnr_deltas):+.2f} dB")
-    print(f"DSSIM : arm A closer to truth on {a_wins_dssim} of {len(rows)}; "
-          f"delta min {min(dssim_deltas):+.5f}, median "
-          f"{statistics.median(dssim_deltas):+.5f}, max {max(dssim_deltas):+.5f}")
-    print(f"widest PSNR gap: {widest[0]} at {widest[3]:+.2f} dB")
-    print(f"visual evidence written to:\n  {artifacts}")
-    print(f"\n{len(names)} images measured in {elapsed / 60:.1f} min")
-
-    # The only assertions. Everything above is measurement.
-    assert len(rows) == len(names)
-    assert {r[7] for r in rows} == {(GT_WINDOW_WIDTH, scaled.height)}
+    _print_aggregate(rows, label)
+    return rows, names
 
 
-def _preserve_ground_truth(scored, artifacts: Path, name: str, psnr_delta: float) -> None:
+def _print_aggregate(rows, label: str) -> None:
+    """Overall, then split by slice position, because that split is the point."""
+    def summarize(subset, heading):
+        if not subset:
+            return
+        psnr = [r["psnr_delta"] for r in subset]
+        dssim = [r["dssim_delta"] for r in subset]
+        a_psnr = sum(1 for d in psnr if d > 0)
+        a_dssim = sum(1 for d in dssim if d < 0)     # lower DSSIM is better
+        print(f"  {heading:<22} PSNR  A closer on {a_psnr:>2} of {len(subset)}; "
+              f"median {statistics.median(psnr):+.3f} dB "
+              f"(min {min(psnr):+.2f}, max {max(psnr):+.2f})")
+        print(f"  {'':<22} DSSIM A closer on {a_dssim:>2} of {len(subset)}; "
+              f"median {statistics.median(dssim):+.5f}")
+
+    print(f"\n{'-' * 92}")
+    print(f"{label}:")
+    summarize(rows, "all slices")
+    for _which, slice_name in GT_SLICES:
+        summarize([r for r in rows if r["slice"] == slice_name],
+                  f"{slice_name} slice only")
+    widest = max(rows, key=lambda r: abs(r["psnr_delta"]))
+    print(f"  widest PSNR gap: {widest['name']} ({widest['slice']} slice) "
+          f"at {widest['psnr_delta']:+.2f} dB")
+
+
+def _preserve_ground_truth(scored, artifacts: Path, name: str, slice_name: str,
+                           window_label: str, psnr_delta: float) -> None:
     """Keep the running widest-gap case: both arms, the truth, both differences.
 
-    The differences are auto-levelled, so brightness locates a disagreement
-    rather than measuring one -- same caveat as the other worst-case directory.
+    The differences are auto-levelled independently of each other, so
+    brightness locates a disagreement rather than measuring one -- compare
+    WHERE they are bright, not how bright.
     """
     for existing in artifacts.glob("gt_*"):
         existing.unlink(missing_ok=True)
-    stem = Path(name).stem
+    stem = f"{Path(name).stem}_{slice_name}"
     shutil.copy2(scored["arm_a"], artifacts / f"gt_{stem}_A_whole_then_cut.png")
     shutil.copy2(scored["arm_b"], artifacts / f"gt_{stem}_B_cut_then_upscale.png")
     shutil.copy2(scored["truth"], artifacts / f"gt_{stem}_T_ground_truth.png")
-    for label, arm in (("A", scored["arm_a"]), ("B", scored["arm_b"])):
+    for tag, arm in (("A", scored["arm_a"]), ("B", scored["arm_b"])):
         subprocess.run(
             ["magick", str(arm), str(scored["truth"]), "-compose", "difference",
              "-composite", "-auto-level",
-             str(artifacts / f"gt_{stem}_{label}_minus_truth.png")],
+             str(artifacts / f"gt_{stem}_{tag}_minus_truth.png")],
             capture_output=True, text=True,
         )
     (artifacts / f"gt_{stem}_README.txt").write_text(
         f"Widest PSNR gap between the two arms measured against ground truth.\n\n"
         f"  image           {name}\n"
+        f"  window          {window_label}\n"
+        f"  slice           {slice_name}\n"
         f"  PSNR(A, truth)  {scored['psnr_a']:.2f} dB\n"
         f"  PSNR(B, truth)  {scored['psnr_b']:.2f} dB\n"
         f"  delta           {psnr_delta:+.2f} dB (positive means arm A is closer)\n"
@@ -810,3 +832,62 @@ def _preserve_ground_truth(scored, artifacts: Path, name: str, psnr_delta: float
         f"upscaler, so the three pictures are the evidence and the numbers are the\n"
         f"summary, not the other way round.\n"
     )
+
+
+def _run_ground_truth(tmp_path, real_toolchain, geometry_pair, subdir: str):
+    """Shared body. Own copy of the sample; the corpus is never written to."""
+    binary, models = real_toolchain
+    inbox = copy_sample(corpus_or_skip(), tmp_path / "inbox")
+    processing = tmp_path / "processing"
+    base = Path(os.environ.get(GT_ARTIFACTS_ENV,
+                               processing / "ground_truth_worst_case"))
+    artifacts = base / subdir
+    artifacts.mkdir(parents=True, exist_ok=True)
+    workdir = tmp_path / "gt_work"
+    workdir.mkdir()
+
+    started = time.monotonic()
+    rows, names = _ground_truth_pass(inbox, geometry_pair, binary, models,
+                                     workdir, artifacts)
+    print(f"  visual evidence: {artifacts}")
+    print(f"  {len(rows)} measurements in {(time.monotonic() - started) / 60:.1f} min")
+
+    # The only assertions. Everything above is measurement.
+    _window_size, source_size = geometry_pair
+    expected = {geometry.horizontal_thirds(*source_size)[which].scaled(4)
+                for which, _slice_name in GT_SLICES}
+    assert {r["dimensions"] for r in rows} == {(e.width, e.height) for e in expected}
+    assert len(rows) == len(names) * len(GT_SLICES)
+    return rows
+
+
+@pytest.mark.real_upscaler
+def test_both_arms_against_ground_truth(tmp_path, real_toolchain):
+    """THE GATE, at the largest window twelve photographs can supply.
+
+    Both slice positions, so the frame edge is covered as well as the interior.
+    Which arm wins is reported, never adjudicated; `paperhanger/execute.py` is
+    not touched either way.
+    """
+    _run_ground_truth(tmp_path, real_toolchain, GT_LARGE, "2048x2988")
+
+
+@pytest.mark.real_upscaler
+def test_both_arms_against_ground_truth_at_the_smaller_window(tmp_path,
+                                                              real_toolchain):
+    """The same measurement at 1440x2160, which four more photographs can supply.
+
+    Here for a specific reason rather than for completeness. The large window
+    excludes `snowy_forest_landscape_9522.jpg` and
+    `mountain_lake_reflection_4788.jpg` -- the two that disagreed MOST between
+    the arms, at 33.43 and 35.19 dB -- because both are 3840x2160 and cannot
+    give up 2988 rows. Those two are the cases most likely to behave
+    differently, so measuring everything except them would leave the
+    interesting half untested.
+
+    A 360x540 model input is also a different regime from 512x747: smaller than
+    any tile the upscaler would split, where the large window's input is not.
+    Reported separately from the large window rather than pooled with it, so a
+    regime difference shows up instead of averaging away.
+    """
+    _run_ground_truth(tmp_path, real_toolchain, GT_SMALL, "1440x2160")
