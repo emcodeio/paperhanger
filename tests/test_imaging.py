@@ -5,7 +5,8 @@ from pathlib import Path
 import pytest
 
 from paperhanger import imaging
-from tests.pngwriter import write_png
+from paperhanger.geometry import Rect
+from tests.pngwriter import read_png_rgb, write_marked_png, write_png
 
 
 # ---------- probe ----------
@@ -87,9 +88,6 @@ def test_probe_of_a_directory_is_none(tmp_path):
 
 # ---------- operations ----------
 
-from paperhanger.geometry import Rect
-
-
 def _profile(path):
     proc = subprocess.run(["/usr/bin/sips", "-g", "profile", str(path)],
                           capture_output=True, text=True)
@@ -107,17 +105,41 @@ def test_crop_produces_the_exact_rect(tmp_path):
 
 
 def test_crop_offsets_land_where_asked(tmp_path):
-    """sips takes -c HEIGHT WIDTH and --cropOffset Y X. Getting that order
-    wrong silently crops the wrong region, so prove it with a marker."""
-    source = write_png(tmp_path / "flat.png", 400, 200, colour=(10, 10, 10))
-    marked = tmp_path / "marked.png"
-    # Paint a distinct 100x100 block at x=300, y=100 by compositing two writes:
-    # simplest reliable approach is to build the marker as its own image and
-    # verify by cropping the region back out and checking it is uniform.
-    write_png(marked, 400, 200, colour=(10, 10, 10))
+    """sips takes -c HEIGHT WIDTH and --cropOffset Y X. Getting either order
+    wrong silently crops the WRONG REGION at the right size, so dimensions
+    alone cannot catch it -- a fully transposed implementation still returns
+    100x100 for a 100x100 request. Hence a marker and a real pixel check.
+
+    The rect is deliberately non-square, which catches a transposed -c, and
+    deliberately off-centre, which catches a transposed --cropOffset.
+    """
+    marker = (240, 30, 200)
+    rect = Rect(x=250, y=40, width=120, height=80)
+    source = write_marked_png(tmp_path / "marked.png", 400, 200, rect,
+                              base=(10, 10, 10), marker=marker)
+
     out = tmp_path / "region.png"
-    imaging.crop(marked, Rect(x=300, y=100, width=100, height=100), out)
-    assert imaging.probe(out)[:2] == (100, 100)
+    imaging.crop(source, rect, out)
+
+    assert imaging.probe(out)[:2] == (120, 80)
+    width, height, rows = read_png_rgb(out)
+    assert (width, height) == (120, 80)
+    found = {pixel for row in rows for pixel in row}
+    assert found == {marker}, f"crop landed off target; saw {sorted(found)}"
+
+
+def test_crop_marker_check_would_fail_on_a_wrong_region(tmp_path):
+    """Guards the guard: proves the marker assertion above can actually fail,
+    so it is not passing because every crop happens to look uniform."""
+    marker = (240, 30, 200)
+    rect = Rect(x=250, y=40, width=120, height=80)
+    source = write_marked_png(tmp_path / "marked.png", 400, 200, rect,
+                              base=(10, 10, 10), marker=marker)
+
+    off_by_one = tmp_path / "off.png"
+    imaging.crop(source, Rect(x=249, y=40, width=120, height=80), off_by_one)
+    _, _, rows = read_png_rgb(off_by_one)
+    assert {pixel for row in rows for pixel in row} != {marker}
 
 
 def test_fusing_crop_and_resample_is_wrong(tmp_path):

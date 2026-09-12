@@ -1,6 +1,6 @@
 """Every subprocess call the tool makes. The only module that touches images.
 
-Three measured facts shape this file. Each fails SILENTLY if ignored:
+Four measured facts shape this file. Each fails SILENTLY if ignored:
 
   1. sips -g pixelWidth exits 0 while printing `pixelWidth: <nil>` for text,
      empty and truncated files, and dies by signal on .DS_Store. Exit status is
