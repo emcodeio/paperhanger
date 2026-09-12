@@ -319,11 +319,12 @@ def test_format_duration_boundaries():
 def test_report_module_is_pure():
     """The dry-run report reads plans and renders text. Nothing else.
 
-    Spec section 2 lists this module on the effects side, which it has never
-    been: it imports `bands` and `sizes` and touches no file. The purity is
-    what makes `render_report` safe to call before the toolchain check and
-    before anything is written, and what makes `already_done` a parameter
-    rather than a question this module asks the disk for itself.
+    Spec section 2 once listed this module on the effects side, which it has
+    never been: it imports `bands` and `sizes` and touches no file. The table
+    now says so. The purity is what makes `render_report` safe to call before
+    the toolchain check and before anything is written, and what makes
+    `done_outputs` a parameter rather than a question this module asks the
+    disk for itself.
     """
     import paperhanger.report as module
 

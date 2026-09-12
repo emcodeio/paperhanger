@@ -69,9 +69,12 @@ input path
                 slices are planned, not written, because
                 slice dimensions follow arithmetically from source dimensions.
                 Both output axes, the format, and the destination path are fixed
-                here; so is the decision to skip a plan whose output already
-                exists, which is the last filesystem-dependent choice and belongs
-                on this side of the line.
+                here. Skipping a plan whose output already exists is the one
+                filesystem-dependent choice, so it does NOT live here -- it is
+                `execute.is_pending`, defined once and called by the report, the
+                pre-flight and the executor alike, so the dry-run and the run
+                cannot disagree. Keeping it out of `plan.py` is what lets the
+                purity assertion cover this module at all.
   ---- every decision is now made; nothing has been written ----
   -> --dry-run? render the report and exit
   -> execute    per photo: normalize -> upscale the whole frame once
@@ -546,7 +549,8 @@ isolation.
 Staging beside the destination rather than in the temp tree makes the rename atomic whatever
 volume `TMPDIR` lives on, and an interrupted run never leaves a truncated file where the
 sorter will see it. Stray `.partial` files are swept at startup. A plan whose output already
-exists is marked done at plan time and skipped; `--overwrite` forces regeneration. This
+exists is skipped, decided in one place by `execute.is_pending`; `--overwrite` forces
+regeneration. This
 makes re-running on the same folder both safe and resumable, which matters when a bulk
 import is measured in hours.
 
