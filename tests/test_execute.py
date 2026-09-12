@@ -1085,3 +1085,349 @@ def test_fake_upscaler_actually_enlarges_by_four(tmp_path, fake_upscaler):
     out = tmp_path / "out.png"
     imaging.upscale(source, out, binary, models)
     assert imaging.probe(out) == (160, 96, "png")
+
+
+# ---------- archival and outcomes ----------
+
+def import_dir(tmp_path) -> Path:
+    """The user's input directory, where a source sits until it is archived.
+
+    These tests care where the original IS afterwards, so it has to start
+    somewhere that is not the processing tree -- writing fixtures into
+    tmp_path itself would make "did not move" and "moved" the same assertion.
+    """
+    inbox = tmp_path / "in"
+    inbox.mkdir(parents=True, exist_ok=True)
+    return inbox
+
+
+def test_archive_moves_to_originals_on_success(tmp_path, fake_upscaler):
+    source = write_png(import_dir(tmp_path) / "ok.png", 2000, 3000)
+    work = plan.plan_photo(source, 2000, 3000, "png", [sizes.PHONE], settings(tmp_path))
+    ctx = context(tmp_path, fake_upscaler)
+    result = execute.run_and_archive(work, ctx)
+    assert result.outcome == execute.OK
+    assert not source.exists()
+    assert (ctx.processing_dir / "originals" / "ok.png").exists()
+
+
+def test_rejected_everywhere_goes_to_error(tmp_path, fake_upscaler):
+    source = write_png(import_dir(tmp_path) / "tiny.png", 200, 300, noise=True)
+    work = plan.plan_photo(source, 200, 300, "png", list(sizes.DEVICES),
+                           settings(tmp_path))
+    ctx = context(tmp_path, fake_upscaler)
+    result = execute.run_and_archive(work, ctx)
+    assert result.outcome == execute.REJECTED
+    assert (ctx.processing_dir / "error" / "tiny.png").exists()
+    assert not source.exists()
+
+
+def test_partial_failure_leaves_the_source_in_place(tmp_path, fake_upscaler, monkeypatch):
+    """The data trap this row exists for: archiving on 'anything succeeded'
+    would move the source out of the input directory while reporting success,
+    and the missing wallpaper could never be recovered by a re-run, because the
+    re-run would look in a directory the source had left."""
+    source = write_png(import_dir(tmp_path) / "half.png", 1440, 720)
+    work = plan.plan_photo(source, 1440, 720, "png", [sizes.PHONE], settings(tmp_path))
+    assert len(work.plans) == 3
+
+    calls = {"n": 0}
+    original = execute.render
+
+    def flaky(target, image, scale, workdir):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise imaging.ImagingError("simulated upscaler crash")
+        return original(target, image, scale, workdir)
+
+    monkeypatch.setattr(execute, "render", flaky)
+    ctx = context(tmp_path, fake_upscaler)
+    result = execute.run_and_archive(work, ctx)
+
+    assert result.outcome == execute.PARTIAL
+    assert source.exists(), "a partial failure must not move the original"
+    assert not (ctx.processing_dir / "originals" / "half.png").exists()
+    assert len(result.failures) == 1
+
+
+def test_a_partial_failure_still_renders_the_surviving_plans(tmp_path, fake_upscaler,
+                                                             monkeypatch):
+    """Guards the test above, which passes just as well if the first failure
+    abandons the photo. Two of these three slices are perfectly renderable, and
+    the source is staying put either way -- so giving up costs the user two
+    wallpapers and throws away the enlargement the run has already paid for."""
+    source = write_png(import_dir(tmp_path) / "half.png", 1440, 720)
+    work = plan.plan_photo(source, 1440, 720, "png", [sizes.PHONE], settings(tmp_path))
+    left, center, right = work.plans
+
+    calls = {"n": 0}
+    original = execute.render
+
+    def flaky(target, image, scale, workdir):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise imaging.ImagingError("simulated upscaler crash")
+        return original(target, image, scale, workdir)
+
+    monkeypatch.setattr(execute, "render", flaky)
+    result = execute.run_and_archive(work, context(tmp_path, fake_upscaler))
+
+    assert result.written == [left.destination, right.destination]
+    assert not center.destination.exists()
+    assert center.destination.name in result.failures[0]
+
+
+def test_every_plan_failing_is_failed_not_partial(tmp_path, fake_upscaler, monkeypatch):
+    """PARTIAL and FAILED archive identically -- not at all -- but a report
+    that calls both 'partial' cannot tell a flaky slice from a photo sips will
+    never read at all."""
+    source = write_png(import_dir(tmp_path) / "doomed.png", 1440, 720)
+    work = plan.plan_photo(source, 1440, 720, "png", [sizes.PHONE], settings(tmp_path))
+
+    def explode(*args, **kwargs):
+        raise imaging.ImagingError("sips exited 13: unrecognized format")
+
+    monkeypatch.setattr(execute, "render", explode)
+    result = execute.run_and_archive(work, context(tmp_path, fake_upscaler))
+
+    assert result.outcome == execute.FAILED
+    assert result.written == [] and len(result.failures) == 3
+    assert source.exists()
+
+
+def test_a_routing_bug_aborts_rather_than_counting_as_a_failure(tmp_path, fake_upscaler,
+                                                                monkeypatch):
+    """_upscale_one_plan's precondition is about this codebase, not this photo.
+
+    run_photo will not route a cropless plan there, so the only way to see the
+    refusal is to break that routing -- which is what the stub stands in for.
+    Tallied as "this photo failed", a logic error would become a silently
+    skipped photo repeated across a twenty-four-hour run, with nothing louder
+    to show for it than a line in a report read the next morning.
+    """
+    source = write_png(import_dir(tmp_path) / "s.png", 1440, 720)
+    work = plan.plan_photo(source, 1440, 720, "png", [sizes.PHONE], settings(tmp_path))
+    monkeypatch.setattr(execute, "UPSCALE_PIXEL_CAP", 1)
+
+    def routed_wrong(target, work, ctx, workdir):
+        raise ValueError("_upscale_one_plan requires a crop plan; a cropless "
+                         "region is the whole frame and belongs on the "
+                         "whole-frame path")
+
+    monkeypatch.setattr(execute, "_upscale_one_plan", routed_wrong)
+    ctx = context(tmp_path, fake_upscaler)
+    ctx.log = lambda message: None
+
+    with pytest.raises(ValueError, match="whole-frame path"):
+        execute.run_and_archive(work, ctx)
+
+    assert source.exists(), "an aborted photo keeps its original too"
+
+
+def test_a_plan_neither_rendered_nor_reported_is_not_archived(tmp_path, fake_upscaler,
+                                                              monkeypatch):
+    """Archival is decided from run_photo's accounting, so the accounting is
+    checked rather than trusted. A plan that quietly went missing would
+    otherwise archive the original while its wallpaper does not exist, which is
+    the one arrangement no re-run can repair."""
+    source = write_png(import_dir(tmp_path) / "lost.png", 2000, 3000)
+    work = plan.plan_photo(source, 2000, 3000, "png", [sizes.PHONE], settings(tmp_path))
+
+    monkeypatch.setattr(execute, "run_photo", lambda work, ctx, failures=None: [])
+    result = execute.run_and_archive(work, context(tmp_path, fake_upscaler))
+
+    assert result.outcome == execute.FAILED
+    assert result.failures and source.exists()
+
+
+def test_archive_never_overwrites(tmp_path, fake_upscaler):
+    """The only path that could destroy a user's sole copy of an original."""
+    originals = (tmp_path / "processing" / "originals")
+    originals.mkdir(parents=True)
+    (originals / "IMG_0042.jpg").write_bytes(b"the first import's original")
+
+    source = tmp_path / "in" / "IMG_0042.jpg"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    png = write_png(tmp_path / "seed.png", 2000, 3000)
+    imaging.resize_and_encode(png, 2000, 3000, "jpeg", 90, source, resize=False)
+
+    ctx = context(tmp_path, fake_upscaler)
+    renamed = execute.archive(source, originals, log=ctx.log)
+    assert renamed.name == "IMG_0042-2.jpg"
+    assert (originals / "IMG_0042.jpg").read_bytes() == b"the first import's original"
+
+
+def test_archive_keeps_counting_past_the_first_suffix(tmp_path):
+    """A third import of the same name must not overwrite the second."""
+    originals = tmp_path / "processing" / "originals"
+    originals.mkdir(parents=True)
+    (originals / "IMG_0042.jpg").write_bytes(b"first")
+    (originals / "IMG_0042-2.jpg").write_bytes(b"second")
+
+    source = tmp_path / "in" / "IMG_0042.jpg"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"third")
+
+    renamed = execute.archive(source, originals, log=lambda message: None)
+    assert renamed.name == "IMG_0042-3.jpg"
+    assert (originals / "IMG_0042.jpg").read_bytes() == b"first"
+    assert (originals / "IMG_0042-2.jpg").read_bytes() == b"second"
+
+
+def test_archive_will_not_take_a_name_a_broken_symlink_holds(tmp_path):
+    """`exists()` follows symlinks, so a dangling one reads as a free name and
+    the move replaces it. Nothing here creates symlinks -- the user's input
+    directory does, and the check is cheaper than the argument about whether
+    it can happen."""
+    originals = tmp_path / "processing" / "originals"
+    originals.mkdir(parents=True)
+    (originals / "IMG_0042.jpg").symlink_to(tmp_path / "gone.jpg")
+
+    source = tmp_path / "in" / "IMG_0042.jpg"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"the real thing")
+
+    renamed = execute.archive(source, originals, log=lambda message: None)
+    assert renamed.name == "IMG_0042-2.jpg"
+    assert (originals / "IMG_0042.jpg").is_symlink()
+
+
+def test_archive_reports_the_rename(tmp_path):
+    """A renamed original is the one archival event the user has to know
+    about: it means two photos in the import shared a name, and nothing
+    downstream records which one this file was."""
+    originals = tmp_path / "processing" / "originals"
+    originals.mkdir(parents=True)
+    (originals / "a.png").write_bytes(b"earlier")
+    source = write_png(import_dir(tmp_path) / "a.png", 8, 8)
+
+    messages = []
+    execute.archive(source, originals, log=messages.append)
+
+    assert messages == ["  a.png: already in originals/, archived as a-2.png"]
+
+
+def test_an_unrenamed_archive_says_nothing(tmp_path):
+    """Guards the test above: a line printed for every archived photo would
+    satisfy it while telling the user nothing."""
+    source = write_png(import_dir(tmp_path) / "b.png", 8, 8)
+    messages = []
+    execute.archive(source, tmp_path / "processing" / "originals",
+                    log=messages.append)
+    assert messages == []
+
+
+def test_existing_output_is_skipped(tmp_path, fake_upscaler):
+    source = write_png(import_dir(tmp_path) / "done.png", 2000, 3000)
+    work = plan.plan_photo(source, 2000, 3000, "png", [sizes.PHONE], settings(tmp_path))
+    target = work.plans[0]
+    target.destination.parent.mkdir(parents=True, exist_ok=True)
+    target.destination.write_bytes(b"already here")
+
+    ctx = context(tmp_path, fake_upscaler)
+    result = execute.run_and_archive(work, ctx)
+    assert result.outcome == execute.ALREADY_DONE
+    assert target.destination.read_bytes() == b"already here"
+    assert (ctx.processing_dir / "originals" / "done.png").exists()
+    assert result.skipped == [target.destination]
+
+
+def test_a_fully_skipped_photo_never_starts_the_upscaler(tmp_path, fake_upscaler,
+                                                         monkeypatch):
+    """The re-run case, and the reason skipping is decided before the photo is
+    handed over: the enlargement costs minutes per photo, and a plan that is
+    not going to be written does not need one."""
+    source = write_png(import_dir(tmp_path) / "again.png", 1440, 720)
+    work = plan.plan_photo(source, 1440, 720, "png", [sizes.PHONE], settings(tmp_path))
+    for target in work.plans:
+        target.destination.parent.mkdir(parents=True, exist_ok=True)
+        target.destination.write_bytes(b"from the last run")
+
+    calls = spy_on(monkeypatch, "upscale")
+    result = execute.run_and_archive(work, context(tmp_path, fake_upscaler))
+
+    assert calls == [], "an already-finished photo must not be enlarged again"
+    assert result.outcome == execute.ALREADY_DONE
+    assert len(result.skipped) == 3
+
+
+def test_a_half_done_photo_only_renders_what_is_missing(tmp_path, fake_upscaler):
+    source = write_png(import_dir(tmp_path) / "resumed.png", 1440, 720)
+    work = plan.plan_photo(source, 1440, 720, "png", [sizes.PHONE], settings(tmp_path))
+    left, center, right = work.plans
+    left.destination.parent.mkdir(parents=True, exist_ok=True)
+    left.destination.write_bytes(b"from the last run")
+
+    result = execute.run_and_archive(work, context(tmp_path, fake_upscaler))
+
+    assert result.outcome == execute.OK
+    assert result.skipped == [left.destination]
+    assert result.written == [center.destination, right.destination]
+    assert left.destination.read_bytes() == b"from the last run"
+
+
+def test_overwrite_re_renders(tmp_path, fake_upscaler):
+    source = write_png(import_dir(tmp_path) / "again.png", 2000, 3000)
+    work = plan.plan_photo(source, 2000, 3000, "png", [sizes.PHONE], settings(tmp_path))
+    target = work.plans[0]
+    target.destination.parent.mkdir(parents=True, exist_ok=True)
+    target.destination.write_bytes(b"stale")
+
+    ctx = context(tmp_path, fake_upscaler)
+    ctx.overwrite = True
+    result = execute.run_and_archive(work, ctx)
+    assert result.outcome == execute.OK
+    assert target.destination.read_bytes() != b"stale"
+
+
+def test_an_archive_that_cannot_move_reports_instead_of_ending_the_run(tmp_path,
+                                                                      fake_upscaler):
+    """The outputs are written and good; only the move failed. Reporting it
+    leaves the source where a re-run will find it -- and where that re-run
+    skips the finished outputs and tries the move again -- rather than ending a
+    twenty-four-hour import on one photo's permissions."""
+    source = write_png(import_dir(tmp_path) / "stuck.png", 2000, 3000)
+    work = plan.plan_photo(source, 2000, 3000, "png", [sizes.PHONE], settings(tmp_path))
+    ctx = context(tmp_path, fake_upscaler)
+    ctx.processing_dir.mkdir(parents=True, exist_ok=True)
+    (ctx.processing_dir / "originals").write_bytes(b"not a directory")
+
+    result = execute.run_and_archive(work, ctx)
+
+    assert result.outcome == execute.PARTIAL
+    assert result.archived_to is None
+    assert source.exists()
+    assert work.plans[0].destination.exists(), "the outputs were fine"
+
+
+def test_batch_runs_cheapest_first(tmp_path, fake_upscaler):
+    """974 of the corpus's 3441 outputs need no upscaler; handing those over
+    first maximizes what a Ctrl-C leaves behind."""
+    cheap_src = write_png(import_dir(tmp_path) / "cheap.png", 2000, 3000)
+    dear_src = write_png(import_dir(tmp_path) / "dear.png", 1440, 720)
+    opts = settings(tmp_path)
+    works = [
+        plan.plan_photo(dear_src, 1440, 720, "png", [sizes.PHONE], opts),
+        plan.plan_photo(cheap_src, 2000, 3000, "png", [sizes.PHONE], opts),
+    ]
+    order = [w.source.name for w in execute.cheapest_first(works)]
+    assert order == ["cheap.png", "dear.png"]
+
+
+def test_cheapest_first_orders_the_upscaling_photos_by_cost(tmp_path):
+    """Cheap-first is not only about the two groups: an interrupted run gets
+    further into the second group as well when the smallest frames go first.
+    The photo needing no upscaler here is LARGER than both of the others, so
+    ordering on source pixels alone would put it last."""
+    opts = settings(tmp_path)
+    works = [
+        plan.plan_photo(tmp_path / "big_frame.png", 2000, 1000, "png",
+                        [sizes.PHONE], opts),
+        plan.plan_photo(tmp_path / "cheap.png", 4000, 6000, "png",
+                        [sizes.PHONE], opts),
+        plan.plan_photo(tmp_path / "small_frame.png", 1440, 720, "png",
+                        [sizes.PHONE], opts),
+    ]
+    assert [w.needs_upscale for w in works] == [True, False, True]
+    assert [w.source.stem for w in execute.cheapest_first(works)] == [
+        "cheap", "small_frame", "big_frame"]

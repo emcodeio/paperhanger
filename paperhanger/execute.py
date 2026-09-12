@@ -15,7 +15,7 @@ Two rules that are easy to get wrong and expensive to get wrong:
 """
 
 import shutil
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from . import imaging
@@ -202,6 +202,10 @@ class Context:
     upscayl: Path
     models_dir: Path
     log: object = print
+    # Off by default, and read only by run_and_archive: an output already in
+    # place is an earlier run's, produced from this same source by this same
+    # plan, and re-making it costs an upscaler run to arrive at the same file.
+    overwrite: bool = False
 
 
 def _upscale_whole_frame(work, ctx, workdir) -> Path:
@@ -268,13 +272,36 @@ def _upscale_one_plan(target, work, ctx, workdir) -> Path:
     enlarged = workdir / f"up_{stem}.png"
     try:
         imaging.upscale(normalized, enlarged, ctx.upscayl, ctx.models_dir)
+    except BaseException:
+        # A failing model run can still have written part of its output, and
+        # since run_photo went on to the next plan the workdir is no longer
+        # swept before that plan's own enlargement arrives. Leaving this one
+        # behind would hold two regions at once, which is most of what the
+        # pixel cap was imposed to save.
+        enlarged.unlink(missing_ok=True)
+        raise
     finally:
         normalized.unlink(missing_ok=True)
     return enlarged
 
 
-def run_photo(work, ctx) -> list:
+def run_photo(work, ctx, failures=None) -> list:
     """Render every plan of one photo. Returns the destinations written.
+
+    `failures` is where per-plan errors go when the caller would rather have
+    the rest of the photo than the first exception. Passed a list, a plan that
+    raises is recorded and the remaining plans still run: the enlargement has
+    been paid for already, the siblings are usually fine, and the original is
+    staying where it is either way -- see run_and_archive, which decides that.
+    Left as None, the first failure aborts the photo as it always did.
+
+    Only ImagingError and OSError are collected, which is the whole of what a
+    bad photo or a hostile filesystem can produce. Everything else -- the
+    ValueError _upscale_one_plan raises for a cropless plan above all -- is
+    about this codebase rather than this photo, and travels out of here
+    unaltered. Tallied as "one photo failed", a routing bug would look exactly
+    like a corrupt JPEG and would repeat, quietly, for every photo in a
+    twenty-four-hour run.
 
     The upscaler runs ONCE for the whole frame when anything needs it, and
     every slice is cut from that result. Enlarging each slice separately would
@@ -338,27 +365,33 @@ def run_photo(work, ctx) -> list:
             )
 
         for target in work.plans:
-            if not target.needs_upscale:
-                # Bands 1 and 2 keep their real pixels: the original, never the
-                # frame. Taken from the frame a band 2 plan would be enlarged
-                # and reduced back to the same size, and would still measure
-                # correct at every check render makes.
-                written.append(render(target, work.source, scale=1, workdir=workdir))
-                continue
-            if frame is not None:
-                written.append(render(target, frame, scale=4, workdir=workdir))
-                continue
-            enlarged = _upscale_one_plan(target, work, ctx, workdir)
             try:
-                # The region is already cropped and already 4x, so render must
-                # not crop again: pass a cropless view of the plan. render then
-                # measures that region against the planned size, which is why
-                # no enlargement guard belongs here -- the guard exists to
-                # decide exactly this, from the pixels rather than the band.
-                written.append(render(
-                    replace(target, crop=None), enlarged, scale=1, workdir=workdir))
-            finally:
-                enlarged.unlink(missing_ok=True)
+                if not target.needs_upscale:
+                    # Bands 1 and 2 keep their real pixels: the original, never
+                    # the frame. Taken from the frame a band 2 plan would be
+                    # enlarged and reduced back to the same size, and would
+                    # still measure correct at every check render makes.
+                    written.append(render(target, work.source, scale=1,
+                                          workdir=workdir))
+                elif frame is not None:
+                    written.append(render(target, frame, scale=4, workdir=workdir))
+                else:
+                    enlarged = _upscale_one_plan(target, work, ctx, workdir)
+                    try:
+                        # The region is already cropped and already 4x, so
+                        # render must not crop again: pass a cropless view of
+                        # the plan. render then measures that region against
+                        # the planned size, which is why no enlargement guard
+                        # belongs here -- the guard exists to decide exactly
+                        # this, from the pixels rather than the band.
+                        written.append(render(replace(target, crop=None), enlarged,
+                                              scale=1, workdir=workdir))
+                    finally:
+                        enlarged.unlink(missing_ok=True)
+            except (imaging.ImagingError, OSError) as error:
+                if failures is None:
+                    raise
+                failures.append(f"{target.destination.name}: {error}")
         return written
     finally:
         # Both, and on every path out. The frame is the largest thing the tool
@@ -370,3 +403,164 @@ def run_photo(work, ctx) -> list:
         if frame is not None:
             frame.unlink(missing_ok=True)
         shutil.rmtree(workdir, ignore_errors=True)
+
+
+# What happened to one photo. Six values, because the interesting distinction
+# is not success against failure: it is whether the ORIGINAL was dealt with.
+# OK, ALREADY_DONE and REJECTED all end with the source moved out of the input
+# directory; PARTIAL and FAILED both leave it exactly where it was found.
+OK = "ok"
+ALREADY_DONE = "already_done"
+REJECTED = "rejected"
+PARTIAL = "partial"
+FAILED = "failed"
+SKIPPED = "skipped"          # not an image; decided before a photo gets here
+
+
+@dataclass
+class PhotoResult:
+    source: Path
+    outcome: str
+    written: list = field(default_factory=list)
+    skipped: list = field(default_factory=list)
+    failures: list = field(default_factory=list)
+    archived_to: Path | None = None
+
+
+def _taken(path: Path) -> bool:
+    """Is this name in use? `exists()` alone is not the question.
+
+    It follows symlinks, so a dangling one reads as a free name and the move
+    replaces it. The tool does not make symlinks; the user's input directory
+    might, and asking both costs one stat.
+    """
+    return path.exists() or path.is_symlink()
+
+
+def _next_free_name(directory: Path, source: Path) -> Path:
+    counter = 2
+    while True:
+        candidate = directory / f"{source.stem}-{counter}{source.suffix}"
+        if not _taken(candidate):
+            return candidate
+        counter += 1
+
+
+def archive(source: Path, directory: Path, log=print) -> Path:
+    """Move `source` into `directory`. NEVER overwrites.
+
+    A second import containing another IMG_0042.jpg would otherwise replace the
+    first silently. This is the only path in the design that could destroy a
+    user's sole copy of an original, and the two imports need not even be in
+    the same run -- originals/ accumulates across every run there has ever been.
+
+    The rename is reported because nothing else records it. The file that ends
+    up as IMG_0042-2.jpg is no longer identifiable as the source of the
+    wallpapers named after IMG_0042, and this line is the user's only chance to
+    notice that two photos in the import shared a name.
+    """
+    directory.mkdir(parents=True, exist_ok=True)
+    target = directory / source.name
+    if _taken(target):
+        target = _next_free_name(directory, source)
+        log(f"  {source.name}: already in {directory.name}/, archived as {target.name}")
+    shutil.move(str(source), str(target))
+    return target
+
+
+def cheapest_first(works):
+    """Photos needing no upscaler first, then by ascending upscaler cost.
+
+    A twenty-four-hour import is interrupted at some point that is not the end,
+    so the order decides what the user has when it is. 974 of the corpus's 3441
+    outputs need no model run at all and take seconds each; 756 photos take the
+    remaining 24.3 hours between them. Doing the free ones first means a Ctrl-C
+    in the first few minutes still leaves most of a wallpaper set behind
+    instead of one enlarged photo.
+
+    Stable, so photos of equal cost keep the order they were discovered in.
+    """
+    return sorted(works, key=lambda w: (w.needs_upscale, w.upscale_output_pixels))
+
+
+def _unfinished(result) -> str:
+    """PARTIAL if the photo produced anything, FAILED if it produced nothing.
+
+    Both leave the source in place. They are told apart because a report that
+    calls them the same thing cannot distinguish one flaky slice from a photo
+    sips will never read at all, and only one of those is worth a second run.
+    """
+    return PARTIAL if (result.written or result.skipped) else FAILED
+
+
+def run_and_archive(work, ctx) -> PhotoResult:
+    """Render one photo's plans, then decide where its original goes.
+
+    The decision is per PHOTO although the work is per plan, and it is the most
+    data-sensitive one the tool makes: originals are moved, not copied. Three
+    rules, in this order:
+
+      * Any plan that FAILED leaves the source exactly where it was found.
+        Archiving on "anything succeeded" is the trap this function exists to
+        avoid -- one crashed slice would move the original out of the input
+        directory while the run reported success, and the missing wallpaper
+        could never be recovered by the re-run this design advertises, because
+        the re-run would look in a directory the source had left.
+      * Rejected on every device it was asked about, with nothing to render,
+        is not a failure. The photo is simply too small for this machine's
+        screens, and error/ is where a human can look at it.
+      * Anything else produced its wallpapers, whether this run rendered them
+        or an earlier one did, and the original goes to originals/.
+    """
+    result = PhotoResult(source=work.source, outcome=OK)
+
+    todo = []
+    for target in work.plans:
+        # Checked HERE rather than inside run_photo, because the upscaler runs
+        # once per photo before any plan is rendered: a photo whose outputs are
+        # all present would otherwise pay minutes for a frame nothing reads.
+        if target.destination.exists() and not ctx.overwrite:
+            result.skipped.append(target.destination)
+        else:
+            todo.append(target)
+
+    if todo:
+        # A cropped copy of the work, so run_photo sees only the plans that are
+        # actually going to be rendered: needs_upscale is derived from them, and
+        # a photo whose one upscaling plan is already done needs no model run.
+        runnable = replace(work, plans=todo,
+                           rejected_devices=list(work.rejected_devices))
+        result.written = run_photo(runnable, ctx, failures=result.failures)
+        # Every plan is either rendered or reported; this is that invariant
+        # made checkable rather than assumed. A plan that went missing without
+        # saying so would otherwise archive the original while its wallpaper
+        # does not exist, and that is the one arrangement no re-run repairs.
+        unaccounted = len(todo) - len(result.written) - len(result.failures)
+        if unaccounted:
+            result.failures.append(
+                f"{unaccounted} of {len(todo)} plans were neither rendered nor reported"
+            )
+
+    if result.failures:
+        result.outcome = _unfinished(result)
+        return result
+
+    if work.rejected_everywhere:
+        result.outcome = REJECTED
+        destination = ctx.processing_dir / "error"
+    else:
+        result.outcome = ALREADY_DONE if not result.written else OK
+        destination = ctx.processing_dir / "originals"
+
+    try:
+        result.archived_to = archive(work.source, destination, ctx.log)
+    except OSError as error:
+        # The outputs are written and correct; only the move failed. Reported
+        # rather than raised, because the source is still in place, the re-run
+        # will skip the finished outputs and try the move again, and one
+        # photo's permissions should not end an import with twenty hours left
+        # to go. The outcome changes with it: a caller that saw OK here would
+        # believe the original had been dealt with.
+        result.failures.append(f"could not archive {work.source.name}: {error}")
+        result.outcome = _unfinished(result)
+    return result
