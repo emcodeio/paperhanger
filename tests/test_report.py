@@ -237,3 +237,19 @@ def test_format_duration_boundaries():
     assert report.format_duration(3601) == "~1 h"
     # A non-whole hour keeps its decimal; a whole one does not.
     assert report.format_duration(90 * 60) == "~1.5 h"
+
+
+def test_report_module_is_pure():
+    """The dry-run report reads plans and renders text. Nothing else.
+
+    Spec section 2 lists this module on the effects side, which it has never
+    been: it imports `bands` and `sizes` and touches no file. The purity is
+    what makes `render_report` safe to call before the toolchain check and
+    before anything is written, and what makes `already_done` a parameter
+    rather than a question this module asks the disk for itself.
+    """
+    import paperhanger.report as module
+
+    from tests.conftest import assert_pure_module
+
+    assert_pure_module(module, allowed={"bands", "sizes"})

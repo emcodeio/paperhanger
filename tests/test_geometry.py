@@ -104,3 +104,13 @@ def test_scaled_rect_multiplies_every_field():
     """Needed by the executor: a slice cut from a 4x frame sits at 4x offsets."""
     rect = geometry.Rect(x=100, y=200, width=300, height=400)
     assert rect.scaled(4) == geometry.Rect(x=400, y=800, width=1200, height=1600)
+
+
+def test_geometry_module_is_pure():
+    """Pure integer arithmetic, enforced. See test_bands for why each of the
+    six decision modules now asserts this for itself."""
+    import paperhanger.geometry as module
+
+    from tests.conftest import assert_pure_module
+
+    assert_pure_module(module, allowed={"dataclasses"})

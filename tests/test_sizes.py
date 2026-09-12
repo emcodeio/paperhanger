@@ -24,3 +24,14 @@ def test_phone_frames_are_two_to_three():
 def test_governing_dimension_follows_axis():
     assert sizes.governing_dimension(4000, 3000, sizes.DESKTOP_BY_WIDTH) == 4000
     assert sizes.governing_dimension(4000, 3000, sizes.DESKTOP_BY_HEIGHT) == 3000
+
+
+def test_sizes_module_is_pure():
+    """The thresholds the whole decision tree runs on. The module docstring
+    claims no I/O and no floats; `test_ratio_is_exactly_one_and_a_half` is
+    the floats half, and this is the I/O half."""
+    import paperhanger.sizes as module
+
+    from tests.conftest import assert_pure_module
+
+    assert_pure_module(module, allowed={"dataclasses"})

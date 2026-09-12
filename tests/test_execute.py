@@ -229,6 +229,42 @@ def test_render_scales_the_crop_rect_for_an_upscaled_frame(tmp_path, monkeypatch
     )
 
 
+def test_a_scale_4_input_is_reduced_even_in_a_band_that_never_resizes(
+        tmp_path, monkeypatch):
+    """`resize = target.needs_resize or scale != 1`, against measured pixels.
+
+    The `or scale != 1` half had exactly one guard: the stubbed
+    `assert resize is True` in the test above. Deleting the clause passed
+    every other assertion in the suite, because the two bands `run_photo`
+    ever renders at scale 4 both hide it -- band 3 sets `needs_resize`
+    anyway, and a band-4 slice of the 4x frame is already exactly its planned
+    size, so not resampling it produces the right dimensions by accident.
+
+    This is the case the clause is actually for: `render`'s contract takes
+    ANY plan at scale 4, and a plan whose band does not resize, handed an
+    input four times its planned size, must still come down. Without the
+    clause the 1600x1200 frame is encoded untouched and `_verify_dimensions`
+    refuses it as 1600x1200 against a plan that says 400x300 -- which is the
+    mutation failing for the right reason, on a real file, rather than on a
+    recorded flag.
+
+    2 Mpx and nothing stubbed: this measures the file, not the argv.
+    """
+    frame = write_png(tmp_path / "frame_4x.png", 1600, 1200)
+    work = plan.plan_photo(tmp_path / "moss.png", 2000, 3000, "png",
+                           [sizes.PHONE], settings(tmp_path))
+    native = work.plans[0]
+    assert native.band == bands.NATIVE and not native.needs_resize
+
+    # The same band, sized to what a 1600x1200 frame is 4x of.
+    target = replace(native, out_width=400, out_height=300, crop=None)
+
+    execute.render(target, frame, scale=4, workdir=tmp_path / "work")
+
+    assert imaging.probe(target.destination)[:2] == (400, 300), \
+        "1600x1200 would mean the 4x input was published without reducing it"
+
+
 def test_render_passes_the_rect_through_unscaled_at_scale_one(tmp_path, monkeypatch):
     """The other half: the original's own coordinates are used untouched, and
     a band-2 plan at scale 1 resamples not at all."""
@@ -697,6 +733,87 @@ def test_one_upscale_for_three_crop_plans(tmp_path, fake_upscaler, monkeypatch):
     for target in work.plans:
         assert imaging.probe(target.destination)[:2] == (target.out_width,
                                                          target.out_height)
+
+
+def centre_colours(tmp_path, image, tag, size=8):
+    """The distinct colours in a small patch at the CENTRE of `image`.
+
+    `patch_colours` samples a corner, which is right for a crop cut straight
+    from a source: the marker's edge is exactly the slice's edge, so a corner
+    is the most sensitive place to look. It is the wrong place here. A 4x
+    resample interpolates across the boundary between marker and base, so
+    the outermost columns of a slice cut at that boundary are blends of the
+    two and belong to neither. The centre of the slice is unambiguous, and
+    the three slices of this fixture are disjoint, so the centre still tells
+    them apart -- which is all the assertion needs.
+    """
+    _, _, width, height = (0, 0, *imaging.probe(image)[:2])
+    rect = geometry.Rect((width - size) // 2, (height - size) // 2, size, size)
+    patch = tmp_path / f"centre_{tag}.png"
+    imaging.crop(image, rect, patch)
+    _, _, rows = read_png_rgb(patch)
+    return {pixel for row in rows for pixel in row}
+
+
+def test_a_band_3_photo_renders_its_reduced_slices_end_to_end(tmp_path,
+                                                              fake_upscaler):
+    """Band 3, live pixels, source to published file. The band tier 1 skipped.
+
+    2400x1200 on the phone path: three DISJOINT 800x1200 slices, governing
+    1200, and 1200*4 == 4800 >= the 4320 ideal, so UPSCALE_REDUCE. Each slice
+    comes out of the 9600x4800 frame as 3200x4800 and must then be reduced to
+    2880x4320. Band 3 is the only band where that reduction does anything: a
+    band-4 slice of the 4x frame is already exactly its planned size, so
+    `resize` is a no-op there whether or not it is asked for.
+
+    This test exists because a census of every successful publish in the fast
+    suite found band 1 three times, band 2 thirty-seven, band 4 fifty-four,
+    and band 3 NOT ONCE -- while band 3 is 2116 of the corpus's 3441 outputs,
+    61% of a real run. Its only two tier-1 appearances both asserted a
+    refusal. Tier 2 covers it and tier 2 is deselected from the fast loop and
+    skips entirely on a machine without the author's photographs.
+
+    Three things are measured that no stub can fake:
+
+      * all three files measure 2880x4320, so the reduce after the crop
+        actually ran and `_verify_dimensions` saw a real file;
+      * the marker covers exactly the CENTRE slice, so the three outputs are
+        told apart by pixel where they are identical by dimension. The left
+        and right assertions are what make the centre one mean anything;
+      * the LEFT slice sits at (0,0) in the frame, which is one of the two
+        --cropOffset shapes sips silently ignores, so this is also the first
+        time tier 1 pads a 4x FRAME rather than a source.
+
+    It costs about six seconds of the fast suite's eighty, which is the price
+    of the band the real corpus mostly consists of.
+    """
+    opts = settings(tmp_path)
+    work = plan.plan_photo(tmp_path / "dunes.png", 2400, 1200, "png",
+                           [sizes.PHONE], opts)
+    left, centre, right = work.plans
+    assert [p.band for p in work.plans] == [bands.UPSCALE_REDUCE] * 3
+    assert [p.position for p in work.plans] == ["left", "center", "right"]
+    assert all((p.out_width, p.out_height) == (2880, 4320) for p in work.plans)
+    assert centre.crop == geometry.Rect(800, 0, 800, 1200)
+    assert left.crop == geometry.Rect(0, 0, 800, 1200)
+
+    source = write_marked_png(tmp_path / "dunes.png", 2400, 1200, centre.crop,
+                              base=BASE, marker=MARKER)
+
+    written = execute.run_photo(work, context(tmp_path, fake_upscaler))
+
+    assert written == [p.destination for p in work.plans]
+    for target in work.plans:
+        assert imaging.probe(target.destination)[:2] == (2880, 4320), \
+            "3200x4800 would mean the 4x slice was never reduced"
+
+    assert centre_colours(tmp_path, centre.destination, "c") == {MARKER}
+    assert centre_colours(tmp_path, left.destination, "l") == {BASE}
+    assert centre_colours(tmp_path, right.destination, "r") == {BASE}
+
+    # 4320/1200 = 3.6: the NET enlargement, not the model's 4x, and the one
+    # thing in the filename that tells a band-3 output from a band-4 one.
+    assert centre.destination.name == "dunes_center_phone_2880x4320_3.6x.png"
 
 
 def test_no_upscale_when_nothing_needs_it(tmp_path, fake_upscaler, monkeypatch):

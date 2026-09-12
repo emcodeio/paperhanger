@@ -89,3 +89,18 @@ def test_net_factor_refuses_a_rejected_band():
     should fail loudly, not receive a meaningless factor."""
     with pytest.raises(ValueError, match="rejected"):
         bands.net_factor(100, T, bands.REJECT)
+
+
+def test_bands_module_is_pure():
+    """Nothing in the band table may reach outside the process.
+
+    Asserted here rather than assumed: until this existed the suite checked
+    only `classify.py` and `plan.py`, so an `import subprocess` appearing in
+    this module tomorrow would have gone unremarked by every test in the tier
+    -- even though the spec lists all six decision modules as pure.
+    """
+    import paperhanger.bands as module
+
+    from tests.conftest import assert_pure_module
+
+    assert_pure_module(module, allowed={"sizes"})

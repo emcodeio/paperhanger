@@ -74,3 +74,110 @@ def test_purity_helper_reports_the_module_not_the_imported_names(tmp_path):
 
     with pytest.raises(AssertionError, match="classify"):
         assert_pure_module(module, allowed={"CROP"})        # a NAME is not a module
+
+
+# ---------- the four violations the import check alone let through ----------
+#
+# Every one of these passed the helper when it checked imports and nothing
+# else, which is what made the purity assertions on classify.py and plan.py
+# weaker than they read. Each case is written against `plan.py`'s own
+# allow-list, because that is the module where the temptation is real: spec
+# section 3 contemplated putting `destination.exists()` in the planner.
+
+PLAN_ALLOW_LIST = {"dataclasses", "pathlib", "bands", "formats",
+                   "geometry", "sizes", "classify"}
+
+
+def _fake_module(tmp_path, name: str, source: str):
+    import types
+
+    path = tmp_path / name
+    path.write_text(source)
+    return types.SimpleNamespace(__file__=str(path))
+
+
+@pytest.mark.parametrize("name,source,expected", [
+    # The realistic one. `pathlib` is allowed for path ARITHMETIC, so the
+    # import check cannot tell building a destination from stat-ing one.
+    ("stats.py",
+     "from pathlib import Path\n"
+     "def done(p):\n"
+     "    return Path(p).exists()\n",
+     r"\.exists\(\)"),
+    ("reads.py",
+     "from pathlib import Path\n"
+     "def load(p):\n"
+     "    return Path(p).read_text()\n",
+     r"\.read_text\(\)"),
+    # No import at all: `open` is a builtin, so there is nothing for an
+    # import check to look at.
+    ("builtin_open.py",
+     "def load(p):\n"
+     "    return open(p).read()\n",
+     r"open\(\)"),
+    # The import check's own blind spot, stated outright.
+    ("smuggled.py",
+     "def listing(p):\n"
+     "    return __import__('os').listdir(p)\n",
+     r"__import__\(\)"),
+])
+def test_purity_helper_catches_the_call_not_only_the_import(
+        tmp_path, name, source, expected):
+    from tests.conftest import assert_pure_module
+
+    module = _fake_module(tmp_path, name, source)
+    with pytest.raises(AssertionError, match=expected):
+        assert_pure_module(module, allowed=PLAN_ALLOW_LIST)
+
+
+def test_purity_helper_still_allows_path_arithmetic(tmp_path):
+    """Guards the guard: the check must not ban `pathlib` outright.
+
+    `plan.py` builds every destination out of these six operations and must
+    keep passing, or the assertion above would be satisfied by a helper that
+    simply refused all of pathlib -- which would be a different rule, and one
+    the code cannot live with.
+    """
+    from tests.conftest import assert_pure_module
+
+    module = _fake_module(
+        tmp_path, "arithmetic.py",
+        "from pathlib import Path\n"
+        "def destination(directory, source, suffix):\n"
+        "    stem = source.stem + suffix\n"
+        "    named = source.with_name(stem)\n"
+        "    return Path(directory) / named.parent.name / named.name\n",
+    )
+    assert_pure_module(module, allowed=PLAN_ALLOW_LIST)
+
+
+def test_purity_helper_does_not_fire_on_a_bare_attribute(tmp_path):
+    """`.open` as a VALUE is not `.open()` as a call.
+
+    The distinction is what lets `p.name` and `p.stem` through while
+    `p.exists()` is caught, so a check that walked Attribute nodes instead of
+    Call nodes would ban the arithmetic above along with the I/O.
+    """
+    from tests.conftest import assert_pure_module
+
+    module = _fake_module(
+        tmp_path, "attribute.py",
+        "def opener(handle):\n"
+        "    return handle.open\n",
+    )
+    assert_pure_module(module, allowed=set())
+
+
+def test_purity_helper_catches_a_function_local_import(tmp_path):
+    """ast.walk descends into function bodies; a check reading only
+    tree.body would miss the import most likely to be added in a hurry."""
+    from tests.conftest import assert_pure_module
+
+    module = _fake_module(
+        tmp_path, "local_import.py",
+        "def run(argv):\n"
+        "    import subprocess\n"
+        "    return subprocess.run(argv)\n",
+    )
+    with pytest.raises(AssertionError, match="subprocess"):
+        assert_pure_module(module, allowed=PLAN_ALLOW_LIST)

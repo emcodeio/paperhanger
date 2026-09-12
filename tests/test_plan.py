@@ -44,6 +44,19 @@ def test_quality_out_of_range():
         formats.quality_for("jpeg", 101)
 
 
+def test_formats_module_is_pure():
+    """A table of extensions and quality defaults imports nothing at all.
+
+    Lives beside the other `formats` tests rather than in a file of its own,
+    which is where the rest of this module's coverage already is.
+    """
+    import paperhanger.formats as module
+
+    from tests.conftest import assert_pure_module
+
+    assert_pure_module(module, allowed=set())
+
+
 # ---------- whole-image plans ----------
 
 def test_desktop_downscale_plan(tmp_path):
@@ -220,9 +233,16 @@ def test_no_collision_between_different_stems(tmp_path):
 
 
 def test_plan_module_is_pure():
-    """The decision layer never touches the world. Enforced by parsing the
-    imports, not by matching strings: `from subprocess import run` would slip
-    past a substring check for "import subprocess"."""
+    """The decision layer never touches the world.
+
+    Enforced by parsing rather than by matching strings: `from subprocess
+    import run` would slip past a substring check for "import subprocess".
+    And by parsing the CALLS as well as the imports, because `pathlib` is on
+    the allow-list below -- `plan.py` builds every destination out of it --
+    so `destination.exists()` would otherwise read as an allowed import.
+    That call is not hypothetical: spec section 3 proposes putting it here,
+    and `execute.is_pending` is where it went instead.
+    """
     import paperhanger.plan as module
 
     from tests.conftest import assert_pure_module

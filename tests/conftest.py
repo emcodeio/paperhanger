@@ -96,16 +96,92 @@ def corpus_sample(tmp_path_factory):
     )
 
 
-def assert_pure_module(module, allowed):
-    """Assert a module imports nothing outside `allowed`.
+# Builtins that reach outside the process without importing anything. `open`
+# is the one a pure module acquires by habit -- it needs no import, so the
+# import check below cannot see it. The other three are how an import is
+# smuggled past that check: `__import__('os').listdir(p)` passed the original
+# helper unremarked.
+IMPURE_BUILTINS = frozenset({"open", "__import__", "eval", "exec", "compile"})
 
-    Parses the source rather than matching strings: `from os import path`
-    contains neither "import os" nor "from pathlib", so substring checks
-    miss exactly the violations that matter. `allowed` is the set of
-    top-level module names this module may import, relative imports
-    included by their module name.
+# Method names that only ever mean I/O. Named individually rather than by
+# denying their module, because `pathlib` IS allowed in the decision layer --
+# for path ARITHMETIC. `/`, `.parent`, `.stem`, `.suffix`, `.name` and
+# `.with_name` build a destination without asking a disk anything; every name
+# below asks. `Path(p).exists()` is the specific violation spec section 3
+# contemplated putting in the planner, and the import check waves it through
+# because `pathlib` is on the allow-list.
+#
+# Matched on the attribute NAME alone, so it fires whatever the receiver is
+# called. That is deliberate: an alias (`P = Path`), a parameter, or a value
+# returned from elsewhere all read the same way at this layer, and a purity
+# check that only recognised one spelling would be the string-matching
+# mistake this helper was written to avoid.
+#
+# `replace` is NOT here, though `Path.replace` renames: `str.replace` is a
+# pure operation a decision module may legitimately want, and a check that
+# cried wolf would be turned off rather than fixed.
+IMPURE_METHODS = frozenset({
+    # pathlib, reading
+    "exists", "is_file", "is_dir", "is_symlink", "is_mount", "samefile",
+    "stat", "lstat", "owner", "group", "iterdir", "glob", "rglob", "walk",
+    "read_text", "read_bytes", "readlink", "resolve", "absolute", "cwd",
+    "home", "expanduser",
+    # pathlib, writing
+    "open", "write_text", "write_bytes", "mkdir", "rmdir", "touch", "unlink",
+    "rename", "symlink_to", "hardlink_to", "chmod", "lchmod",
+    # subprocess and os, for the same reason
+    "run", "Popen", "call", "check_call", "check_output", "communicate",
+    "system", "popen", "listdir", "scandir", "getcwd", "remove",
+})
+
+
+def _impure_calls(tree) -> set:
+    """Names called in `tree` that can only mean the filesystem or a process.
+
+    Calls, not bare attribute access: `p.name` and `p.stem` are arithmetic on
+    a path object and must stay legal, while `p.exists()` is a stat. The
+    distinction is the parenthesis, so that is what this looks for.
     """
-    tree = ast.parse(Path(module.__file__).read_text())
+    found = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        callee = node.func
+        if isinstance(callee, ast.Name) and callee.id in IMPURE_BUILTINS:
+            found.add(f"{callee.id}()")
+        elif isinstance(callee, ast.Attribute) and callee.attr in IMPURE_METHODS:
+            found.add(f".{callee.attr}()")
+    return found
+
+
+def assert_pure_module(module, allowed):
+    """Assert a module neither imports nor CALLS its way out of the process.
+
+    Two checks, because the import check alone proved to pass every realistic
+    violation. Measured against synthetic modules: `from pathlib import Path`
+    plus `Path(p).exists()` and `Path(p).read_text()` passed under `plan.py`'s
+    own allow-list; builtin `open(p).read()` passed; `__import__('os')` passed.
+    Only a stray `import subprocess` was caught. The import half is what the
+    helper advertised; the call half is what makes the advertisement true.
+
+      * IMPORTS. Parsed rather than string-matched: `from os import path`
+        contains neither "import os" nor "from pathlib", so a substring check
+        misses exactly the violations that matter. `allowed` is the set of
+        top-level module names this module may import, relative imports
+        included by their module name.
+      * CALLS. `pathlib` is on the decision layer's allow-list for path
+        arithmetic, so the import check cannot distinguish building a
+        destination from stat-ing one. See IMPURE_METHODS and IMPURE_BUILTINS.
+
+    Neither half is a sandbox and neither is claimed to be one. A module
+    determined to reach the disk can still do it -- `getattr(Path(p),
+    "exi" + "sts")()` defeats this in one line. What it catches is the
+    accident: the ordinary, readable filesystem call written by someone who
+    did not know this layer was meant to be pure.
+    """
+    source = Path(module.__file__).read_text()
+    tree = ast.parse(source)
+
     imported = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
@@ -119,6 +195,12 @@ def assert_pure_module(module, allowed):
     assert not forbidden, (
         f"{Path(module.__file__).name} imports {sorted(forbidden)}; "
         f"only {sorted(allowed)} allowed"
+    )
+
+    impure = _impure_calls(tree)
+    assert not impure, (
+        f"{Path(module.__file__).name} calls {sorted(impure)}, which touches "
+        f"the filesystem or a subprocess; this module is asserted pure"
     )
 
 

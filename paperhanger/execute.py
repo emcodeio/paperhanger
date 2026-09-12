@@ -12,6 +12,14 @@ Two rules that are easy to get wrong and expensive to get wrong:
     renamed. Staging beside the destination makes the rename atomic whatever
     volume TMPDIR is on, and an interrupted run never leaves a truncated file
     where the sorter will see it.
+
+What that does NOT buy is a peak of one frame. `imaging.crop` pads the whole
+image on the two --cropOffset shapes sips ignores (fact 6), so while a padded
+crop runs there are two full-size copies of the 4x frame on disk at once, and
+the pad fires for two of three horizontal slices and one of three vertical
+ones. The peak is two frames plus one slice, not one frame -- measured, not
+inferred. Spec section 7 names the fix, which is to pad each frame once
+instead of once per slice; it is not implemented here.
 """
 
 import shutil
@@ -68,14 +76,43 @@ def _refuse_to_enlarge(source, out_width: int, out_height: int) -> None:
         )
 
 
+def is_pending(target, overwrite: bool = False) -> bool:
+    """Will this run render this plan? The ONE place skip-existing is decided.
+
+    It used to be spelled out three times -- in the report's `already_done`,
+    in the toolchain pre-flight's `upscaler_is_needed`, and in
+    `run_and_archive` below. The first two decide what the dry-run PROMISES
+    and the third decides what the run DOES, so three copies that agree today
+    are a dry-run that lies tomorrow: exactly the drift the plan-then-execute
+    split exists to rule out (spec section 3).
+
+    Spec section 3 places this decision at plan time, and `plan.py` is the
+    wrong home for it in the end: it is the one skip-existing question that
+    has to ask the filesystem, and `plan.py` is asserted pure by
+    `tests/conftest.assert_pure_module`. It lives here instead, where the
+    effects already are, and everything that needs the answer asks this.
+    """
+    return overwrite or not target.destination.exists()
+
+
 def sweep_partials(processing_dir) -> int:
-    """Remove stray staging files from an interrupted earlier run."""
+    """Remove stray staging files from an interrupted earlier run.
+
+    Never raises. It runs in the pre-flight, before any photo is touched, and
+    a stray this process cannot remove -- one owned by another user, or on a
+    volume gone read-only -- is not a reason to refuse a run that would
+    otherwise finish. The count is of files actually removed, so a stray left
+    behind is not reported as swept.
+    """
     processing_dir = Path(processing_dir)
     if not processing_dir.is_dir():
         return 0
     removed = 0
     for stray in processing_dir.rglob(f"*{PARTIAL_SUFFIX}"):
-        stray.unlink(missing_ok=True)
+        try:
+            stray.unlink(missing_ok=True)
+        except OSError:
+            continue
         removed += 1
     return removed
 
@@ -580,10 +617,12 @@ def run_and_archive(work, ctx) -> PhotoResult:
         # Checked HERE rather than inside run_photo, because the upscaler runs
         # once per photo before any plan is rendered: a photo whose outputs are
         # all present would otherwise pay minutes for a frame nothing reads.
-        if target.destination.exists() and not ctx.overwrite:
-            result.skipped.append(target.destination)
-        else:
+        # Through `is_pending`, which is the same call the CLI's report and
+        # toolchain pre-flight make -- see its docstring.
+        if is_pending(target, ctx.overwrite):
             todo.append(target)
+        else:
+            result.skipped.append(target.destination)
 
     if todo:
         # A cropped copy of the work, so run_photo sees only the plans that are

@@ -514,6 +514,146 @@ def test_overwrite_demands_the_upscaler_again(
     assert "PAPERHANGER_UPSCAYL_BIN" in out
 
 
+# ---------- the sips pre-flight ----------
+
+@pytest.fixture
+def no_sips(tmp_path, monkeypatch):
+    """A machine whose sips is missing, quarantined, or not where it was."""
+    monkeypatch.setattr(imaging, "SIPS", str(tmp_path / "no" / "such" / "sips"))
+
+
+def test_a_missing_sips_stops_the_run_rather_than_emptying_it(
+        inbox, tmp_path, no_sips, capsys):
+    """One sentence instead of a lie about the user's whole library.
+
+    `probe` returns None for anything it cannot measure and never raises,
+    which is correct -- it is how a .DS_Store is told from a photograph. The
+    cost is that a missing sips is indistinguishable from a directory of
+    files that are none of them images.
+    """
+    fixture(inbox / "lichen.png", 2000, 3000)
+
+    code, out = run([str(inbox), "--processing-dir", str(tmp_path / "proc")], capsys)
+
+    assert code == cli.USAGE_ERROR
+    assert imaging.SIPS in error_block(out)
+    assert "0 images" not in out, \
+        "the report header must not describe the photograph as unreadable"
+
+
+def test_without_the_check_a_missing_sips_reports_the_library_as_unreadable(
+        inbox, tmp_path, no_sips, monkeypatch, capsys):
+    """Guards the guard: what the check above is preventing, measured.
+
+    With `check_sips` neutered the run scans the directory, measures nothing,
+    classifies the photograph as a non-image, plans no work, writes no file
+    and exits 0 -- telling the user their photographs are corrupt. Without
+    this test the assertion above would pass equally well against a pre-flight
+    that refused every run for some unrelated reason.
+    """
+    fixture(inbox / "lichen.png", 2000, 3000)
+    monkeypatch.setattr(cli, "check_sips", lambda: None)
+
+    code, out = run([str(inbox), "--processing-dir", str(tmp_path / "proc")], capsys)
+
+    assert code == cli.OK
+    assert "0 images" in out and "1 non-image" in out
+    assert not (tmp_path / "proc" / "to_sort_phone").exists()
+
+
+def test_a_missing_sips_is_refused_before_the_directory_is_read(
+        tmp_path, no_sips, capsys):
+    """The complaint is about sips, not about the input.
+
+    An unreadable directory and a missing sips both end the run at exit 1, and
+    only one of them is the user's actual problem -- so the check runs first
+    and the message says which.
+    """
+    inbox = tmp_path / "in"
+    inbox.mkdir()
+    fixture(inbox / "lichen.png", 2000, 3000)
+    inbox.chmod(0o000)
+    try:
+        code, out = run([str(inbox), "--processing-dir", str(tmp_path / "proc")],
+                        capsys)
+    finally:
+        inbox.chmod(0o755)
+
+    assert code == cli.USAGE_ERROR
+    assert imaging.SIPS in error_block(out)
+    assert "cannot read" not in out
+
+
+def test_doctor_and_the_run_read_the_same_sips(tmp_path, no_sips, capsys):
+    """Both ask `sips_is_present`, so neither can start saying something the
+    other does not. doctor reported this before `_run` did."""
+    code, out = run(["doctor"], capsys)
+
+    assert code == cli.OK
+    assert "MISSING" in next(line for line in out.splitlines()
+                             if line.startswith("sips"))
+    assert cli.check_sips() is not None
+
+
+# ---------- skip-existing, decided once ----------
+
+def test_is_pending_answers_the_four_combinations(tmp_path):
+    """An output on disk is skipped unless --overwrite says otherwise."""
+    import types
+
+    absent = types.SimpleNamespace(destination=tmp_path / "gone.heic")
+    present = types.SimpleNamespace(destination=tmp_path / "there.heic")
+    present.destination.write_text("an earlier run's output")
+
+    assert execute.is_pending(absent) is True
+    assert execute.is_pending(absent, overwrite=True) is True
+    assert execute.is_pending(present) is False
+    assert execute.is_pending(present, overwrite=True) is True
+
+
+@pytest.mark.parametrize("verdict,done,needs_model,renders", [
+    (True, False, True, True),
+    (False, True, False, False),
+])
+def test_every_skip_existing_decision_goes_through_one_function(
+        inbox, tmp_path, ready_toolchain, monkeypatch,
+        verdict, done, needs_model, renders):
+    """The report, the toolchain pre-flight and the executor, all one call.
+
+    Skip-existing used to be spelled out three times: `already_done` decides
+    what the dry-run PROMISES, `upscaler_is_needed` decides whether the run is
+    allowed to start at all, and `run_and_archive` decides what it DOES. They
+    agreed, but nothing made them: a change to one produced a dry-run that
+    lied about its own run, which is the failure the plan-then-execute split
+    exists to rule out.
+
+    Replacing `is_pending` wholesale is what makes that checkable. All three
+    must follow it, in both directions -- so this fails if any of them goes
+    back to asking the filesystem for itself.
+    """
+    from paperhanger import plan
+
+    source = fixture(inbox / "sunset.png", 480, 720)
+    opts = plan.OutputSettings(tmp_path / "proc", "png", None)
+    works = [plan.plan_photo(source, 480, 720, "png", [sizes.PHONE], opts)]
+    assert works[0].needs_upscale
+
+    monkeypatch.setattr(execute, "is_pending",
+                        lambda target, overwrite=False: verdict)
+
+    assert (works[0].source in cli.already_done(works, False)) is done
+    assert cli.upscaler_is_needed(works, False) is needs_model
+
+    binary, models = ready_toolchain, ready_toolchain
+    ctx = execute.Context(processing_dir=tmp_path / "proc",
+                          workroot=tmp_path / "work",
+                          upscayl=toolchain.find_upscayl(), models_dir=models)
+    result = execute.run_and_archive(works[0], ctx)
+
+    assert bool(result.written) is renders
+    assert bool(result.skipped) is not renders
+
+
 # ---------- setup and doctor ----------
 
 def test_doctor_reports_without_failing(capsys):

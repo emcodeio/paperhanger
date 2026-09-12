@@ -163,6 +163,35 @@ def resolve_devices(chosen) -> list:
     return list(dict.fromkeys(chosen if chosen else list(sizes.DEVICES)))
 
 
+def sips_is_present() -> bool:
+    """Is the imaging tool actually there? `doctor` and `_run` ask this one."""
+    return Path(imaging.SIPS).exists()
+
+
+def check_sips():
+    """Fail loudly on a missing sips rather than quietly on every photo.
+
+    `probe` returns None for anything it cannot measure and never raises --
+    correctly, because that is how a .DS_Store is told from a photograph. The
+    cost is that a `sips` which is missing, quarantined or not executable is
+    indistinguishable from a directory of 894 files that are none of them
+    images: `scan` counts every one as a non-image and the run prints
+    `0 images, 0 outputs, 0 rejected, 0 already done, 894 non-images skipped`,
+    writes nothing, and exits 0. The user is told their entire library is
+    unreadable when what is missing is one tool.
+
+    `doctor` has reported this since it was written; `_run` did not, and `_run`
+    is the command anyone points at their photographs. Returns a complaint, or
+    None.
+    """
+    if sips_is_present():
+        return None
+    return (f"{imaging.SIPS} is missing, so every image would be measured as a "
+            f"non-image\n"
+            f"  and the run would do nothing at all. sips ships with macOS.\n"
+            f"  Run `paperhanger doctor` to see the rest of the toolchain.")
+
+
 def scan(path: Path):
     """(probed images, non-image count). Non-recursive, like the legacy glob.
 
@@ -192,22 +221,25 @@ def already_done(works, overwrite: bool) -> set:
     empty sequence is True and a photo rejected on every device has no plans at
     all. Without the guard such a photo renders as "already done, skipping"
     while the header two lines above counts it as rejected.
+
+    Skip-existing itself is `execute.is_pending`, not a fourth spelling of it:
+    this function and the executor must agree about every plan, or the
+    dry-run promises one thing and the run does another.
     """
-    if overwrite:
-        return set()
     return {work.source for work in works
-            if work.plans and all(p.destination.exists() for p in work.plans)}
+            if work.plans and not any(execute.is_pending(p, overwrite)
+                                      for p in work.plans)}
 
 
 def upscaler_is_needed(works, overwrite: bool) -> bool:
     """Will anything this run actually renders ask for the model?
 
-    Asked per PLAN and after the skip-existing check the executor will make,
-    not per photo: a resumed import whose remaining outputs are all band 1 or
-    2 needs no binary, and demanding one would stop a run that was going to
-    finish without it.
+    Asked per PLAN and through the same `execute.is_pending` the executor
+    will use, not per photo: a resumed import whose remaining outputs are all
+    band 1 or 2 needs no binary, and demanding one would stop a run that was
+    going to finish without it.
     """
-    return any(p.needs_upscale and (overwrite or not p.destination.exists())
+    return any(p.needs_upscale and execute.is_pending(p, overwrite)
                for work in works for p in work.plans)
 
 
@@ -414,6 +446,13 @@ def _run(argv) -> int:
         print(f"error: {complaint}")
         return USAGE_ERROR
 
+    # Before the scan, because the scan is what a missing sips turns into a
+    # lie: it would report every photograph in the directory as a non-image.
+    complaint = check_sips()
+    if complaint:
+        print(f"error: {complaint}")
+        return USAGE_ERROR
+
     devices = resolve_devices(args.devices)
     opts = plan.OutputSettings(args.processing_dir, args.format, quality)
 
@@ -586,7 +625,7 @@ def _doctor() -> int:
           f"({'ok' if state['models_ok'] else 'missing or corrupt'})")
     print(f"models dir     : {state['models_dir']}")
     print(f"sips           : {imaging.SIPS} "
-          f"({'ok' if Path(imaging.SIPS).exists() else 'MISSING'})")
+          f"({'ok' if sips_is_present() else 'MISSING'})")
     return OK
 
 
