@@ -1431,3 +1431,52 @@ def test_cheapest_first_orders_the_upscaling_photos_by_cost(tmp_path):
     assert [w.needs_upscale for w in works] == [True, False, True]
     assert [w.source.stem for w in execute.cheapest_first(works)] == [
         "cheap", "small_frame", "big_frame"]
+
+
+def test_a_failed_enlargement_is_not_held_while_the_next_plan_runs(tmp_path,
+                                                                  fake_upscaler,
+                                                                  monkeypatch):
+    """Collecting failures changed who sweeps the workdir, and when.
+
+    A photo that aborted on its first bad plan had its workdir swept
+    immediately; one that carries on does not, so a model run that exits
+    non-zero AFTER writing part of its output leaves that part behind for as
+    long as the photo lasts. Two regions held at once is most of what the pixel
+    cap was imposed to save, and the fallback path is exactly where the cap has
+    already said memory is tight.
+    """
+    source = write_png(import_dir(tmp_path) / "s.png", 1440, 720)
+    work = plan.plan_photo(source, 1440, 720, "png", [sizes.PHONE], settings(tmp_path))
+    monkeypatch.setattr(execute, "UPSCALE_PIXEL_CAP", 1)
+
+    real_upscale = imaging.upscale
+    calls = {"n": 0}
+
+    def flaky_upscale(source_png, out_png, binary, models_dir, *args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            Path(out_png).write_bytes(b"half an enlargement")
+            raise imaging.ImagingError("upscayl-bin exited 1: out of memory")
+        return real_upscale(source_png, out_png, binary, models_dir, *args, **kwargs)
+
+    alive = []
+    real_render = execute.render
+
+    def watching_render(target, image, scale, workdir):
+        alive.append(sorted(p.name for p in Path(workdir).iterdir() if p.is_file()))
+        return real_render(target, image, scale, workdir)
+
+    monkeypatch.setattr(imaging, "upscale", flaky_upscale)
+    monkeypatch.setattr(execute, "render", watching_render)
+    ctx = context(tmp_path, fake_upscaler)
+    ctx.log = lambda message: None
+
+    result = execute.run_and_archive(work, ctx)
+
+    assert len(result.failures) == 1 and len(result.written) == 2
+    assert all(len(held) == 1 for held in alive), \
+        f"the failed plan's enlargement was still held: {alive}"
+    root = Path(ctx.workroot)
+    leftovers = [p for p in root.rglob("*") if p.is_file()] if root.exists() else []
+    assert leftovers == [], f"left behind: {leftovers}"
+    assert source.exists()
