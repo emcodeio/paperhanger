@@ -49,6 +49,18 @@ def run(argv, capsys):
     return code, capsys.readouterr().out
 
 
+def summary_line(out: str) -> str:
+    """The closing `done: ...` line, isolated.
+
+    Asserted against by name rather than against the whole of stdout, because
+    the report header printed above it carries its own "N rejected" and "N
+    already done" -- so a summary that had stopped counting either would hide
+    behind the header and the test would still be green. Found by mutation:
+    `rejected = counts[execute.REJECTED]` survived until this existed.
+    """
+    return next(line for line in out.splitlines() if line.startswith("done:"))
+
+
 @pytest.fixture
 def inbox(tmp_path):
     directory = tmp_path / "in"
@@ -283,7 +295,7 @@ def test_every_format_plans(inbox, tmp_path, capsys, fmt, extension):
     code, out = run(["-p", "--format", fmt, "--dry-run", "--processing-dir",
                      str(tmp_path / "p"), str(inbox)], capsys)
     assert code == 0
-    assert f"0 already done" in out
+    assert "1 output" in out
     assert cli.formats.extension(fmt) == extension
 
 
@@ -569,7 +581,7 @@ def test_end_to_end_run(inbox, tmp_path, ready_toolchain, capsys):
     assert imaging.probe(written[0])[:2] == (1920, 2880)
     assert (processing / "originals" / "cliffs.png").exists()
     assert not (inbox / "cliffs.png").exists(), "originals are moved, not copied"
-    assert "1 ok" in out
+    assert "1 ok" in summary_line(out)
 
 
 def test_the_run_leaves_no_scratch_behind(inbox, tmp_path, ready_toolchain, capsys):
@@ -606,7 +618,7 @@ def test_an_existing_output_is_not_regenerated(inbox, tmp_path, no_upscaler, cap
     assert code == 0
     assert destination.read_bytes() == b"an earlier run's output"
     assert (processing / "originals" / "lichen.png").exists()
-    assert "1 already done" in out
+    assert "1 already done" in summary_line(out)
 
 
 def test_overwrite_regenerates_it(inbox, tmp_path, no_upscaler, capsys):
@@ -647,7 +659,7 @@ def test_a_rejected_photo_goes_to_error_and_the_run_succeeds(
     code, out = run(["--processing-dir", str(processing), str(inbox)], capsys)
     assert code == 0
     assert (processing / "error" / "tiny.png").exists()
-    assert "1 rejected" in out
+    assert "1 rejected" in summary_line(out)
 
 
 def test_a_rejected_photo_whose_archive_fails_is_still_counted_rejected(
@@ -661,8 +673,8 @@ def test_a_rejected_photo_whose_archive_fails_is_still_counted_rejected(
     (processing / "error").write_text("a file where the directory should be")
     code, out = run(["--processing-dir", str(processing), str(inbox)], capsys)
     assert code == 2
-    assert "1 rejected" in out
-    assert "1 failed" in out
+    assert "1 rejected" in summary_line(out)
+    assert "1 failed" in summary_line(out)
     assert (inbox / "tiny.png").exists(), "a failed archive leaves the source alone"
 
 
@@ -683,7 +695,7 @@ def test_a_photo_the_upscaler_chokes_on_does_not_end_the_batch(
     assert (processing / "originals" / "good.png").exists()
     assert (inbox / "bad.png").exists(), "a failed photo stays where it was found"
     assert "bad.png" in out
-    assert "1 ok" in out and "1 failed" in out
+    assert "1 ok" in summary_line(out) and "1 failed" in summary_line(out)
 
 
 def test_a_failure_says_why_beside_the_photo_it_happened_to(
@@ -747,7 +759,7 @@ def test_progress_counts_every_photo(inbox, tmp_path, no_upscaler, capsys):
     assert code == 0
     for index in (1, 2, 3):
         assert f"[{index}/3]" in out
-    assert "3 ok" in out
+    assert "3 ok" in summary_line(out)
 
 
 def test_cheap_photos_run_first(inbox, tmp_path, ready_toolchain, capsys):
