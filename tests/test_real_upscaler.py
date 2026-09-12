@@ -594,12 +594,22 @@ GT_LARGE = ((2048, 2988), (512, 747))
 GT_SMALL = ((1440, 2160), (360, 540))
 
 # Both slice positions, because they are not the same test. The MIDDLE third
-# has a non-zero origin and sits in the interior of the 4x frame. The TOP third
-# sits at 0,0 -- the offset `sips` silently replaces with a centred crop, so
-# every cut of it goes the pad-and-shift way -- and it is the boundary case:
-# arm A's slice edge is interior to its frame, where the model had context on
-# both sides of it, while arm B's is a real image boundary, where it had none.
-# If the two arms diverge in quality anywhere, it should be here.
+# has a non-zero origin, so both of its cut edges are interior to the 4x frame.
+# The TOP third sits at 0,0 -- the offset `sips` silently replaces with a
+# centred crop, so every cut of it goes the pad-and-shift way.
+#
+# BE CAREFUL WHAT YOU CONCLUDE FROM THE TOP SLICE'S TOP EDGE. It is a real
+# image boundary in BOTH arms: arm A cuts it from row 0 of its own 4x frame,
+# which is the frame's own edge, and arm B cuts it from row 0 of S. Neither
+# model call had context above it, so the two are identical there by
+# construction and no measurement taken at that edge can tell them apart. An
+# earlier draft measured exactly there, found the arms equally distant from
+# truth, and concluded the edge was not involved -- the opposite of the truth.
+#
+# The edge that DOES differ is the slice's BOTTOM: interior to arm A's frame,
+# a real cut boundary for arm B. Measured band by band, the two arms are
+# bit-identical over the first 60% of the slice and 93.9% of arm B's extra
+# squared error sits in the last 10%, against that cut. See section 7.
 GT_SLICES = ((1, "middle"), (0, "top"))
 
 GT_ARTIFACTS_ENV = "PAPERHANGER_GROUND_TRUTH_ARTIFACTS"
@@ -722,7 +732,7 @@ def _ground_truth_pass(inbox: Path, geometry_pair, binary, models,
           f"{'DSSIM(A,T)':>11} {'DSSIM(B,T)':>11} {'delta':>10}   image")
 
     rows = []
-    widest = 0.0
+    widest = -1.0      # below any |delta|, so the first case always preserves
     for name in names:
         window = _ground_truth_window(inbox / name, workdir / f"gt_{name}.png",
                                       window_w, window_h)
@@ -750,7 +760,10 @@ def _ground_truth_pass(inbox: Path, geometry_pair, binary, models,
                 print(f"{slice_name:<7}{scored['psnr_a']:10.2f} {scored['psnr_b']:10.2f} "
                       f"{psnr_delta:+8.2f}   {scored['dssim_a']:11.5f} "
                       f"{scored['dssim_b']:11.5f} {dssim_delta:+10.5f}   {name}")
-                if abs(psnr_delta) >= widest:
+                # Strictly greater: on a tie the FIRST case measured keeps the
+                # artifacts, so which pictures land on disk does not depend on
+                # iteration order.
+                if abs(psnr_delta) > widest:
                     widest = abs(psnr_delta)
                     _preserve_ground_truth(scored, artifacts, name, slice_name,
                                            label, psnr_delta)

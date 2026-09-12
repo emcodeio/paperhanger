@@ -346,40 +346,62 @@ window sizes and both slice positions, **56 measurements in all**:
 | 2048x2988 | 12 | top | 11 of 12 | +0.021 dB | 10 of 12 |
 | 1440x2160 | 16 | middle | 13 of 16 | +0.037 dB | 14 of 16 |
 | 1440x2160 | 16 | top | 15 of 16 | +0.020 dB | 14 of 16 |
-| **overall** | | | **50 of 56** | **+0.025 dB** | **47 of 56** |
+| **overall** | | | **50 of 56** | | **47 of 56** |
 
 Extremes across all 56: the largest margin for whole-frame is +0.54 dB, the largest against it
-−0.24 dB.
+−0.24 dB. Medians are given per window rather than pooled, because per window is what the test
+prints and a pooled figure would be a number nothing regenerates.
 
-The margin is the point, and it is nearly zero. On the first window's widest-gap image the two
-arms differ from *each other* by 43.18 dB — a mean absolute difference of 0.71 levels — while
-each differs from the *truth* by about 30 dB, a mean of 4.53 and 4.63 levels respectively. The
-arms agree with one another roughly six times more closely than either agrees with the truth,
-and their error maps are visually indistinguishable: both miss in the same places, on the same
-rock texture. Whatever this upscaler gets wrong at 4x, it gets wrong almost identically whether
-it saw the whole frame or one slice of it. **Choosing the whole frame costs no quality, and
-section 7's saving is accepted on that evidence rather than on the architecture argument it
-started with.**
+The margin is the point, and it is nearly zero. On the first window's widest-gap image —
+`snowy_forest_6657.jpg`, top slice, the one the saved artifacts show — the two arms differ from
+*each other* by 38.71 dB, while each differs from the *truth* by about 29 dB: a mean absolute
+error of 4.623 levels for whole-frame against 4.800 for per-slice. The arms agree with one
+another about seven times more closely than either agrees with the truth. Whatever this
+upscaler gets wrong at 4x, it gets wrong almost identically whether it saw the whole frame or
+one slice of it. **Choosing the whole frame costs no quality, and section 7's saving is
+accepted on that evidence rather than on the architecture argument it started with.**
 
-Two things the second window and the top slice were added to check, and what they found. The
-1440x2160 window admits four more photographs, **including both of the two that disagreed most
-between the arms** — `mountain_lake_reflection_4788.jpg`, where whole-frame wins by +0.18 and
-+0.20 dB, and `snowy_forest_landscape_9522.jpg`, the one image where per-slice wins by a
+The 1440x2160 window admits four more photographs, **including both of the two that disagreed
+most between the arms** — `mountain_lake_reflection_4788.jpg`, where whole-frame wins by +0.18
+and +0.20 dB, and `snowy_forest_landscape_9522.jpg`, the one image where per-slice wins by a
 visible margin at −0.10 dB on the middle slice and −0.01 on the top. Neither moves the
 aggregate. A 360x540 model input is also a smaller regime than 512x747, and it widens the
 spread a little (−0.24 to +0.42 against −0.05 to +0.54) without shifting its centre.
 
-The top slice was added because it is the boundary case: its origin is `0,0`, so every cut of
-it goes through `crop`'s pad-and-shift path, and whole-frame's slice edge is interior to its
-frame where per-slice's is a real image boundary. The prediction was that per-slice should win
-there if anywhere. **It does not** — whole-frame wins the top slice 11 of 12 and 15 of 16, its
-best single margin anywhere. Nor is the advantage located at the boundary: on the widest-gap
-top slice the outermost 8 rows show the two arms equally distant from truth, at 2.0 levels
-each, and per-slice's whole deficit is spread across the interior at 0.16 levels a row. The
-edge is not where this lives.
+**Where the two arms differ is the cut edge, and only the cut edge.** Measured band by band
+down the widest-gap slice, in 128-row bands of its 1280 rows:
 
-One limit remains: absolute reconstruction quality is unremarkable — 18.4 to 40.1 dB against
-truth across the 56 — which is 4x enlargement being hard, not a fact about which arm was used.
+| rows | whole-frame MSE vs truth | per-slice MSE vs truth | the two arms, mean abs difference |
+|---|---|---|---|
+| 0-767 | 3.6 to 9.1 | identical | **0.000 — bit-identical** |
+| 768-895 | 11.77 | 11.77 | 0.053 |
+| 896-1023 | 41.39 | 41.46 | 0.089 |
+| 1024-1151 | 215.9 | 222.4 | 0.586 |
+| 1152-1279 | 500.4 | 601.5 | 5.789 |
+
+The two outputs are **bit-identical over the first 60% of the slice** and diverge only as the
+cut edge approaches: the last 128 rows, 10% of the slice, carry **93.9%** of per-slice's extra
+squared error, and the last 256 rows carry 99.9%. Divergence begins 512 output rows from the
+cut — 128 rows of model input, a tile-scale distance — and is strictly zero beyond it.
+
+That is the mechanism, and it favours the design for a reason that generalises past this
+experiment: **in production, every cut edge of a whole-frame slice has frame context behind it,
+and every cut edge of a per-slice enlargement has none.** The effect is real, local and
+one-sided.
+
+**It is also worth about two hundredths of a decibel, and the corrected mechanism must not be
+read as a stronger claim than the numbers support.** A margin that small is invisible; the
+finding remains that the two are **interchangeable**, not that whole-frame is better. What the
+mechanism buys is confidence that the sign is not an accident — the effect has a cause, the
+cause is one-sided, and it will keep pointing the same way — which is why section 7 can take
+the cheaper path without a caveat, rather than a reason to claim a quality gain.
+
+Two cautions on the measurement itself. The `0,0` origin of the top slice is a real image
+boundary in *both* arms, since whole-frame cuts it from the very top of its own 4x frame, so
+nothing measured at that edge can distinguish them — an earlier draft looked there, found the
+arms equally distant from truth, and wrongly concluded the edge was not involved. And absolute
+reconstruction quality is unremarkable — 18.4 to 40.1 dB against truth across the 56 — which is
+4x enlargement being hard, not a fact about which arm was used.
 
 The earlier measurement, kept because it is what the gate originally asked and because it
 explains why the question had to be re-asked. It scores the two arms **against each other**,
@@ -429,13 +451,24 @@ arm is privileged, so "arm A sees more, therefore arm A is better" never followe
 numbers. The ground-truth measurement above is what settles it, and it bears the bound out:
 arm A does come out ahead, on 11 of 12 images, by a median of two hundredths of a decibel.
 
-(Provenance. Regenerated by `tests/test_real_upscaler.py` on every run: the 18-image
-distribution, and the top-slice 35.98 against the middle slice's 35.19. Attributed
-measurements, made during review of that test and *not* recomputed by it — the test writes an
-auto-levelled difference image, which shows where the arms disagree but not by how much, and
-computes no statistics: the per-row edge range, the interior mean, the squared-error shares,
-the one-pixel-offset figure, both trim figures, the pinned-`-t` triple, and the 0.2898 →
-0.0232 noise-flattening figures.)
+(Provenance, for every number in this section.
+
+**Regenerated by `tests/test_real_upscaler.py` on every run:** the 18-image
+arms-against-each-other distribution; the top-slice 35.98 against the middle slice's 35.19;
+all 56 ground-truth scores, the per-window win counts and medians, and the extremes.
+
+**Attributed — measured against the artifacts the test saves, but not computed by the test
+itself.** The test writes the two arms, the truth slice and a pair of auto-levelled difference
+images, which show *where* the arms disagree but not by how much, and it calculates no
+statistics. So these were measured separately, from those committed PNGs, with `magick`: the
+widest-gap image's 38.71 dB between the arms and its 4.623 and 4.800 mean absolute errors
+against truth; the whole band table and everything drawn from it — the bit-identical first 60%,
+the 93.9% and 99.9% squared-error shares, the 512-row divergence distance. Also attributed,
+from the earlier arms-against-each-other work and likewise not recomputed by any test: the
+per-row edge range, the interior mean, its squared-error shares, the one-pixel-offset figure,
+both trim figures, the pinned-`-t` triple, and the 0.2898 → 0.0232 noise-flattening figures.
+Any of them can be reproduced from the saved artifacts; none of them will fail a test if the
+code changes underneath them.)
 
 Note also what the top-slice measurement does not establish, since the earlier draft claimed
 it did. It cannot catch an arm cutting the wrong region: under that bug both arms receive
@@ -678,19 +711,19 @@ the author's acceptance pass, deliberately outside the definition of done:
   default. Take a window of original pixels, downscale it 4x with `sips` to make the model's
   input, enlarge it back both ways, and score each arm against the truth slice cut from the
   untouched window. Run at two window sizes and both slice positions: **56 measurements**, of
-  which whole-frame is closer on **50 by PSNR** (pooled median +0.025 dB) and **47 by DSSIM**.
-  The gap is negligible beside the model's own reconstruction error — the arms sit 43.18 dB
-  from each other where each sits about 30 dB from the truth. Both metrics are reported
-  because the research document warns that PSNR inverts the visual ranking for this upscaler;
-  answering a perceptual question with PSNR alone is the mistake that cost this task two
-  review rounds. Section 7's saving is accepted on this.
+  which whole-frame is closer on **50 by PSNR** and **47 by DSSIM**, at per-window medians of
+  +0.020 to +0.037 dB. The gap is negligible beside the model's own reconstruction error — on
+  the widest-gap image the arms sit 38.71 dB from each other where each sits about 29 dB from
+  the truth. Both metrics are reported because the research document warns that PSNR inverts
+  the visual ranking for this upscaler; answering a perceptual question with PSNR alone is the
+  mistake that cost this task two review rounds. Section 7's saving is accepted on this.
 - **Two windows and two slice positions, each for a reason.** The 2048x2988 window is the
   largest twelve sample photographs can supply; the 1440x2160 window admits sixteen, including
   the two that disagreed most between the arms and that the larger window cannot fit. The
-  middle third sits in the interior of the 4x frame; the top third sits at `0,0`, which is both
-  the offset `sips` silently mis-crops and the boundary case where per-slice upscaling has no
-  context beyond the edge. Neither addition moves the conclusion, and the boundary case goes
-  the opposite way from the prediction — whole-frame wins the top slice 11 of 12 and 15 of 16.
+  middle slice's cut edges are both interior to the 4x frame; the top slice has one edge at
+  `0,0` — a real image boundary in *both* arms, and so useless for telling them apart — and its
+  other edge against the cut, which is where section 7's band table locates the entire
+  difference. Neither addition moves the conclusion.
 - **The older arms-against-each-other measurement is kept, and asserts no threshold.** It
   spans **33.43 to 52.61 dB, median 42.86** over 18 real photographs — 12 above the
   once-proposed 40 dB bar, 4 in the 35-40 dB band, 2 below the 35 dB floor. That spread is
@@ -698,9 +731,9 @@ the author's acceptance pass, deliberately outside the definition of done:
   measured. The test pins the two invariants that are not judgment calls — both arms agree on
   dimensions, every selected image yields a measurement — and prints the rest. Both selections
   are rules rather than hand-picked sets: every image in `tests/corpus_sample.txt` whose native
-  pixels can host the window, at 700x1800 for this one and 2048x2988 for the ground-truth one.
-  The larger window admits only 12 images and excludes the two that score lowest here, which
-  is a real limit on what the ground-truth result covers.
+  pixels can host the window, at 700x1800 here and 2048x2988 or 1440x2160 for the ground-truth
+  passes. The two images that score lowest here are the two the larger ground-truth window
+  cannot fit, which is why the smaller one exists; both are covered there.
 - The retired rule's three bands survive only as `old_rule_band`, a pure classifier used for
   reporting. Its 35-40 dB branch — the one that was supposed to stop and ask a human — was
   never once executed while the rule was live, because the only measurement that ever reached
