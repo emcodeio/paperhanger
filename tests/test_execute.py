@@ -16,18 +16,21 @@ def settings(tmp_path, fmt="png"):
 
 
 def stub_encoder(monkeypatch, seen=None):
-    """Replace the encoder with one that just writes the file it was given.
+    """Replace the encoder with one that writes a real image at the size asked.
 
     Used by the tests about render's own plumbing -- staging, mkdir, cleanup --
     where a real sips run on a 6 Mpx fixture would add seconds and prove
-    nothing. It still WRITES, so a render that forgot to create the
-    destination directory fails here exactly as it would in production.
+    nothing. It still WRITES, so a render that forgot to create the destination
+    directory fails here exactly as it would in production, and it writes the
+    requested dimensions, because render measures its own output before
+    publishing it. The stub therefore differs from the real encoder only in
+    pixel content and container format.
     """
     def encode(source, out_width, out_height, fmt, quality, out_path, resize):
         if seen is not None:
             seen.append((Path(source), out_width, out_height, fmt, quality,
                          Path(out_path), resize))
-        Path(out_path).write_bytes(b"an encoded wallpaper")
+        write_png(out_path, out_width, out_height)
 
     monkeypatch.setattr(imaging, "resize_and_encode", encode)
 
@@ -343,6 +346,97 @@ def test_the_guard_does_not_run_for_a_plan_that_never_resamples(tmp_path,
     monkeypatch.setattr(execute, "_refuse_to_enlarge", refuse)
     stub_encoder(monkeypatch)
     execute.render(target, source, scale=1, workdir=tmp_path / "work")
+
+
+# ---------- the output post-condition ----------
+
+def test_a_render_that_would_be_the_wrong_size_is_refused(tmp_path):
+    """The hole the no-enlargement guard cannot see.
+
+    A band 4 plan handed its own original at scale 1 crops the 480x720 slice
+    and resamples nothing -- `needs_resize` is False and `scale` is 1, so the
+    guard never runs. Before this check, render wrote
+    `s_left_phone_1920x2880_4x.png` at 480x720 and returned: measured, at exit
+    0, with no enlargement and therefore no breach of constraint 1, but a file
+    whose own name asserts dimensions it does not have.
+    """
+    source = write_png(tmp_path / "s.png", 1440, 720)
+    work = plan.plan_photo(source, 1440, 720, "png", [sizes.PHONE], settings(tmp_path))
+    target = work.plans[0]
+    assert target.band == bands.UPSCALE_ONLY and not target.needs_resize
+    assert target.destination.name == "s_left_phone_1920x2880_4x.png"
+
+    with pytest.raises(imaging.ImagingError) as caught:
+        execute.render(target, source, scale=1, workdir=tmp_path / "work")
+    assert "480x720" in str(caught.value) and "1920x2880" in str(caught.value)
+
+
+def test_a_wrong_sized_render_publishes_nothing(tmp_path):
+    """Neither the destination nor a stray `.partial` survives the refusal."""
+    source = write_png(tmp_path / "s.png", 1440, 720)
+    work = plan.plan_photo(source, 1440, 720, "png", [sizes.PHONE], settings(tmp_path))
+    target = work.plans[0]
+
+    with pytest.raises(imaging.ImagingError):
+        execute.render(target, source, scale=1, workdir=tmp_path / "work")
+
+    assert not target.destination.exists()
+    assert list(target.destination.parent.glob("*.partial")) == []
+    assert [p for p in (tmp_path / "work").rglob("*") if p.is_file()] == []
+
+
+def test_a_wrong_sized_render_leaves_an_earlier_runs_output_standing(tmp_path):
+    """Why the check runs on the staged file rather than after the rename.
+
+    The rename would overwrite the earlier file first, so verifying afterwards
+    means destroying a good wallpaper and then deleting its bad replacement --
+    the user is left with nothing where they had something correct. Measuring
+    before publishing costs the same probe on the same bytes and never puts a
+    wrong file at the destination at all.
+    """
+    source = write_png(tmp_path / "s.png", 1440, 720)
+    work = plan.plan_photo(source, 1440, 720, "png", [sizes.PHONE], settings(tmp_path))
+    target = work.plans[0]
+    target.destination.parent.mkdir(parents=True)
+    target.destination.write_bytes(b"an earlier run's wallpaper")
+
+    with pytest.raises(imaging.ImagingError):
+        execute.render(target, source, scale=1, workdir=tmp_path / "work")
+
+    assert target.destination.read_bytes() == b"an earlier run's wallpaper"
+
+
+@pytest.mark.parametrize("fmt", formats.FORMATS)
+def test_the_post_condition_can_measure_every_output_format(tmp_path, fmt):
+    """It probes the STAGED file, whose name carries a second extension --
+    `x.avif.partial`. If sips decided readability by suffix, every render of
+    some format would fail at runtime while the suite stayed green, so each
+    format is driven all the way through. 1920x2880 is the smallest phone
+    fixture that lands in band 2: 2880 is exactly the floor.
+    """
+    source = write_png(tmp_path / "lichen.png", 1920, 2880)
+    work = plan.plan_photo(source, 1920, 2880, "png", [sizes.PHONE],
+                           settings(tmp_path, fmt))
+    target = work.plans[0]
+    assert target.band == bands.NATIVE
+
+    written = execute.render(target, source, scale=1, workdir=tmp_path / "work")
+
+    assert imaging.probe(written) == (1920, 2880, fmt)
+
+
+def test_the_post_condition_passes_a_correct_render_through(tmp_path):
+    """The normal path is unchanged: a plan whose output is the planned size
+    publishes exactly as before."""
+    source = write_png(tmp_path / "cliffs.png", 3000, 4500)
+    work = plan.plan_photo(source, 3000, 4500, "png", [sizes.PHONE], settings(tmp_path))
+    target = work.plans[0]
+
+    written = execute.render(target, source, scale=1, workdir=tmp_path / "work")
+
+    assert written == target.destination
+    assert imaging.probe(written)[:2] == (target.out_width, target.out_height)
+    assert list(target.destination.parent.glob("*.partial")) == []
 
 
 # ---------- staging ----------

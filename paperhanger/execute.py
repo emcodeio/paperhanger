@@ -63,18 +63,58 @@ def sweep_partials(processing_dir) -> int:
     return removed
 
 
+def _verify_dimensions(image, target) -> None:
+    """Assert that what was encoded is the file the plan describes.
+
+    `imaging` already asserts that each operation wrote SOMETHING -- a zero
+    exit does not mean a file appeared. This is the other half: a file did
+    appear, and it is the wrong picture. Seven distinct ways sips returns
+    plausible wrong output at exit 0 have now been measured in this project,
+    and render is the function that writes every user file, so it checks its
+    own result rather than trusting the eighth to announce itself.
+
+    It also covers a hole the no-enlargement guard cannot, because the guard
+    only runs when something is being resampled: a band 4 plan handed its own
+    original at scale 1 crops the slice, resamples nothing, and writes
+    `s_left_phone_1920x2880_4x.png` at 480x720 -- measured. No enlargement, so
+    constraint 1 is intact, but the name asserts dimensions the file does not
+    have, and nothing downstream reads pixels to find out.
+    """
+    measured = imaging.probe(image)
+    if measured is None:
+        raise imaging.ImagingError(
+            f"{target.destination.name}: encoded file is not a readable image"
+        )
+    width, height, _ = measured
+    if (width, height) != (target.out_width, target.out_height):
+        raise imaging.ImagingError(
+            f"{target.destination.name} would be {width}x{height}, not the "
+            f"{target.out_width}x{target.out_height} its plan and its own name say"
+        )
+
+
 def render(target, source_image, scale: int, workdir) -> Path:
     """Produce `target.destination` from `source_image`.
 
     `scale` is 1 when source_image is the original and 4 when it is the
     enlarged whole frame; the crop rect is multiplied to match.
 
-    A band 3 or 4 plan must never be rendered at scale 1 from its original:
-    sips would be asked to ENLARGE, which is the one thing only the ML model
-    may do. Those bands are rendered from the 4x frame at scale 4, or -- when
-    the pixel cap forces a per-plan upscale -- from an already-enlarged region
-    with `crop` cleared, which is a whole-image plan by then. `_refuse_to_enlarge`
-    enforces this against the measured input rather than trusting the caller.
+    A band 3 or 4 plan must never be rendered at scale 1 from its original.
+    Those bands are rendered from the 4x frame at scale 4, or -- when the pixel
+    cap forces a per-plan upscale -- from an already-enlarged region with
+    `crop` cleared, which is a whole-image plan by then.
+
+    Two checks enforce that between them, rather than trusting the caller, and
+    neither subsumes the other:
+
+      * `_refuse_to_enlarge` measures the INPUT before any resample, and
+        refuses to ask sips to enlarge -- global constraint 1. It runs only
+        when something is being resampled, which is the only time sips could.
+      * `_verify_dimensions` measures the OUTPUT before it is published, and
+        refuses to hand over a file that is not the size its plan and its own
+        filename claim. That covers the band 4 case the guard cannot see,
+        where nothing is resampled and the slice is simply written at 1/4 the
+        planned size.
     """
     workdir = Path(workdir)
     workdir.mkdir(parents=True, exist_ok=True)
@@ -109,6 +149,17 @@ def render(target, source_image, scale: int, workdir) -> Path:
             current, target.out_width, target.out_height,
             target.fmt, target.quality, staged, resize=resize,
         )
+
+        # Checked on the staged copy, BEFORE the rename. The rename is an
+        # atomic metadata operation within one directory, so the staged file
+        # and the destination are the same bytes and the same inode -- this
+        # measures exactly what the user would get. Doing it first means a
+        # wrong result never reaches the destination at all: no window in
+        # which the sorter could see it, and, when an earlier run's output is
+        # already there, that file is still standing afterwards rather than
+        # replaced by a file this run then deletes.
+        _verify_dimensions(staged, target)
+
         staged.replace(target.destination)
         return target.destination
     except BaseException:
