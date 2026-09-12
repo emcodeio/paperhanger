@@ -1480,3 +1480,193 @@ def test_a_failed_enlargement_is_not_held_while_the_next_plan_runs(tmp_path,
     leftovers = [p for p in root.rglob("*") if p.is_file()] if root.exists() else []
     assert leftovers == [], f"left behind: {leftovers}"
     assert source.exists()
+
+
+def refuse_to_rename(monkeypatch):
+    """Make every rename fail with EXDEV, as one does across a volume boundary.
+
+    The archive is the one move in the tool that can cross one: the input
+    directory is wherever the user's photos landed, and the processing tree is
+    wherever they configured it.
+
+    Patched at `os.rename` rather than `Path.rename`, because that is the one
+    seam both implementations of the move go through -- pathlib calls it, and
+    so does shutil.move before falling back to copy-then-unlink. Patching the
+    pathlib method would leave shutil renaming happily, and the tests below
+    would then pass against the very code they exist to rule out. `os.replace`
+    is deliberately left alone: staging a copy and renaming it in is the
+    behaviour being tested.
+    """
+    def across_a_volume(src, dst, **kwargs):
+        raise OSError(18, "Cross-device link", str(src), None, str(dst))
+
+    monkeypatch.setattr("os.rename", across_a_volume)
+
+
+def test_a_cross_volume_archive_still_moves_the_original(tmp_path, monkeypatch):
+    source = write_png(import_dir(tmp_path) / "IMG_0042.png", 16, 16)
+    kept = source.read_bytes()
+    originals = tmp_path / "processing" / "originals"
+
+    refuse_to_rename(monkeypatch)
+    archived = execute.archive(source, originals, log=lambda message: None)
+
+    assert archived.read_bytes() == kept
+    assert not source.exists()
+    assert [p.name for p in originals.iterdir()] == ["IMG_0042.png"], \
+        "the staged copy must not outlive the move"
+
+
+def test_a_failed_cross_volume_copy_leaves_no_file_at_the_archive_name(tmp_path,
+                                                                      monkeypatch):
+    """The finding this stages for. Copy-then-unlink across a volume plants a
+    TRUNCATED file at the canonical name when the copy dies -- a full disk is
+    the realistic way, with 28 GB free against 114 GB of frames. The good file
+    is then archived as IMG_0042-2.png by the re-run, and a user pruning what
+    look like duplicates by keeping the unsuffixed name loses the photo."""
+    source = write_png(import_dir(tmp_path) / "IMG_0042.png", 16, 16)
+    kept = source.read_bytes()
+    originals = tmp_path / "processing" / "originals"
+
+    refuse_to_rename(monkeypatch)
+
+    def dies_mid_copy(src, dst, **kwargs):
+        Path(dst).write_bytes(Path(src).read_bytes()[:32])
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(execute.shutil, "copy2", dies_mid_copy)
+
+    with pytest.raises(OSError):
+        execute.archive(source, originals, log=lambda message: None)
+
+    assert source.read_bytes() == kept, "the original is the one thing that must survive"
+    assert [p.name for p in originals.iterdir()] == [], \
+        "neither the archive name nor a .partial may be left behind"
+
+
+def test_a_failed_archive_copy_does_not_touch_an_earlier_original(tmp_path,
+                                                                  monkeypatch):
+    """The name collision and the failed copy at once, which is where a
+    delete-on-failure would do the damage it was added to prevent."""
+    originals = tmp_path / "processing" / "originals"
+    originals.mkdir(parents=True)
+    (originals / "IMG_0042.png").write_bytes(b"the first import's original")
+    source = write_png(import_dir(tmp_path) / "IMG_0042.png", 16, 16)
+
+    refuse_to_rename(monkeypatch)
+
+    def dies_mid_copy(src, dst, **kwargs):
+        Path(dst).write_bytes(b"half")
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(execute.shutil, "copy2", dies_mid_copy)
+
+    with pytest.raises(OSError):
+        execute.archive(source, originals, log=lambda message: None)
+
+    assert (originals / "IMG_0042.png").read_bytes() == b"the first import's original"
+    assert [p.name for p in originals.iterdir()] == ["IMG_0042.png"]
+    assert source.exists()
+
+
+def test_a_second_photo_of_the_same_name_is_archived_beside_the_first(tmp_path,
+                                                                     fake_upscaler):
+    """The never-overwrite promise at the level a user meets it: not a helper
+    called with two paths, but a whole photo run through the tool while an
+    earlier import of the same name is already in originals/."""
+    ctx = context(tmp_path, fake_upscaler)
+    originals = ctx.processing_dir / "originals"
+    originals.mkdir(parents=True)
+    (originals / "IMG_0042.png").write_bytes(b"the first import's original")
+
+    source = write_png(import_dir(tmp_path) / "IMG_0042.png", 2000, 3000)
+    work = plan.plan_photo(source, 2000, 3000, "png", [sizes.PHONE], settings(tmp_path))
+
+    messages = []
+    ctx.log = messages.append
+    result = execute.run_and_archive(work, ctx)
+
+    assert result.outcome == execute.OK
+    assert result.archived_to == originals / "IMG_0042-2.png"
+    assert result.archived_to.exists() and not source.exists()
+    assert (originals / "IMG_0042.png").read_bytes() == b"the first import's original"
+    assert messages == [
+        "  IMG_0042.png: already in originals/, archived as IMG_0042-2.png"]
+
+
+def test_a_plan_in_both_lists_is_not_reported_as_a_negative(tmp_path, fake_upscaler,
+                                                            monkeypatch):
+    """The count can go either way, and `if unaccounted` is truthy for -1.
+
+    A plan that is rendered AND reported failed is reachable: the per-plan
+    cleanup runs in a `finally` after the destination has been appended, so an
+    unlink that raises lands in the same tally. The outputs are on disk and
+    good; what is wrong is the bookkeeping, and saying "-3 of 3 plans were
+    neither rendered nor reported" describes nothing that happened.
+    """
+    source = write_png(import_dir(tmp_path) / "s.png", 1440, 720)
+    work = plan.plan_photo(source, 1440, 720, "png", [sizes.PHONE], settings(tmp_path))
+    monkeypatch.setattr(execute, "UPSCALE_PIXEL_CAP", 1)
+
+    real_unlink = Path.unlink
+
+    def busy(self, missing_ok=False):
+        # Only the enlargement, and only once it is really there: imaging._run
+        # unlinks the same path BEFORE the model writes it, and refusing that
+        # would fail the plan instead of its cleanup.
+        if self.name.startswith("up_") and self.exists():
+            raise OSError(16, "Resource busy")
+        return real_unlink(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", busy)
+    ctx = context(tmp_path, fake_upscaler)
+    ctx.log = lambda message: None
+
+    result = execute.run_and_archive(work, ctx)
+
+    assert len(result.written) == 3 and all(p.exists() for p in result.written)
+    assert result.outcome == execute.PARTIAL
+    assert source.exists()
+    assert any("both rendered and reported" in failure for failure in result.failures)
+    assert not any("neither rendered nor reported" in failure
+                   for failure in result.failures), result.failures
+    assert not any("-" in failure.split(" of ")[0] for failure in result.failures
+                   if " of " in failure), result.failures
+
+
+def test_a_destination_reported_written_is_measured_on_disk(tmp_path, fake_upscaler,
+                                                            monkeypatch):
+    """The accounting check asks run_photo whether it kept count. This asks the
+    filesystem. A destination comes back as written only after render measures
+    it and renames it into place -- but that is render's property, not this
+    function's, and this function is the one that moves the original."""
+    source = write_png(import_dir(tmp_path) / "phantom.png", 2000, 3000)
+    work = plan.plan_photo(source, 2000, 3000, "png", [sizes.PHONE], settings(tmp_path))
+
+    monkeypatch.setattr(execute, "run_photo",
+                        lambda work, ctx, failures=None: [work.plans[0].destination])
+    ctx = context(tmp_path, fake_upscaler)
+    result = execute.run_and_archive(work, ctx)
+
+    assert result.outcome == execute.PARTIAL
+    assert result.failures == [
+        f"{work.plans[0].destination.name} was reported written but is not there"]
+    assert source.exists()
+    assert not (ctx.processing_dir / "originals" / "phantom.png").exists()
+
+
+def test_a_photo_nothing_was_asked_of_is_not_archived(tmp_path, fake_upscaler):
+    """No plans and no rejections either. Only an empty device list produces
+    it, so this is about what the branch below would do with it: read "nothing
+    to write, nothing rejected" as ALREADY_DONE and move an original for zero
+    work."""
+    source = write_png(import_dir(tmp_path) / "unasked.png", 2000, 3000)
+    work = plan.plan_photo(source, 2000, 3000, "png", [], settings(tmp_path))
+    assert work.plans == [] and work.rejected_devices == []
+
+    ctx = context(tmp_path, fake_upscaler)
+    result = execute.run_and_archive(work, ctx)
+
+    assert result.outcome == execute.FAILED
+    assert result.failures and source.exists()
+    assert not (ctx.processing_dir / "originals").exists()

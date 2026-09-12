@@ -446,6 +446,48 @@ def _next_free_name(directory: Path, source: Path) -> Path:
         counter += 1
 
 
+def _move(source: Path, target: Path) -> None:
+    """Move `source` onto a free `target`, leaving nothing there if it fails.
+
+    Every other writer in this project stages a `.partial` and renames, and
+    unlinks only the partial it wrote itself. `shutil.move` was the one place
+    that wrote straight to a final name, and it is the place where doing so
+    costs the most: it falls back to copy-then-unlink across volumes, so a
+    failure mid-copy -- a full disk is the realistic one, 28 GB free against
+    114 GB of frames -- plants a TRUNCATED file at the canonical name. The good
+    file is then archived as IMG_0042-2.jpg by the re-run, and a user pruning
+    what look like duplicates by keeping the unsuffixed name loses the photo.
+    That is one ordinary action away from exactly the loss archive exists to
+    prevent.
+
+    So: rename first, which is atomic and copies nothing when the two paths
+    share a volume. Only when that is refused -- EXDEV and friends -- stage the
+    copy beside the target and rename it in. A failure now unlinks the
+    `.partial` this call wrote and nothing else, and no truncated file ever
+    bears an archive name. `.partial` rather than some private suffix because
+    sweep_partials already clears strays under the processing directory, which
+    is where both archive directories live.
+
+    It also settles what a failed `source.unlink()` means. After `replace`
+    returns, the copy is complete by construction, so the source still being
+    there is a duplicate rather than a truncation -- and the re-run archives it
+    beside the copy instead of over it.
+    """
+    try:
+        source.rename(target)
+        return
+    except OSError:
+        pass
+    staged = target.with_name(target.name + PARTIAL_SUFFIX)
+    try:
+        shutil.copy2(source, staged)
+        staged.replace(target)
+        source.unlink()
+    except BaseException:
+        staged.unlink(missing_ok=True)
+        raise
+
+
 def archive(source: Path, directory: Path, log=print) -> Path:
     """Move `source` into `directory`. NEVER overwrites.
 
@@ -464,7 +506,7 @@ def archive(source: Path, directory: Path, log=print) -> Path:
     if _taken(target):
         target = _next_free_name(directory, source)
         log(f"  {source.name}: already in {directory.name}/, archived as {target.name}")
-    shutil.move(str(source), str(target))
+    _move(source, target)
     return target
 
 
@@ -514,6 +556,18 @@ def run_and_archive(work, ctx) -> PhotoResult:
     """
     result = PhotoResult(source=work.source, outcome=OK)
 
+    if not work.plans and not work.rejected_devices:
+        # Nothing was asked of this photo: no plans, and no device turned it
+        # down either. Reachable only by planning against an empty device list,
+        # which is a caller's mistake rather than the photo's -- but the branch
+        # below would read "no outputs to write, nothing rejected" as
+        # ALREADY_DONE and move the original for zero work, and that is the one
+        # step here that cannot be walked back.
+        result.failures.append(
+            f"{work.source.name}: no plans and no rejections; nothing was asked of it")
+        result.outcome = FAILED
+        return result
+
     todo = []
     for target in work.plans:
         # Checked HERE rather than inside run_photo, because the upscaler runs
@@ -531,15 +585,40 @@ def run_and_archive(work, ctx) -> PhotoResult:
         runnable = replace(work, plans=todo,
                            rejected_devices=list(work.rejected_devices))
         result.written = run_photo(runnable, ctx, failures=result.failures)
-        # Every plan is either rendered or reported; this is that invariant
-        # made checkable rather than assumed. A plan that went missing without
-        # saying so would otherwise archive the original while its wallpaper
-        # does not exist, and that is the one arrangement no re-run repairs.
+        # Every plan is rendered or reported, exactly once; this is that
+        # invariant made checkable rather than assumed. A plan that went
+        # missing without saying so would otherwise archive the original while
+        # its wallpaper does not exist, and that is the one arrangement no
+        # re-run repairs.
         unaccounted = len(todo) - len(result.written) - len(result.failures)
-        if unaccounted:
+        if unaccounted > 0:
             result.failures.append(
                 f"{unaccounted} of {len(todo)} plans were neither rendered nor reported"
             )
+        elif unaccounted < 0:
+            # The count can also go the other way, and a bare `if unaccounted`
+            # would report that as "-1 of 3 plans were neither". A plan that is
+            # in both lists has been rendered AND reported failed: reachable
+            # when the cleanup after a successful render raises, which leaves
+            # the output on disk and good. Reported anyway, because the
+            # bookkeeping disagreeing with itself is not something to archive
+            # an original on -- and the re-run skips the finished outputs.
+            result.failures.append(
+                f"{-unaccounted} of {len(todo)} plans were both rendered and reported failed"
+            )
+        # The count above checks run_photo's bookkeeping; this checks the disk.
+        # A destination is returned as written only after render has measured
+        # it and renamed it into place, but that is a property of render, not
+        # of anything visible here, and archival is irreversible. Restricted to
+        # the plans run_photo claims to have written: one that failed is named
+        # in `failures` already, and one that is in neither list is counted
+        # above, so nothing is reported twice.
+        published = set(result.written)
+        for target in todo:
+            if target.destination in published and not target.destination.exists():
+                result.failures.append(
+                    f"{target.destination.name} was reported written but is not there"
+                )
 
     if result.failures:
         result.outcome = _unfinished(result)
