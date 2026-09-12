@@ -225,10 +225,15 @@ def _upscale_whole_frame(work, ctx, workdir) -> Path:
 def _upscale_one_plan(target, work, ctx, workdir) -> Path:
     """The fallback: enlarge just this plan's region.
 
+    Only ever called for crop plans. run_photo falls back only when every
+    upscaling plan has a crop, because a cropless plan's region IS the frame --
+    enlarging it per-plan would hold exactly the frame the cap declined while
+    paying an extra run for each sibling. The precondition below is that
+    invariant made checkable rather than assumed.
+
     Cropping BEFORE the model rather than after is the whole point of the
-    fallback -- it is what keeps a photo over the cap from ever holding its
-    whole 4x frame, and it is why run_photo only falls back when every plan
-    that needs the model HAS a crop to be bounded by.
+    fallback: it is what keeps a photo over the cap from ever holding its whole
+    4x frame.
 
     The crop runs before the normalize because it is cheaper to convert a third
     of an image than all of it. That ordering is safe only because sips carries
@@ -239,30 +244,26 @@ def _upscale_one_plan(target, work, ctx, workdir) -> Path:
     exit 0, with nothing to see in any dimension or file-exists check. Both
     orderings are pinned byte-identical in test_imaging.
 
-    The `crop is None` branch below is unreachable from run_photo, which now
-    keeps such photos on the whole-frame path. It stays because this function
-    means "enlarge just this plan's region" and a whole-image plan's region is
-    a legitimate answer to that; the cap policy is what excludes it, and policy
-    is the thing most likely to move.
-
     Every intermediate is named after the plan, because one photo's three
     slices share this workdir. The caller drops each enlargement before it asks
     for the next, so a shared name would work today; it would also mean that
     the first time it stops holding, one plan silently renders another plan's
     region at exactly the right size, and nothing would raise.
     """
+    if target.crop is None:
+        raise ValueError("_upscale_one_plan requires a crop plan; a cropless "
+                         "region is the whole frame and belongs on the "
+                         "whole-frame path")
+
     stem = target.destination.stem
     normalized = workdir / f"norm_{stem}.png"
-    if target.crop is not None:
-        # .png because imaging.crop always writes PNG bytes whatever the name.
-        cropped = workdir / f"pre_{stem}.png"
-        try:
-            imaging.crop(work.source, target.crop, cropped)
-            imaging.normalize_to_srgb_png(cropped, normalized)
-        finally:
-            cropped.unlink(missing_ok=True)
-    else:
-        imaging.normalize_to_srgb_png(work.source, normalized)
+    # .png because imaging.crop always writes PNG bytes whatever the name.
+    cropped = workdir / f"pre_{stem}.png"
+    try:
+        imaging.crop(work.source, target.crop, cropped)
+        imaging.normalize_to_srgb_png(cropped, normalized)
+    finally:
+        cropped.unlink(missing_ok=True)
 
     enlarged = workdir / f"up_{stem}.png"
     try:
@@ -293,10 +294,13 @@ def run_photo(work, ctx) -> list:
     to, and attempting the frame is the only thing that can produce that output
     at all.
 
-    When the fallback does apply it is reported rather than done quietly: it is
-    the one thing that makes a photo's timing unlike every other photo's, and a
-    run whose strategy changed without saying so is a run nobody can account
-    for afterwards.
+    BOTH decisions about an over-cap photo are reported, because either one
+    makes its timing unlike every other photo's and a run whose strategy
+    changed without saying so is a run nobody can account for afterwards.
+    Falling back says so; so does declining to, which is the slowest shape the
+    tool has and would otherwise be an unexplained pause of several minutes in
+    a twenty-four-hour import. This function is the only place that decision is
+    made, so it is the only place that can report it without re-deriving it.
     """
     workdir = Path(ctx.workroot) / work.source.stem
     workdir.mkdir(parents=True, exist_ok=True)
@@ -308,6 +312,18 @@ def run_photo(work, ctx) -> list:
 
     try:
         if work.needs_upscale and not fall_back:
+            if over_cap:
+                # Said BEFORE the model runs, because this is the slowest
+                # photo shape the tool has -- up to 622 Mpx of output -- and
+                # the line exists to explain a pause, not to record it
+                # afterwards. Without it, deciding to keep the whole frame is
+                # indistinguishable from a run that has stopped.
+                ctx.log(
+                    f"  {work.source.name}: "
+                    f"{work.upscale_output_pixels / 1_000_000:.1f} Mpx "
+                    f"exceeds the {UPSCALE_PIXEL_CAP / 1_000_000:.1f} Mpx cap, "
+                    f"but a plan needs the whole frame; upscaling it anyway"
+                )
             frame = _upscale_whole_frame(work, ctx, workdir)
         elif work.needs_upscale:
             # One decimal place: 300,560,000 px against this cap is over it,

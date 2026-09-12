@@ -811,13 +811,16 @@ def test_over_the_cap_a_cropless_plan_keeps_the_whole_frame(tmp_path, fake_upsca
 
     calls = spy_on(monkeypatch, "upscale")
     messages = []
-    monkeypatch.setattr(execute, "UPSCALE_PIXEL_CAP", 1)   # far over the cap
+    monkeypatch.setattr(execute, "UPSCALE_PIXEL_CAP", 1_000_000)
     ctx = context(tmp_path, fake_upscaler)
     ctx.log = messages.append
     execute.run_photo(work, ctx)
 
     assert len(calls) == 1, f"expected the whole frame, got {len(calls)} runs"
-    assert messages == [], "nothing fell back, so nothing should be reported"
+    assert messages == [
+        "  s.png: 16.4 Mpx exceeds the 1.0 Mpx cap, but a plan needs the "
+        "whole frame; upscaling it anyway"
+    ], "declining to fall back is a strategy decision too, and must be reported"
     for target in work.plans:
         assert imaging.probe(target.destination)[:2] == (target.out_width,
                                                          target.out_height)
@@ -855,13 +858,61 @@ def test_the_cap_message_names_both_numbers_at_the_boundary(tmp_path, monkeypatc
     ]
 
 
-def test_upscale_one_plan_handles_a_cropless_plan(tmp_path, fake_upscaler):
-    """`_upscale_one_plan` is called directly because run_photo can no longer
-    reach this branch: a photo whose upscaling plans are all cropless keeps the
-    whole-frame path however far over the cap it is. The branch stays because
-    this function means "enlarge just this plan's region" and a whole-image
-    plan's region is a legitimate answer; the cap policy is what excludes it,
-    and policy is the thing most likely to move.
+def test_the_whole_frame_message_names_both_numbers_at_the_boundary(tmp_path,
+                                                                    monkeypatch):
+    """The other half of the boundary, against the real 300 Mpx cap.
+
+    8000x2400 is desktop-by-height: governing 2400, below the 3200 floor and
+    2400*4 clear of the 4800 ideal, so band 3 with no crop. 307.2 Mpx of 4x
+    output, over the cap, and the fallback cannot help -- so it keeps the whole
+    frame, which is the several-minute pause this line exists to explain.
+    """
+    work = plan.plan_photo(Path("/src/wide.jpg"), 8000, 2400, "jpeg",
+                           [sizes.DESKTOP], settings(tmp_path))
+    assert work.upscale_output_pixels == 307_200_000
+    assert [p.crop for p in work.plans if p.needs_upscale] == [None]
+
+    monkeypatch.setattr(execute, "_upscale_whole_frame",
+                        lambda work, ctx, workdir: tmp_path / "absent.png")
+    monkeypatch.setattr(execute, "render",
+                        lambda target, source_image, scale, workdir: target.destination)
+    messages = []
+    execute.run_photo(work, execute.Context(
+        processing_dir=tmp_path / "processing", workroot=tmp_path / "work",
+        upscayl=tmp_path / "bin", models_dir=tmp_path / "models",
+        log=messages.append,
+    ))
+
+    assert messages == [
+        "  wide.jpg: 307.2 Mpx exceeds the 300.0 Mpx cap, but a plan needs "
+        "the whole frame; upscaling it anyway"
+    ]
+
+
+def test_a_photo_under_the_cap_reports_no_strategy_at_all(tmp_path, fake_upscaler,
+                                                          monkeypatch):
+    """Guards both message tests. A log that fired for every upscaling photo
+    would satisfy either assertion above while saying nothing, and the cap is
+    the whole point of saying anything."""
+    source = write_png(tmp_path / "s.png", 1440, 720)
+    work = plan.plan_photo(source, 1440, 720, "png", [sizes.PHONE], settings(tmp_path))
+    assert work.upscale_output_pixels < execute.UPSCALE_PIXEL_CAP
+
+    messages = []
+    ctx = context(tmp_path, fake_upscaler)
+    ctx.log = messages.append
+    execute.run_photo(work, ctx)
+
+    assert messages == []
+
+
+def test_upscale_one_plan_refuses_a_cropless_plan(tmp_path, fake_upscaler):
+    """The invariant run_photo now relies on, made checkable.
+
+    A cropless plan's region is the whole frame, so enlarging it "per plan"
+    holds exactly the frame the cap declined and pays an extra model run for
+    each sibling. run_photo will not route one here; this is what happens if
+    that ever stops being true.
 
     1440x2160 on the phone path: one whole-image plan, governing 2160, below
     the 2880 floor and 2160*4 clear of the 4320 ideal, so band 3.
@@ -875,11 +926,32 @@ def test_upscale_one_plan_handles_a_cropless_plan(tmp_path, fake_upscaler):
     workdir = Path(ctx.workroot) / "one"
     workdir.mkdir(parents=True)
 
+    with pytest.raises(ValueError, match="whole-frame path"):
+        execute._upscale_one_plan(target, work, ctx, workdir)
+
+    assert [p for p in workdir.iterdir()] == [], \
+        "the refusal must come before anything is written"
+
+
+def test_upscale_one_plan_leaves_only_the_enlargement(tmp_path, fake_upscaler):
+    """The live path, called directly. The left slice sits at (0, 0), the
+    --cropOffset shape imaging.crop pads around, so this covers the padded
+    intermediate as well as the crop and the normalized copy -- three files
+    that must all be gone, against one that must remain."""
+    source = write_png(tmp_path / "s.png", 1440, 720)
+    work = plan.plan_photo(source, 1440, 720, "png", [sizes.PHONE], settings(tmp_path))
+    target = work.plans[0]
+    assert target.position == "left" and target.crop == geometry.Rect(0, 0, 480, 720)
+
+    ctx = context(tmp_path, fake_upscaler)
+    workdir = Path(ctx.workroot) / "one"
+    workdir.mkdir(parents=True)
+
     enlarged = execute._upscale_one_plan(target, work, ctx, workdir)
 
-    assert imaging.probe(enlarged)[:2] == (1440 * 4, 2160 * 4)
+    assert imaging.probe(enlarged)[:2] == (1920, 2880)
     assert [p.name for p in workdir.iterdir()] == [enlarged.name], \
-        "the normalized copy must not outlive the call"
+        "only the enlargement may outlive the call"
 
 
 def test_run_photo_takes_bands_1_and_2_from_the_original(tmp_path, fake_upscaler,
