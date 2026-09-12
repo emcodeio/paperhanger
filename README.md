@@ -6,7 +6,7 @@ It runs on macOS and is designed to need almost nothing installed: the Upscayl n
 
 ## Status
 
-Implemented and reviewed. Of the sixteen planned tasks (Task 0 through Task 15 — scaffold, classification, cropping, execution, the CLI, the report, and this documentation), all sixteen are complete. Tier 3 — the real-upscaler gate confirming whole-frame upscale equivalence against the real binary — runs clean end to end, but its equivalence figure is being re-measured on real photographs rather than a synthetic fixture, so treat that one number as open. `paperhanger` is installable and runnable as described below. The 24-hour full-corpus run (tier 4, see Testing) is the author's acceptance pass and is not a gate on any of this.
+Implemented and reviewed. Of the sixteen planned tasks (Task 0 through Task 15 — scaffold, classification, cropping, execution, the CLI, the report, and this documentation), all sixteen are complete. Tier 3 — the real-upscaler run against the real binary — completes clean end to end. Its one open question is how closely whole-frame upscaling matches per-slice upscaling: re-measured on 18 real photographs it spans 33.43 to 52.61 dB PSNR, median 42.86, so the answer depends on the photograph and the single-threshold gate originally proposed for it has been withdrawn. No replacement criterion has been chosen, and section 7 of the design records that saving as unsettled rather than accepted or reverted. Nothing else in the tool depends on it. `paperhanger` is installable and runnable as described below. The 24-hour full-corpus run (tier 4, see Testing) is the author's acceptance pass and is not a gate on any of this.
 
 ## Install
 

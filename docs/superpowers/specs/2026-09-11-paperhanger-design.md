@@ -331,22 +331,52 @@ plan. Those photos stay on the whole-frame path: there is no cheaper decompositi
 attempting the frame is the only thing that can produce that output at all.
 
 The second qualification: this rests on enlarging then cutting equalling cutting then
-enlarging — true because the model carries no whole-image context. **Measured at 44.83 dB
-PSNR** between the two arms on a 700x1800 source (`tests/test_real_upscaler.py`), against a
-40 dB pass threshold. Section 13 records the gate.
+enlarging. **It is measured, it is content-dependent, and the criterion for accepting it is
+not yet settled.** Section 13 records the measurement.
 
-**That figure is under re-measurement and should not be relied on yet.** It was taken on a
-generated-noise fixture, which this model flattens almost to uniform — the research document
-measured that same inflation directly, at 53 dB on a synthetic image against 40 dB on a real
-photograph. Run over twelve real windows from the corpus sample, the same procedure spans
-34.17 to 53.49 dB: five fall under the 40 dB bar and one under the 35 dB revert floor. The
-equivalence may well hold; one draw on synthetic input does not show it.
+Measured over the 18 images of the 27-image sample whose native pixels can host a 700x1800
+window — the window centred, normalized to sRGB PNG, both arms cutting the same middle slice
+through `imaging.crop` (`tests/test_real_upscaler.py`):
 
-A top-slice measurement was also recorded, on the theory that its `0,0` origin would catch an
-arm cutting the wrong region. It does not: under that bug both arms receive `sips`' centred
-crop, and those centres are exactly a factor of four apart (2724 = 4 x 681), so the two slide
-onto the middle slice together and still agree. It catches an off-by-one, which is all its
-own docstring claims.
+| | PSNR, whole-then-cut vs cut-then-upscale |
+|---|---|
+| minimum | **33.43 dB** (`snowy_forest_landscape_9522.jpg`) |
+| median | **42.86 dB** |
+| maximum | **52.61 dB** (`mountain_landscape_sunset_5677.jpg`) |
+
+The spread is the finding. Under the single 40 dB threshold this design originally proposed,
+12 of the 18 clear the bar, 4 land in the 35-40 dB band that was defined as a human judgment
+call, and 2 fall below the 35 dB floor that was defined as an automatic revert. Which of
+those three answers you get depends on which photograph you happen to measure, so **a single
+threshold on a single image is the wrong shape for this property and has been withdrawn.** No
+replacement criterion has been chosen; choosing one is a human decision, and until it is made
+neither "the equivalence holds" nor "it fails" is a claim this document makes.
+
+An earlier draft reported **44.83 dB** and called the question closed. That figure was taken
+on a generated-noise fixture, which this model flattens almost to uniform — pixel standard
+deviation 0.2898 collapsing to 0.0232 — and the research document had already quantified the
+same inflation from the other direction, at 53 dB on a synthetic image against 40 dB on a real
+photograph. It measured the fixture, not the model.
+
+Three explanations were tested and rejected. It is **not** an artifact of how the slices are
+cut: the top slice, whose `0,0` origin sends both arms through the pad-and-shift workaround,
+scores 35.98 dB against the same window's 35.19 dB on the direct path — where a one-pixel
+misregistration would read about 26 dB. It is **not** confined to the slice edges: those rows
+do diverge most, at 13-17 levels against an interior mean of 2.6, but they are 16 rows of
+1752, and trimming 256 of them buys 1.1 dB. It is **not** tile size: pinning `-t` to 128, 256
+and 512 gives 32.99, 35.55 and 37.59 dB. What is left is the model itself responding to how
+much context surrounds a pixel, which is what a convolutional receptive field does.
+
+(Provenance: the top-slice, edge-row and interior-mean figures come from
+`tests/test_real_upscaler.py` and the difference images it writes. The one-pixel-offset,
+256-row-trim and pinned-`-t` figures were measured during review of that test, not by it, and
+are recorded here on that basis rather than reproduced.)
+
+Note also what the top-slice measurement does not establish, since the earlier draft claimed
+it did. It cannot catch an arm cutting the wrong region: under that bug both arms receive
+`sips`' centred crop, and those centres are exactly a factor of four apart (2724 = 4 x 681),
+so the two slide onto the middle slice together and still agree. It catches a
+misregistration, which is all it is now claimed to catch.
 
 **One process per upscale.** Directory mode would work, since the scale is always 4, but it
 buys only process startup against a 10-30 second run and costs per-photo progress and failure
@@ -579,12 +609,23 @@ the author's acceptance pass, deliberately outside the definition of done:
 - One test asserts that the dimensions in every output filename equal the dimensions `sips`
   reports for that file. This is the check that keeps section 3's no-drift claim honest.
 - One real-binary end-to-end test, marked and skipped by default.
-- **The whole-frame upscale is gated on an equivalence test**, also marked and run once
-  against the real binary: upscale a photo whole and cut a slice from the result; separately
-  cut the same slice from the source and upscale that; the two must match within a small
-  tolerance. Section 7's largest saving depends on this holding. **Measured at 44.83 dB**
-  against a 40 dB pass threshold, so section 7 stands; had it come in under 35 dB, section 7
-  would have reverted to per-plan upscaling and the estimate returned to 37 hours.
+- **The whole-frame upscale is measured against the real binary**, marked and deselected by
+  default: upscale a photo whole and cut a slice from the result; separately cut the same
+  slice from the source and upscale that; compare. Section 7's largest saving rests on the
+  two being interchangeable. Measured over 18 real photographs it spans **33.43 to 52.61 dB,
+  median 42.86** — 12 above the once-proposed 40 dB bar, 4 in the 35-40 dB band, 2 below the
+  35 dB floor. The test therefore **reports a distribution and asserts no threshold**: it
+  pins the two invariants that are not judgment calls — both arms agree on dimensions, every
+  selected image yields a measurement — and prints the rest for a human. A single-threshold
+  gate is the wrong instrument for a property that varies this much with content, and no
+  replacement has been chosen yet, so section 7's saving is **recorded as unsettled rather
+  than accepted or reverted**. The selection is a rule, not a hand-picked set: every image in
+  `tests/corpus_sample.txt` whose native pixels can host the 700x1800 window.
+- The retired rule's three bands survive only as `old_rule_band`, a pure classifier used for
+  reporting. Its 35-40 dB branch — the one that was supposed to stop and ask a human — was
+  never once executed while the rule was live, because the only measurement that ever reached
+  it was the synthetic 44.83 dB. It now carries an unmarked tier-1 test that drives all three
+  bands and both boundaries by injection.
 ### 13.2 The 27-image sample
 
 The corpus at `~/Pictures/wallpaper` is a **read-only** asset. Every tier that uses it copies
@@ -623,7 +664,7 @@ and filing against genuinely messy input. It costs about eight minutes -- real `
 decoding real photographs -- which is why it gates pushes rather than commits, and why its
 tests carry the `corpus` marker that lets tier 1 run alone. Tier 3 repeats it with the real binary
 to confirm the two things a stub cannot check — that `upscayl-bin` accepts what we hand it,
-and the whole-frame equivalence this section gates section 7 on.
+and how far apart whole-frame and per-slice upscaling actually land on real photographs.
 
 ### 13.3 What the full corpus run is for
 
