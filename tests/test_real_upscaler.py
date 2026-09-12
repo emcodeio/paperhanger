@@ -20,11 +20,22 @@ than a draw. Equivalence-under-cropping is a property of the model over
 content; one number cannot characterise it, and the spread below is wide enough
 that which photograph you happen to pick decides the verdict.
 
-THIS FILE DOES NOT DECIDE THE GATE. There is deliberately no pass assertion on
-PSNR anywhere in it. The old single-threshold rule is the wrong shape for a
-content-dependent property, and choosing the replacement is a human decision
-that has not been made. `old_rule_band` classifies each measurement under the
-retired rule so the numbers can be read against it, and that is all it does.
+THE ARMS-AGAINST-EACH-OTHER MEASUREMENT DOES NOT DECIDE ANYTHING, and there is
+deliberately no pass assertion on its PSNR. The old single-threshold rule is the
+wrong shape for a content-dependent property. Worse, scoring arm A against arm B
+cannot say which is BETTER: arm B is not truth, it is a second guess from the
+same model, so the number measures how far the model's answer moves when the
+input is cropped and nothing else. `old_rule_band` classifies those measurements
+under the retired rule so they can still be read against it, and that is all it
+does.
+
+WHAT DOES DECIDE IT is `test_both_arms_against_ground_truth`, at the bottom of
+this file: both arms scored against ORIGINAL photograph pixels, using the
+protocol the research document used to choose this upscaler. That test also
+asserts no verdict -- it reports, and a human rules -- but its numbers are the
+ones that mean something, because they have a truth to be right or wrong about.
+It scores PSNR and DSSIM both, because the research document warns that "PSNR
+inverts the visual ranking" for this upscaler.
 
 What IS still asserted, because these are invariants rather than judgments:
 
@@ -196,27 +207,42 @@ def real_toolchain(monkeypatch):
         pytest.fail(f"the gate needs the real toolchain: {error}")
 
 
-def _psnr(left: Path, right: Path) -> float:
-    """PSNR via ImageMagick. Test-only; magick is not a runtime dependency.
+def _compare(left: Path, right: Path, metric: str = "PSNR") -> float:
+    """One ImageMagick metric. Test-only; magick is not a runtime dependency.
 
     `compare` exits 1 whenever the images differ at all, so the status is not
-    read; the metric goes to stderr either way. Identical inputs report 120,
-    not `inf`, on ImageMagick 7.1.2 -- the `inf` branch is kept because older
-    builds do print it.
+    read; the metric goes to stderr either way.
+
+    It prints two numbers, `raw (normalized)`, and which one is wanted depends
+    on the metric. For PSNR the leading figure is the decibel value everything
+    here is quoted in. For DSSIM the leading figure is an unnormalized sum --
+    312.764 for a pair whose actual DSSIM is 0.00477 -- so the parenthesised
+    value is the one on the conventional 0-to-1 scale, where 0 is identical and
+    larger is more different. Taking the wrong one silently reports a number
+    about 65000x too large, with no error anywhere.
     """
     if shutil.which("magick") is None:
         pytest.fail("this measurement needs `magick`; brew install imagemagick")
-    proc = subprocess.run(["magick", "compare", "-metric", "PSNR",
+    proc = subprocess.run(["magick", "compare", "-metric", metric,
                            str(left), str(right), "null:"],
                           capture_output=True, text=True)
     output = (proc.stderr or proc.stdout).strip()
-    text = output.split()[0] if output else ""
+    fields = output.split()
+    text = fields[0] if fields else ""
+    if metric == "DSSIM":
+        # `0 (0)` for identical input, so the parenthesis is not always present.
+        text = fields[1].strip("()") if len(fields) > 1 else text
     if text.lower().startswith("inf"):
         return float("inf")
     try:
         return float(text)
     except ValueError:
-        pytest.fail(f"magick compare printed no metric: {output!r}")
+        pytest.fail(f"magick compare printed no {metric}: {output!r}")
+
+
+def _psnr(left: Path, right: Path) -> float:
+    """PSNR in dB. Identical inputs report 120, not `inf`, on ImageMagick 7.1.2."""
+    return _compare(left, right, "PSNR")
 
 
 def _window(source: Path, out_png: Path) -> Path:
@@ -511,3 +537,276 @@ def test_sample_runs_with_the_real_binary(tmp_path, real_toolchain):
     assert not mismatched, "\n".join(mismatched)
 
     assert list(processing.rglob(f"*{execute.PARTIAL_SUFFIX}")) == []
+
+
+# ---------------------------------------------------------------------------
+# The ground-truth experiment.
+#
+# Everything above measures the two arms against EACH OTHER, which cannot say
+# which one is better -- arm B is not truth, it is a second guess from the same
+# model. This measures both arms against real photograph pixels instead, using
+# the protocol the research document used to choose this upscaler: take truth
+# at native resolution, shrink it to make the model's input, enlarge it back,
+# and score what comes out against what was there.
+#
+#   G   a ground-truth window, ORIGINAL pixels at native resolution
+#   S   G downscaled 4x by sips -- the model's input, a genuine reduction of G
+#   A   arm A, whole-then-cut:  upscale S whole, cut the slice from the 4x frame
+#   B   arm B, cut-then-upscale: cut the slice from S, upscale that
+#   T   the truth slice: the same slice cut from G at full resolution
+#
+# One rect throughout. `rect` cuts B's slice out of S; `rect.scaled(4)` cuts
+# both A's slice out of the 4x frame and T's slice out of G. The factor of four
+# is construction, not coincidence: G is exactly 4x S on both axes. Every cut
+# goes through `imaging.crop`, never a bare `sips` call -- see the module
+# docstring for why that distinction decides whether this measures the model or
+# our own crop bug.
+#
+# Scored both ways on purpose. PSNR because it is the protocol's metric and
+# comparable to the research document's numbers; DSSIM because the research
+# document explicitly warns that "PSNR inverts the visual ranking" for this
+# upscaler, and answering a perceptual question with PSNR alone would repeat
+# the mistake that cost this task two rounds.
+# ---------------------------------------------------------------------------
+
+# The ground-truth window, and the model input it reduces to. Chosen by a sweep
+# rather than by taste: over window ratios from 1.25 to 3.2, this is the
+# LARGEST window at least twelve of the sample's photographs can supply from
+# native pixels. Both G axes are divisible by four so that S = G/4 is exact,
+# and the middle third of S scales to 2048x1280 -- 16:10 to the digit, which is
+# a real desktop wallpaper shape rather than an approximation of one.
+GT_WINDOW_WIDTH, GT_WINDOW_HEIGHT = 2048, 2988
+GT_SOURCE_WIDTH, GT_SOURCE_HEIGHT = 512, 747
+
+GT_ARTIFACTS_ENV = "PAPERHANGER_GROUND_TRUTH_ARTIFACTS"
+
+
+def ground_truth_selection() -> list:
+    """The twelve, by the same shape of rule as `selection()`.
+
+    Every name in `tests/corpus_sample.txt` whose NATIVE pixels can host the
+    2048x2988 ground-truth window, in manifest order. Exactly twelve qualify,
+    which is what pins the window size: one pixel larger on either axis and it
+    would be eleven.
+
+    Note what the size rule costs, because it is not nothing. The two
+    photographs that scored worst in the arms-against-each-other measurement --
+    `snowy_forest_landscape_9522.jpg` at 33.43 dB and
+    `mountain_lake_reflection_4788.jpg` at 35.19 -- are both 3840x2160, and a
+    2988-row window does not fit in 2160 rows. So this experiment cannot speak
+    to either of them. A 1440x2160 window would admit sixteen images including
+    both, at the cost of a 360x540 model input; that trade was decided the
+    other way, toward the largest window, and the exclusion is a real limit on
+    what these twelve can conclude.
+    """
+    chosen = []
+    for name in sample_names():
+        measured = imaging.probe(CORPUS / name)
+        if measured is None:
+            continue
+        width, height, _fmt = measured
+        if width >= GT_WINDOW_WIDTH and height >= GT_WINDOW_HEIGHT:
+            chosen.append(name)
+    return chosen
+
+
+def _ground_truth_window(source: Path, out_png: Path) -> Path:
+    """A centred 2048x2988 window of ORIGINAL pixels, normalized to sRGB PNG.
+
+    Normalized here, once, before anything derives from it: S, both arms and T
+    all descend from this file, so the colour conversion happens on the truth
+    and never between the truth and the thing being compared to it. That is
+    also the order `execute.py` uses -- normalize the source, then enlarge.
+    """
+    measured = imaging.probe(source)
+    assert measured is not None, f"{source.name} is not a readable image"
+    width, height, _fmt = measured
+    rect = geometry.Rect((width - GT_WINDOW_WIDTH) // 2,
+                         (height - GT_WINDOW_HEIGHT) // 2,
+                         GT_WINDOW_WIDTH, GT_WINDOW_HEIGHT)
+    cut = out_png.with_name(out_png.name + ".cut.png")
+    try:
+        imaging.crop(source, rect, cut)
+        imaging.normalize_to_srgb_png(cut, out_png)
+    finally:
+        cut.unlink(missing_ok=True)
+    return out_png
+
+
+def _against_truth(window: Path, binary, models, workdir: Path):
+    """Build S, A, B and T from one ground-truth window and score both arms.
+
+    Returns a dict of the four scores plus the three paths worth keeping.
+    """
+    # S: the model's input, a real 4x reduction of the truth. Both axes passed
+    # explicitly -- imaging fact 3; a single --resample flag derives the other
+    # axis and rounds it inconsistently.
+    small = workdir / "small_source.png"
+    imaging.resize_and_encode(window, GT_SOURCE_WIDTH, GT_SOURCE_HEIGHT,
+                              "png", None, small, resize=True)
+
+    # ONE rect. `rect` cuts from S; `scaled` cuts from the 4x frame AND from G.
+    rect = geometry.horizontal_thirds(GT_SOURCE_WIDTH, GT_SOURCE_HEIGHT)[1]
+    scaled = rect.scaled(4)
+
+    # T: truth, cut from the original pixels. Never a model output.
+    truth = workdir / "truth_slice.png"
+    imaging.crop(window, scaled, truth)
+
+    # A: whole-then-cut.
+    frame = workdir / "frame_4x.png"
+    arm_a = workdir / "arm_a_whole_then_cut.png"
+    try:
+        imaging.upscale(small, frame, binary, models)
+        imaging.crop(frame, scaled, arm_a)
+    finally:
+        frame.unlink(missing_ok=True)
+
+    # B: cut-then-upscale.
+    small_slice = workdir / "small_slice.png"
+    arm_b = workdir / "arm_b_cut_then_upscale.png"
+    try:
+        imaging.crop(small, rect, small_slice)
+        imaging.upscale(small_slice, arm_b, binary, models)
+    finally:
+        small_slice.unlink(missing_ok=True)
+        small.unlink(missing_ok=True)
+
+    dimensions = {imaging.probe(p)[:2] for p in (arm_a, arm_b, truth)}
+    assert dimensions == {(GT_WINDOW_WIDTH, scaled.height)}, (
+        f"A, B and T must be the same shape to be comparable; got {dimensions}"
+    )
+
+    return {
+        "psnr_a": _compare(arm_a, truth, "PSNR"),
+        "psnr_b": _compare(arm_b, truth, "PSNR"),
+        "dssim_a": _compare(arm_a, truth, "DSSIM"),
+        "dssim_b": _compare(arm_b, truth, "DSSIM"),
+        "arm_a": arm_a,
+        "arm_b": arm_b,
+        "truth": truth,
+        "dimensions": (GT_WINDOW_WIDTH, scaled.height),
+    }
+
+
+@pytest.mark.real_upscaler
+def test_both_arms_against_ground_truth(tmp_path, real_toolchain):
+    """THE GATE, in its settled form: which arm is closer to the truth.
+
+    Asserts the invariants only -- A, B and T share a shape, and every image
+    yields four scores. Which arm wins, and whether the gap means anything, is
+    reported rather than adjudicated here; `paperhanger/execute.py` is not
+    touched either way.
+    """
+    binary, models = real_toolchain
+    inbox = copy_sample(corpus_or_skip(), tmp_path / "inbox")
+    names = ground_truth_selection()
+    assert len(names) >= 12, (
+        f"only {len(names)} of the sample can supply a "
+        f"{GT_WINDOW_WIDTH}x{GT_WINDOW_HEIGHT} ground-truth window"
+    )
+
+    processing = tmp_path / "processing"
+    artifacts = Path(os.environ.get(GT_ARTIFACTS_ENV,
+                                    processing / "ground_truth_worst_case"))
+    artifacts.mkdir(parents=True, exist_ok=True)
+    workdir = tmp_path / "gt_work"
+    workdir.mkdir()
+
+    rect = geometry.horizontal_thirds(GT_SOURCE_WIDTH, GT_SOURCE_HEIGHT)[1]
+    scaled = rect.scaled(4)
+    print(f"\nground truth G {GT_WINDOW_WIDTH}x{GT_WINDOW_HEIGHT} (native pixels, "
+          f"centred, normalized to sRGB PNG)")
+    print(f"model input  S {GT_SOURCE_WIDTH}x{GT_SOURCE_HEIGHT} (G downscaled 4x by sips)")
+    print(f"one rect: {rect.width}x{rect.height}+{rect.x}+{rect.y} cuts B from S; "
+          f"{scaled.width}x{scaled.height}+{scaled.x}+{scaled.y} cuts A from the "
+          f"4x frame and T from G")
+    print(f"{len(names)} images. PSNR higher is better; DSSIM LOWER is better.\n")
+    header = (f"{'PSNR(A,T)':>10} {'PSNR(B,T)':>10} {'delta':>8}   "
+              f"{'DSSIM(A,T)':>11} {'DSSIM(B,T)':>11} {'delta':>10}   image")
+    print(header)
+
+    rows = []
+    started = time.monotonic()
+    for name in names:
+        window = _ground_truth_window(inbox / name, workdir / f"gt_{name}.png")
+        try:
+            scored = _against_truth(window, binary, models, workdir)
+        finally:
+            window.unlink(missing_ok=True)
+
+        psnr_delta = scored["psnr_a"] - scored["psnr_b"]
+        dssim_delta = scored["dssim_a"] - scored["dssim_b"]
+        rows.append((name, scored["psnr_a"], scored["psnr_b"], psnr_delta,
+                     scored["dssim_a"], scored["dssim_b"], dssim_delta,
+                     scored["dimensions"]))
+        print(f"{scored['psnr_a']:10.2f} {scored['psnr_b']:10.2f} "
+              f"{psnr_delta:+8.2f}   {scored['dssim_a']:11.5f} "
+              f"{scored['dssim_b']:11.5f} {dssim_delta:+10.5f}   {name}")
+
+        if abs(psnr_delta) >= max(abs(r[3]) for r in rows):
+            _preserve_ground_truth(scored, artifacts, name, psnr_delta)
+        for key in ("arm_a", "arm_b", "truth"):
+            scored[key].unlink(missing_ok=True)
+    elapsed = time.monotonic() - started
+
+    psnr_deltas = [r[3] for r in rows]
+    dssim_deltas = [r[6] for r in rows]
+    a_wins_psnr = sum(1 for d in psnr_deltas if d > 0)
+    a_wins_dssim = sum(1 for d in dssim_deltas if d < 0)   # lower DSSIM is better
+    widest = max(rows, key=lambda r: abs(r[3]))
+
+    print(f"\n{'-' * 78}")
+    print(f"PSNR  : arm A closer to truth on {a_wins_psnr} of {len(rows)}; "
+          f"delta min {min(psnr_deltas):+.2f}, median "
+          f"{statistics.median(psnr_deltas):+.2f}, max {max(psnr_deltas):+.2f} dB")
+    print(f"DSSIM : arm A closer to truth on {a_wins_dssim} of {len(rows)}; "
+          f"delta min {min(dssim_deltas):+.5f}, median "
+          f"{statistics.median(dssim_deltas):+.5f}, max {max(dssim_deltas):+.5f}")
+    print(f"widest PSNR gap: {widest[0]} at {widest[3]:+.2f} dB")
+    print(f"visual evidence written to:\n  {artifacts}")
+    print(f"\n{len(names)} images measured in {elapsed / 60:.1f} min")
+
+    # The only assertions. Everything above is measurement.
+    assert len(rows) == len(names)
+    assert {r[7] for r in rows} == {(GT_WINDOW_WIDTH, scaled.height)}
+
+
+def _preserve_ground_truth(scored, artifacts: Path, name: str, psnr_delta: float) -> None:
+    """Keep the running widest-gap case: both arms, the truth, both differences.
+
+    The differences are auto-levelled, so brightness locates a disagreement
+    rather than measuring one -- same caveat as the other worst-case directory.
+    """
+    for existing in artifacts.glob("gt_*"):
+        existing.unlink(missing_ok=True)
+    stem = Path(name).stem
+    shutil.copy2(scored["arm_a"], artifacts / f"gt_{stem}_A_whole_then_cut.png")
+    shutil.copy2(scored["arm_b"], artifacts / f"gt_{stem}_B_cut_then_upscale.png")
+    shutil.copy2(scored["truth"], artifacts / f"gt_{stem}_T_ground_truth.png")
+    for label, arm in (("A", scored["arm_a"]), ("B", scored["arm_b"])):
+        subprocess.run(
+            ["magick", str(arm), str(scored["truth"]), "-compose", "difference",
+             "-composite", "-auto-level",
+             str(artifacts / f"gt_{stem}_{label}_minus_truth.png")],
+            capture_output=True, text=True,
+        )
+    (artifacts / f"gt_{stem}_README.txt").write_text(
+        f"Widest PSNR gap between the two arms measured against ground truth.\n\n"
+        f"  image           {name}\n"
+        f"  PSNR(A, truth)  {scored['psnr_a']:.2f} dB\n"
+        f"  PSNR(B, truth)  {scored['psnr_b']:.2f} dB\n"
+        f"  delta           {psnr_delta:+.2f} dB (positive means arm A is closer)\n"
+        f"  DSSIM(A, truth) {scored['dssim_a']:.5f}   (lower is better)\n"
+        f"  DSSIM(B, truth) {scored['dssim_b']:.5f}\n\n"
+        f"  gt_{stem}_T_ground_truth.png      the truth: original pixels, no model\n"
+        f"  gt_{stem}_A_whole_then_cut.png    what the design does\n"
+        f"  gt_{stem}_B_cut_then_upscale.png  what the legacy script did\n"
+        f"  gt_{stem}_A_minus_truth.png       arm A's error, AUTO-LEVELLED\n"
+        f"  gt_{stem}_B_minus_truth.png       arm B's error, AUTO-LEVELLED\n\n"
+        f"The amplification on the two difference images is large and is applied\n"
+        f"to each independently, so compare WHERE they are bright, not how bright.\n"
+        f"The research document warns that PSNR inverts the visual ranking for this\n"
+        f"upscaler, so the three pictures are the evidence and the numbers are the\n"
+        f"summary, not the other way round.\n"
+    )

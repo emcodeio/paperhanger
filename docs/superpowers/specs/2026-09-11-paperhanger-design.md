@@ -330,13 +330,43 @@ one. Sweeping 400-20000 on both axes, 2878 of 7413 over-cap shapes have a crople
 plan. Those photos stay on the whole-frame path: there is no cheaper decomposition, and
 attempting the frame is the only thing that can produce that output at all.
 
-The second qualification: this rests on enlarging then cutting equalling cutting then
-enlarging. **It is measured, it is content-dependent, and the criterion for accepting it is
-not yet settled.** Section 13 records the measurement.
+The second qualification: this rests on enlarging then cutting being as good as cutting then
+enlarging. **Measured against ground truth, it is — by a margin too small to matter, in the
+design's favour.** Section 13 records both measurements.
 
+Scored against original photograph pixels, on the 12 sample images that can supply a
+2048x2988 ground-truth window (`tests/test_real_upscaler.py`). The truth window is downscaled
+4x by `sips` to make the model's input, both arms enlarge it back, and each is scored against
+the truth slice cut from the untouched original — the protocol section 2 of the research
+document used to choose this upscaler:
+
+| | whole-then-cut vs per-slice, against truth |
+|---|---|
+| PSNR | whole-frame closer on **11 of 12**; median **+0.02 dB**, best +0.14, worst −0.05 |
+| DSSIM | whole-frame closer on **9 of 12**; median **−0.00050** (lower is better) |
+
+The margin is the point, and it is nearly zero. On the widest-gap image the two arms differ
+from *each other* by 43.18 dB — a mean absolute difference of 0.71 levels — while each differs
+from the *truth* by about 30 dB, a mean of 4.53 and 4.63 levels respectively. The arms agree
+with one another roughly six times more closely than either agrees with the truth, and their
+error maps are visually indistinguishable: both miss in the same places, on the same rock
+texture. Whatever this upscaler gets wrong at 4x, it gets wrong identically whether it saw the
+whole frame or one slice of it. **Choosing the whole frame costs no quality, and section 7's
+saving is accepted on that evidence rather than on the architecture argument it started with.**
+
+Two limits on the claim. The 2048x2988 window is the largest at least twelve sample images
+can supply, and the height requirement excludes both of the photographs that scored lowest in
+the arms-against-each-other measurement below, so those two are untested against truth. And
+the absolute reconstruction quality is unremarkable — 19.6 to 35.4 dB against truth, which is
+4x enlargement being hard, not a fact about which arm was used.
+
+The earlier measurement, kept because it is what the gate originally asked and because it
+explains why the question had to be re-asked. It scores the two arms **against each other**,
+which is a measure of how far the model's answer moves when its input is cropped, not of
+whether either answer is good — arm B is a second guess from the same model, not a truth.
 Measured over the 18 images of the 27-image sample whose native pixels can host a 700x1800
 window — the window centred, normalized to sRGB PNG, both arms cutting the same middle slice
-through `imaging.crop` (`tests/test_real_upscaler.py`):
+through `imaging.crop`:
 
 | | PSNR, whole-then-cut vs cut-then-upscale |
 |---|---|
@@ -344,13 +374,14 @@ through `imaging.crop` (`tests/test_real_upscaler.py`):
 | median | **42.86 dB** |
 | maximum | **52.61 dB** (`mountain_landscape_sunset_5677.jpg`) |
 
-The spread is the finding. Under the single 40 dB threshold this design originally proposed,
-12 of the 18 clear the bar, 4 land in the 35-40 dB band that was defined as a human judgment
-call, and 2 fall below the 35 dB floor that was defined as an automatic revert. Which of
-those three answers you get depends on which photograph you happen to measure, so **a single
-threshold on a single image is the wrong shape for this property and has been withdrawn.** No
-replacement criterion has been chosen; choosing one is a human decision, and until it is made
-neither "the equivalence holds" nor "it fails" is a claim this document makes.
+The spread is why this could not be the gate. Under the single 40 dB threshold this design
+originally proposed, 12 of the 18 clear the bar, 4 land in the 35-40 dB band that was defined
+as a human judgment call, and 2 fall below the 35 dB floor that was defined as an automatic
+revert — so which of the three answers you get depends on which photograph you happen to
+measure. **That threshold has been withdrawn, and not replaced by another one.** The
+ground-truth measurement above answers the question it was standing in for, and answers it in
+a way a threshold on this number never could: the spread here is the model's answer moving
+under a crop, and the ground-truth scores show that movement is not a loss.
 
 An earlier draft reported **44.83 dB** and called the question closed. That figure was taken
 on a generated-noise fixture, which this model flattens almost to uniform — pixel standard
@@ -373,9 +404,9 @@ pixel, which is what a convolutional receptive field does.
 
 That also bounds what the extra context buys arm A. The advantage is a boundary effect, and
 the boundary is under 1% of the picture; across the other 88% of the squared error neither
-arm is privileged, so "arm A sees more, therefore arm A is better" does not follow from these
-numbers. Only a comparison against ground truth can say which arm is closer to the truth, and
-that is the measurement below.
+arm is privileged, so "arm A sees more, therefore arm A is better" never followed from these
+numbers. The ground-truth measurement above is what settles it, and it bears the bound out:
+arm A does come out ahead, on 11 of 12 images, by a median of two hundredths of a decibel.
 
 (Provenance. Regenerated by `tests/test_real_upscaler.py` on every run: the 18-image
 distribution, and the top-slice 35.98 against the middle slice's 35.19. Attributed
@@ -622,18 +653,26 @@ the author's acceptance pass, deliberately outside the definition of done:
 - One test asserts that the dimensions in every output filename equal the dimensions `sips`
   reports for that file. This is the check that keeps section 3's no-drift claim honest.
 - One real-binary end-to-end test, marked and skipped by default.
-- **The whole-frame upscale is measured against the real binary**, marked and deselected by
-  default: upscale a photo whole and cut a slice from the result; separately cut the same
-  slice from the source and upscale that; compare. Section 7's largest saving rests on the
-  two being interchangeable. Measured over 18 real photographs it spans **33.43 to 52.61 dB,
-  median 42.86** — 12 above the once-proposed 40 dB bar, 4 in the 35-40 dB band, 2 below the
-  35 dB floor. The test therefore **reports a distribution and asserts no threshold**: it
-  pins the two invariants that are not judgment calls — both arms agree on dimensions, every
-  selected image yields a measurement — and prints the rest for a human. A single-threshold
-  gate is the wrong instrument for a property that varies this much with content, and no
-  replacement has been chosen yet, so section 7's saving is **recorded as unsettled rather
-  than accepted or reverted**. The selection is a rule, not a hand-picked set: every image in
-  `tests/corpus_sample.txt` whose native pixels can host the 700x1800 window.
+- **The whole-frame upscale is settled against ground truth**, marked and deselected by
+  default. Take a 2048x2988 window of original pixels, downscale it 4x with `sips` to make the
+  model's input, enlarge it back both ways, and score each arm against the truth slice cut
+  from the untouched window. Whole-frame is closer on **11 of 12 images by PSNR** (median
+  +0.02 dB) and **9 of 12 by DSSIM**, and the gap is negligible beside the model's own
+  reconstruction error — the arms sit 43.18 dB from each other where each sits about 30 dB
+  from the truth. Both metrics are reported because the research document warns that PSNR
+  inverts the visual ranking for this upscaler; answering a perceptual question with PSNR
+  alone is the mistake that cost this task two review rounds. Section 7's saving is accepted
+  on this.
+- **The older arms-against-each-other measurement is kept, and asserts no threshold.** It
+  spans **33.43 to 52.61 dB, median 42.86** over 18 real photographs — 12 above the
+  once-proposed 40 dB bar, 4 in the 35-40 dB band, 2 below the 35 dB floor. That spread is
+  what disqualified a single-threshold gate: the verdict depended on which photograph you
+  measured. The test pins the two invariants that are not judgment calls — both arms agree on
+  dimensions, every selected image yields a measurement — and prints the rest. Both selections
+  are rules rather than hand-picked sets: every image in `tests/corpus_sample.txt` whose native
+  pixels can host the window, at 700x1800 for this one and 2048x2988 for the ground-truth one.
+  The larger window admits only 12 images and excludes the two that score lowest here, which
+  is a real limit on what the ground-truth result covers.
 - The retired rule's three bands survive only as `old_rule_band`, a pure classifier used for
   reporting. Its 35-40 dB branch — the one that was supposed to stop and ask a human — was
   never once executed while the rule was live, because the only measurement that ever reached
