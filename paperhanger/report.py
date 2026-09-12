@@ -88,6 +88,11 @@ def render_photo(work, already_done: bool = False) -> str:
     return "\n".join(lines)
 
 
+def _count(n: int, noun: str) -> str:
+    """'1 output', '2 outputs'. Same pluralization for every counted noun."""
+    return f"{n} {noun}" if n == 1 else f"{n} {noun}s"
+
+
 def render_report(works, already_done=(), non_images: int = 0) -> str:
     """`already_done` is the set of source Paths already produced -- not a count.
 
@@ -95,15 +100,21 @@ def render_report(works, already_done=(), non_images: int = 0) -> str:
     per-photo 'already done, skipping' line reachable. Task 12's CLI already
     computes this set to decide what to skip, so passing it here costs it
     nothing.
+
+    The header answers "what will THIS RUN do?", not "how much was there
+    originally?" -- so the estimate and the outputs count are taken over the
+    photos NOT already done. A photo whose outputs already exist costs
+    nothing and produces nothing this run, however large its own upscale
+    would have been.
     """
     done = set(already_done)
+    pending = [w for w in works if w.source not in done]
     rejected = sum(1 for w in works if w.rejected_everywhere)
-    outputs = sum(len(w.plans) for w in works)
-    image_word = "image" if len(works) == 1 else "images"
+    outputs = sum(len(w.plans) for w in pending)
     parts = [
-        f"{len(works)} {image_word}, {outputs} outputs, {rejected} rejected, "
-        f"{len(done)} already done, {non_images} non-image skipped, "
-        f"{format_duration(estimate_seconds(works))}",
+        f"{_count(len(works), 'image')}, {_count(outputs, 'output')}, {rejected} rejected, "
+        f"{len(done)} already done, {_count(non_images, 'non-image')} skipped, "
+        f"{format_duration(estimate_seconds(pending))}",
         "",
     ]
     for work in works:

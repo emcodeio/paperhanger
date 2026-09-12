@@ -82,6 +82,63 @@ def test_single_image_header_is_singular(tmp_path):
     assert "1 images" not in text
 
 
+def test_singular_output_and_non_image_nouns(tmp_path):
+    """The image noun was singularized in round 1 but the others weren't, so
+    a single-output header read '1 image, 1 outputs'. Same rule, every noun."""
+    work = plan.plan_photo(Path("/s/a.jpg"), 9216, 6144, "jpeg", [sizes.DESKTOP],
+                           settings(tmp_path))
+    assert len(work.plans) == 1
+    text = report.render_report([work], non_images=1)
+    assert "1 output," in text
+    assert "1 outputs" not in text
+    assert "1 non-image skipped" in text
+    assert "1 non-images skipped" not in text
+
+
+def test_plural_output_and_non_image_nouns(tmp_path):
+    opts = settings(tmp_path)
+    work1 = plan.plan_photo(Path("/s/a.jpg"), 9216, 6144, "jpeg", [sizes.DESKTOP], opts)
+    work2 = plan.plan_photo(Path("/s/b.jpg"), 9216, 6144, "jpeg", [sizes.DESKTOP], opts)
+    assert len(work1.plans) == 1 and len(work2.plans) == 1
+    text = report.render_report([work1, work2], non_images=2)
+    assert "2 outputs" in text
+    assert "2 non-images skipped" in text
+
+
+def test_estimate_and_outputs_exclude_already_done(tmp_path):
+    """The header must answer 'what will THIS RUN do', not 'how much was here
+    originally' -- a photo already done costs nothing and produces nothing
+    this run, however large its own upscale would have been.
+
+    done_work (3000x5000 desktop, band 3) costs 192.0 s alone; pending_work
+    (1440x720 phone, band 4) costs 13.27104 s alone. Summed they round to a
+    different bucket ('~3 min' vs '~13 s'), so a version that still charges
+    for done_work is distinguishable in the rendered text, not just in the
+    raw float.
+    """
+    opts = settings(tmp_path)
+    done_work = plan.plan_photo(Path("/s/heavy.jpg"), 3000, 5000, "jpeg",
+                                [sizes.DESKTOP], opts)
+    pending_work = plan.plan_photo(Path("/s/sunset.jpg"), 1440, 720, "jpeg",
+                                   [sizes.PHONE], opts)
+    assert len(done_work.plans) == 3
+    assert len(pending_work.plans) == 3
+    assert done_work.needs_upscale and pending_work.needs_upscale
+
+    pending_only = report.estimate_seconds([pending_work])
+    everything = report.estimate_seconds([done_work, pending_work])
+    assert report.format_duration(pending_only) == "~13 s"
+    assert report.format_duration(everything) == "~3 min"
+
+    text = report.render_report([done_work, pending_work],
+                                already_done={done_work.source})
+
+    assert report.format_duration(pending_only) in text
+    assert report.format_duration(everything) not in text
+    assert "3 outputs" in text
+    assert "6 outputs" not in text
+
+
 def test_already_done_line_reachable_through_render_report(tmp_path):
     """AC 6 requires this line to come out of render_report, not just render_photo
     called directly -- render_report must be the thing that decides per photo."""
