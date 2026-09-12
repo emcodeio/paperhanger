@@ -406,6 +406,24 @@ def test_a_wrong_sized_render_leaves_an_earlier_runs_output_standing(tmp_path):
     assert target.destination.read_bytes() == b"an earlier run's wallpaper"
 
 
+def test_an_unreadable_output_is_refused(tmp_path, monkeypatch):
+    """`imaging` asserts only that a file APPEARED -- a truncated or empty one
+    satisfies that. Probing it is the only way to tell, and a file that cannot
+    be measured must not be published either."""
+    source = write_png(tmp_path / "s.png", 2000, 3000)
+    work = plan.plan_photo(source, 2000, 3000, "png", [sizes.PHONE], settings(tmp_path))
+    target = work.plans[0]
+
+    monkeypatch.setattr(imaging, "resize_and_encode",
+                        lambda src, w, h, fmt, q, out_path, resize:
+                        Path(out_path).write_bytes(b"not an image at all"))
+
+    with pytest.raises(imaging.ImagingError, match="not a readable image"):
+        execute.render(target, source, scale=1, workdir=tmp_path / "work")
+    assert not target.destination.exists()
+    assert list(target.destination.parent.glob("*.partial")) == []
+
+
 @pytest.mark.parametrize("fmt", formats.FORMATS)
 def test_the_post_condition_can_measure_every_output_format(tmp_path, fmt):
     """It probes the STAGED file, whose name carries a second extension --
