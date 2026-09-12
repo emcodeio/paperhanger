@@ -1,3 +1,4 @@
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -32,9 +33,15 @@ def stub_encoder(monkeypatch, seen=None):
 
 
 def stub_crop(monkeypatch, seen):
+    """Replace the crop with one that writes a real image of the rect's size.
+
+    Real, not junk bytes, because render measures what it is about to resample
+    before resampling it -- a stub that wrote nothing readable would fail the
+    no-enlargement guard rather than the behaviour under test.
+    """
     def crop(source, rect, out_path):
         seen.append((Path(source), rect, Path(out_path)))
-        Path(out_path).write_bytes(b"a cropped region")
+        write_png(out_path, rect.width, rect.height)
 
     monkeypatch.setattr(imaging, "crop", crop)
 
@@ -151,6 +158,40 @@ def test_the_region_check_would_fail_on_a_neighbouring_slice(tmp_path):
                          geometry.Rect(1, 1, 4, 4), "ll") == {BASE}
 
 
+def test_render_crops_before_it_resizes(tmp_path):
+    """The fusion hazard, against live pixels.
+
+    The middle slice of the 4000x3000 source, forced into a band that resizes:
+    cut 2000x3000 out of the frame, then reduce that to 1000x1500. Fused into
+    one sips call the resample is applied against the PRE-crop width of 4000,
+    and the file comes back wrong at exit 0, looking like any other output.
+    Measured on this fixture, cropping 2000x3000 at +1000+0 in the same call
+    as the resample gives:
+
+        --resampleHeightWidth 1500 1000   ->   500x1500   (what this code emits)
+        --resampleWidth 1000              ->   500x750
+        --resampleHeight 1500             ->  1000x1500   (right, by accident)
+
+    Only crop-then-resample reaches 1000x1500 for the right reason. The last
+    row is why constraint 4's both-axes rule is not merely about rounding: a
+    single flag can mask the fusion bug as easily as expose it.
+    """
+    work = plan.plan_photo(tmp_path / "ocean.png", 4000, 3000, "png",
+                           [sizes.PHONE], settings(tmp_path))
+    middle = work.plans[1]
+    resizing = replace(middle, band=bands.DOWNSCALE, out_width=1000, out_height=1500)
+    assert resizing.needs_resize and resizing.crop == middle.crop
+    source = write_marked_png(tmp_path / "ocean.png", 4000, 3000, middle.crop,
+                              base=BASE, marker=MARKER)
+
+    execute.render(resizing, source, scale=1, workdir=tmp_path / "work")
+
+    assert imaging.probe(resizing.destination)[:2] == (1000, 1500), \
+        "500x750 would mean the resample was fused with the crop"
+    assert patch_colours(tmp_path, resizing.destination,
+                         geometry.Rect(1, 1, 4, 4), "fused") == {MARKER}
+
+
 def test_render_scales_the_crop_rect_for_an_upscaled_frame(tmp_path, monkeypatch):
     """When the input is the 4x whole frame, the slice sits at 4x offsets.
 
@@ -204,11 +245,18 @@ def test_render_passes_the_rect_through_unscaled_at_scale_one(tmp_path, monkeypa
 
 # ---------- quality ----------
 
-def test_render_passes_the_plans_quality_to_the_encoder(tmp_path, monkeypatch):
+@pytest.mark.parametrize("fmt,quality", [("heic", 80), ("jpeg", 90)])
+def test_render_passes_the_plans_quality_to_the_encoder(tmp_path, monkeypatch,
+                                                        fmt, quality):
     """OutputPlan.quality is asserted nowhere else in the suite: replacing
     `quality=opts.quality` with `quality=None` in the planner leaves every
-    other test green, and heic's 80 is one of the three values constraint 12
-    fixes by measurement. render is where quality reaches an encoder.
+    other test green. These are two of the three values constraint 12 fixes by
+    measurement, and render is where quality reaches an encoder.
+
+    Two formats at two different values, because one would equally well pin a
+    hardcoded literal: render passing a constant 80 would satisfy the heic case
+    and send `-s formatOptions 80` to every png plan, which sips accepts
+    without a word.
 
     The file is probed too, because staging through a `.partial` suffix is
     exactly the shape that made sips silently keep the wrong format before
@@ -216,10 +264,10 @@ def test_render_passes_the_plans_quality_to_the_encoder(tmp_path, monkeypatch):
     either way.
     """
     source = write_png(tmp_path / "lichen.png", 2000, 3000)
-    work = plan.plan_photo(source, 2000, 3000, "heic", [sizes.PHONE],
-                           settings(tmp_path, "heic"))
+    work = plan.plan_photo(source, 2000, 3000, "png", [sizes.PHONE],
+                           settings(tmp_path, fmt))
     target = work.plans[0]
-    assert target.quality == 80
+    assert target.quality == quality
 
     real = imaging.resize_and_encode
     seen = []
@@ -231,8 +279,70 @@ def test_render_passes_the_plans_quality_to_the_encoder(tmp_path, monkeypatch):
     monkeypatch.setattr(imaging, "resize_and_encode", spy)
     execute.render(target, source, scale=1, workdir=tmp_path / "work")
 
-    assert seen == [("heic", 80)]
-    assert imaging.probe(target.destination) == (2000, 3000, "heic")
+    assert seen == [(fmt, quality)]
+    assert imaging.probe(target.destination) == (2000, 3000, fmt)
+
+
+# ---------- the no-enlargement guard ----------
+
+def test_a_band_3_plan_rendered_from_its_original_is_refused(tmp_path):
+    """Global constraint 1: no image is ever enlarged except by the ML model.
+
+    1440x2160 on the phone path governs at 2160 -- below the 2880 floor, and
+    2160*4 clears the 4320 ideal, so band 3: enlarge, then reduce to 2880x4320.
+    Handed its own original at scale 1, sips would be asked to more than double
+    it and would comply, at exit 0, with a file of exactly the planned size and
+    invented detail no check downstream could question. It must raise instead.
+    """
+    source = write_png(tmp_path / "small.png", 1440, 2160)
+    work = plan.plan_photo(source, 1440, 2160, "png", [sizes.PHONE], settings(tmp_path))
+    target = work.plans[0]
+    assert target.band == bands.UPSCALE_REDUCE
+    assert (target.out_width, target.out_height) == (2880, 4320)
+
+    with pytest.raises(imaging.ImagingError) as caught:
+        execute.render(target, source, scale=1, workdir=tmp_path / "work")
+    assert "1440x2160" in str(caught.value) and "2880x4320" in str(caught.value)
+    assert not target.destination.exists()
+    assert list(target.destination.parent.glob("*.partial")) == []
+
+
+def test_the_guard_allows_the_4x_frame_at_exactly_the_planned_size(tmp_path,
+                                                                   monkeypatch):
+    """Band 4 cut from the 4x frame lands EXACTLY on the planned size: the
+    slice is 480x720, so 4x is 1920x2880 and the plan asks for 1920x2880. A
+    guard written with > rather than >= would refuse the commonest legitimate
+    render in the whole pipeline."""
+    source = write_png(tmp_path / "s.png", 1440, 720)
+    work = plan.plan_photo(source, 1440, 720, "png", [sizes.PHONE], settings(tmp_path))
+    target = work.plans[0]
+    assert target.band == bands.UPSCALE_ONLY
+    assert (target.out_width, target.out_height) == (1920, 2880)
+
+    crops = []
+    stub_crop(monkeypatch, crops)          # writes a real 1920x2880 image
+    stub_encoder(monkeypatch)
+
+    # The frame is never read: stub_crop answers for it.
+    execute.render(target, tmp_path / "frame.png", scale=4, workdir=tmp_path / "work")
+    assert target.destination.exists()
+
+
+def test_the_guard_does_not_run_for_a_plan_that_never_resamples(tmp_path,
+                                                                monkeypatch):
+    """Band 2 encodes the pixels untouched, so there is nothing to measure and
+    no probe to pay for."""
+    source = write_png(tmp_path / "lichen.png", 2000, 3000)
+    work = plan.plan_photo(source, 2000, 3000, "png", [sizes.PHONE], settings(tmp_path))
+    target = work.plans[0]
+    assert target.band == bands.NATIVE
+
+    def refuse(*args, **kwargs):
+        raise AssertionError("the guard measured a render that does not resample")
+
+    monkeypatch.setattr(execute, "_refuse_to_enlarge", refuse)
+    stub_encoder(monkeypatch)
+    execute.render(target, source, scale=1, workdir=tmp_path / "work")
 
 
 # ---------- staging ----------
@@ -274,6 +384,30 @@ def test_failure_leaves_nothing_behind(tmp_path):
         execute.render(target, tmp_path / "absent.png", scale=1,
                        workdir=tmp_path / "work")
     assert not target.destination.exists()
+    assert list(target.destination.parent.glob("*.partial")) == []
+
+
+def test_a_failure_leaves_an_earlier_runs_output_alone(tmp_path):
+    """A failure must not destroy a wallpaper the user already had.
+
+    `staged.replace` is atomic and the last fallible statement in render, so a
+    failure never half-wrote the destination: there is nothing of this run's to
+    clean up there. Anything at that path came from an earlier run, and the
+    name encodes stem, position, device, both dimensions and the factor -- it
+    is this same plan's output from this same source, which makes deleting it
+    pure loss. This is the archive-never-overwrites rule in another costume.
+    """
+    source = write_png(tmp_path / "s.png", 2000, 3000)
+    work = plan.plan_photo(source, 2000, 3000, "png", [sizes.PHONE], settings(tmp_path))
+    target = work.plans[0]
+    target.destination.parent.mkdir(parents=True)
+    target.destination.write_bytes(b"an earlier run's wallpaper")
+
+    with pytest.raises(imaging.ImagingError):
+        execute.render(target, tmp_path / "absent.png", scale=1,
+                       workdir=tmp_path / "work")
+
+    assert target.destination.read_bytes() == b"an earlier run's wallpaper"
     assert list(target.destination.parent.glob("*.partial")) == []
 
 
