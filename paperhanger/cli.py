@@ -5,10 +5,19 @@ twenty-four-hour import is read as one stream, usually through `tee`, and a
 failure that arrives on a different file descriptor than the progress it
 interrupted is a failure nobody can place in time.
 
-Three exit codes and no more: 0 finished, 1 the run never started (usage, the
-guard, a collision, a missing toolchain), 2 the run started and some photos
-failed. argparse's own exit 2 for a bad flag is intercepted for exactly that
-reason -- it would otherwise be indistinguishable from a batch that ran.
+Four exit codes and no more:
+
+  0    finished, everything the run was asked for is done
+  1    the run never started -- usage, the guard, a collision, an unwritable
+       processing directory, a missing toolchain
+  2    the run started and some photos failed
+  130  Ctrl-C, the shell's convention for SIGINT
+
+argparse's own exit 2 for a bad flag is intercepted for exactly that reason:
+it would otherwise be indistinguishable from a batch that ran and lost photos.
+130 rather than 2 for an interrupt because the two say different things -- an
+interrupted run has photos it never looked at, and calling that "some photos
+failed" would misdescribe both halves of it.
 """
 
 import argparse
@@ -31,6 +40,19 @@ WORKROOT_NAME = ".work"
 OK = 0
 USAGE_ERROR = 1
 SOME_FAILED = 2
+INTERRUPTED = 130
+
+# The two ways the closing line can begin. Named because the tests isolate
+# that line by prefix rather than searching the whole of stdout -- the report
+# header above it carries its own "N rejected" and "N already done", so a
+# summary that stopped counting either would hide behind it.
+SUMMARY_DONE = "done:"
+SUMMARY_INTERRUPTED = "interrupted:"
+
+# doctor's first line, likewise isolated by the tests: the pinned-release line
+# names `paperhanger setup` unconditionally, so a NOT FOUND branch that had
+# dropped the hint would still leave the words somewhere in stdout.
+BINARY_LABEL = "upscayl-bin"
 
 UPSCALER_ENV = "PAPERHANGER_UPSCAYL_BIN"
 
@@ -189,6 +211,45 @@ def upscaler_is_needed(works, overwrite: bool) -> bool:
                for work in works for p in work.plans)
 
 
+def check_writable(processing_dir: Path):
+    """Fail once rather than 894 times. Returns a complaint, or None.
+
+    Every writer downstream creates its own destination directory as it goes,
+    so an unwritable processing directory is not discovered until the first
+    render -- and then again, identically, for every photo queued behind it.
+    On the author's corpus that is 894 `Permission denied` lines where one
+    would do, and the rest of the pre-flight is careful to fail once.
+
+    `mkdir(exist_ok=True)` alone does not answer the question. It succeeds on
+    a directory that already exists and cannot be written to, which is the
+    shape this takes on the SECOND run against a volume that has gone
+    read-only -- and the second run is the common one, because the first is
+    what creates the directory. So the check also writes the kind of file the
+    tool writes, and removes it.
+
+    `.partial`, deliberately: `sweep_partials` already clears strays by that
+    suffix from exactly this tree, so a crash between the create and the
+    unlink leaves nothing a later run will not tidy on its own.
+
+    `os.access` was the other option and is the wrong one. It answers from the
+    real uid and ignores ACLs, so on macOS it can refuse a directory that
+    would have worked -- and refusing a run that was going to succeed is worse
+    than the repetition this exists to prevent.
+    """
+    probe = processing_dir / f".paperhanger-write-test{execute.PARTIAL_SUFFIX}"
+    try:
+        processing_dir.mkdir(parents=True, exist_ok=True)
+        probe.touch()
+    except OSError as error:
+        return f"cannot write to {processing_dir}: {error}"
+    finally:
+        try:
+            probe.unlink(missing_ok=True)
+        except OSError:
+            pass
+    return None
+
+
 def _report_collisions(collisions) -> None:
     print("error: two sources would write the same output:")
     for destination, sources in collisions.items():
@@ -196,7 +257,7 @@ def _report_collisions(collisions) -> None:
     print("Rename one of them and run again.")
 
 
-def _summary(works, results) -> str:
+def _summary(works, results, interrupted: bool = False) -> str:
     """One line naming where every photo ended up.
 
     Rejection is read from `work.rejected_everywhere`, not from the outcome: a
@@ -204,17 +265,35 @@ def _summary(works, results) -> str:
     rejection from outcomes would drop it from the count that explains why it
     produced nothing. It is reported under both headings, which is what
     happened to it.
+
+    Counted over the photos the run actually REACHED, not over every photo it
+    planned. An interrupted run has photos it never looked at, and summing
+    `rejected_everywhere` across all of them would report images as rejected
+    that nothing ever examined -- a claim about the user's files that this run
+    did not earn. For a completed run the two are the same set.
     """
     counts = Counter(result.outcome for result in results)
-    rejected = sum(1 for work in works if work.rejected_everywhere)
+    reached = {result.source for result in results}
+    rejected = sum(1 for work in works
+                   if work.rejected_everywhere and work.source in reached)
     failed = counts[execute.PARTIAL] + counts[execute.FAILED]
-    return (f"done: {counts[execute.OK]} ok, "
-            f"{counts[execute.ALREADY_DONE]} already done, "
-            f"{rejected} rejected, {failed} failed")
+    tally = (f"{counts[execute.OK]} ok, "
+             f"{counts[execute.ALREADY_DONE]} already done, "
+             f"{rejected} rejected, {failed} failed")
+    if interrupted:
+        return (f"{SUMMARY_INTERRUPTED} {tally}, "
+                f"{len(works) - len(results)} never started")
+    return f"{SUMMARY_DONE} {tally}"
 
 
-def _run_batch(works, ctx) -> list:
+def _run_batch(works, ctx, results) -> None:
     """Every photo, cheapest first. One photo's disaster is never the run's.
+
+    Results are appended to the caller's list rather than returned, so that a
+    `KeyboardInterrupt` -- which this function deliberately does not catch --
+    leaves the caller holding everything finished before it arrived. A
+    returned list would be lost with the exception, and the closing summary
+    would have nothing to report at the one moment a user most needs it.
 
     `run_and_archive` does not catch everything a photo can do. The
     whole-frame and per-plan enlargements happen OUTSIDE `run_photo`'s
@@ -239,7 +318,6 @@ def _run_batch(works, ctx) -> list:
     A twenty-four-hour import is read as a log, and the answer to "why did
     photo 340 fail" belongs beside photo 340.
     """
-    results = []
     total = len(works)
     for index, work in enumerate(execute.cheapest_first(works), start=1):
         try:
@@ -254,7 +332,6 @@ def _run_batch(works, ctx) -> list:
               f" ({len(result.written)} written)")
         for message in result.failures:
             print(f"    {message}")
-    return results
 
 
 def main(argv=None) -> int:
@@ -324,9 +401,10 @@ def main(argv=None) -> int:
         print(rendered_report)
         return OK
 
-    # Checked here, before a single photo is touched: planning is pure integer
-    # arithmetic and costs nothing, so a machine without the binary finds out
-    # in about a second rather than forty images into a batch.
+    # Checked here, before a single photo is touched. Planning is pure integer
+    # arithmetic over dimensions the scan already probed, so a machine without
+    # the binary finds out as soon as the scan ends rather than forty images
+    # into the batch.
     binary = models = None
     if upscaler_is_needed(works, args.overwrite):
         try:
@@ -334,6 +412,15 @@ def main(argv=None) -> int:
         except toolchain.ToolchainError as error:
             print(f"error: {error}")
             return USAGE_ERROR
+
+    # The last of the pre-flight and the first thing that writes, in that
+    # order on purpose: every check that can refuse the run has now refused
+    # it, so a run that never starts leaves the filesystem exactly as it found
+    # it -- the same property --dry-run has, for the same reason.
+    complaint = check_writable(args.processing_dir)
+    if complaint:
+        print(f"error: {complaint}")
+        return USAGE_ERROR
 
     workroot = args.processing_dir / WORKROOT_NAME
     ctx = execute.Context(processing_dir=args.processing_dir, workroot=workroot,
@@ -348,18 +435,35 @@ def main(argv=None) -> int:
     print(rendered_report)
     print()
 
-    results = _run_batch(works, ctx)
+    # Ctrl-C is a first-class way to end a twenty-four-hour import, not an
+    # accident, and the rest of this codebase is built around that instant:
+    # outputs are staged and renamed so none is ever half-written, the
+    # original is archived only after every plan of its photo is in place, and
+    # `cheapest_first` orders the run so that an interrupt at any moment
+    # leaves as many finished wallpapers behind as possible. The CLI is the
+    # one layer that turns all of that into something the user can see. A
+    # stack trace here would throw it away at the exact moment it pays off --
+    # after twenty hours, with five hundred progress lines to scroll back
+    # through to find out what they got.
+    results = []
+    interrupted = False
+    try:
+        _run_batch(works, ctx, results)
+    except KeyboardInterrupt:
+        interrupted = True
 
-    # Our own scratch root, empty once every photo's workdir has been swept.
-    # rmdir rather than rmtree: anything still in there is unexpected, and
-    # worth leaving where a human can find it.
+    # Our own scratch root, empty once every photo's workdir has been swept --
+    # including on the interrupt, because `run_photo` sweeps in a `finally`
+    # and KeyboardInterrupt runs those like any other exception. rmdir rather
+    # than rmtree: anything still in there is unexpected, and worth leaving
+    # where a human can find it.
     try:
         workroot.rmdir()
     except OSError:
         pass
 
     print()
-    print(_summary(works, results))
+    print(_summary(works, results, interrupted=interrupted))
 
     failed = [r for r in results if r.outcome in (execute.PARTIAL, execute.FAILED)]
     if failed:
@@ -370,8 +474,13 @@ def main(argv=None) -> int:
         print("left in place for a re-run:")
         for result in failed:
             print(f"  {result.source}")
-        return SOME_FAILED
-    return OK
+
+    # The interrupt outranks the failures it may have travelled with: the run
+    # did not finish, and 2 would describe it as one that did and lost photos.
+    # The failures are still listed above either way.
+    if interrupted:
+        return INTERRUPTED
+    return SOME_FAILED if failed else OK
 
 
 def _setup() -> int:
@@ -407,11 +516,14 @@ def _binary_source(binary: Path) -> str:
 def _doctor() -> int:
     state = toolchain.status()
     binary = state["binary"]
+    # Binary and provenance on ONE line. Two lines read no better, and this
+    # way everything doctor claims about the binary can be isolated by prefix
+    # -- which the tests do, because `paperhanger setup` is named on the
+    # pinned-release line below whatever this branch prints.
     if binary is None:
-        print("upscayl-bin    : NOT FOUND -- run `paperhanger setup`")
+        print(f"{BINARY_LABEL}    : NOT FOUND -- run `paperhanger setup`")
     else:
-        print(f"upscayl-bin    : {binary}")
-        print(f"                 {_binary_source(binary)}")
+        print(f"{BINARY_LABEL}    : {binary}  ({_binary_source(binary)})")
     # The release is the tag `paperhanger setup` DOWNLOADS -- it is not read
     # from the binary above. A binary from PATH or from the environment
     # override can be any build, and upscayl-bin reports no version, so

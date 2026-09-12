@@ -50,7 +50,7 @@ def run(argv, capsys):
 
 
 def summary_line(out: str) -> str:
-    """The closing `done: ...` line, isolated.
+    """The closing `done:` / `interrupted:` line, isolated.
 
     Asserted against by name rather than against the whole of stdout, because
     the report header printed above it carries its own "N rejected" and "N
@@ -58,7 +58,37 @@ def summary_line(out: str) -> str:
     behind the header and the test would still be green. Found by mutation:
     `rejected = counts[execute.REJECTED]` survived until this existed.
     """
-    return next(line for line in out.splitlines() if line.startswith("done:"))
+    prefixes = (cli.SUMMARY_DONE, cli.SUMMARY_INTERRUPTED)
+    return next(line for line in out.splitlines() if line.startswith(prefixes))
+
+
+def binary_line(out: str) -> str:
+    """doctor's `upscayl-bin` line, isolated.
+
+    Same class of hole as `summary_line`, and it was live: `_doctor` prints
+    "(what `paperhanger setup` installs)" on the pinned-release line
+    UNCONDITIONALLY, so `assert "paperhanger setup" in out` passed even with
+    the entire NOT FOUND branch replaced by a bare "upscayl-bin: absent". And
+    `code == 0` discriminates nothing -- doctor always exits 0.
+    """
+    return next(line for line in out.splitlines()
+                if line.startswith(cli.BINARY_LABEL))
+
+
+def error_block(out: str) -> str:
+    """Everything the CLI said about the error, and nothing after it.
+
+    `parser.format_usage()` lists every flag the parser has, `[--allow-nested]`
+    among them, and some error paths print it. A guard message that had
+    stopped naming the flag it exists to advertise would still leave the word
+    in stdout, so the guard tests read this rather than the whole stream.
+    """
+    lines = out.splitlines()
+    start = next(i for i, line in enumerate(lines) if line.startswith("error:"))
+    for offset, line in enumerate(lines[start + 1:], start=start + 1):
+        if line.startswith("usage:"):
+            return "\n".join(lines[start:offset])
+    return "\n".join(lines[start:])
 
 
 @pytest.fixture
@@ -345,7 +375,7 @@ def test_guard_refuses_a_parent_of_the_processing_dir(tmp_path, capsys):
     code, out = run(["--dry-run", "--processing-dir", str(processing),
                      str(pictures)], capsys)
     assert code == 1
-    assert "--allow-nested" in out
+    assert "--allow-nested" in error_block(out)
 
 
 def test_allow_nested_permits_it(tmp_path, capsys):
@@ -364,7 +394,7 @@ def test_guard_refuses_the_processing_dir_itself(tmp_path, capsys):
     code, out = run(["--dry-run", "--processing-dir", str(processing),
                      str(processing)], capsys)
     assert code == 1
-    assert "--allow-nested" in out
+    assert "--allow-nested" in error_block(out)
 
 
 def test_guard_refuses_originals(tmp_path, capsys):
@@ -375,7 +405,7 @@ def test_guard_refuses_originals(tmp_path, capsys):
     code, out = run(["--dry-run", "--processing-dir", str(processing),
                      str(originals)], capsys)
     assert code == 1
-    assert "--allow-nested" in out
+    assert "--allow-nested" in error_block(out)
 
 
 def test_guard_refuses_a_file_inside_the_processing_dir(tmp_path, capsys):
@@ -386,7 +416,7 @@ def test_guard_refuses_a_file_inside_the_processing_dir(tmp_path, capsys):
     code, out = run(["--dry-run", "--processing-dir", str(processing),
                      str(photo)], capsys)
     assert code == 1
-    assert "--allow-nested" in out
+    assert "--allow-nested" in error_block(out)
 
 
 def test_guard_allows_a_file_beside_the_processing_dir(tmp_path, capsys):
@@ -411,7 +441,7 @@ def test_the_guard_resolves_symlinks(tmp_path, capsys):
     code, out = run(["--dry-run", "--processing-dir", str(pictures / "processing"),
                      str(link)], capsys)
     assert code == 1
-    assert "--allow-nested" in out
+    assert "--allow-nested" in error_block(out)
 
 
 # ---------- collisions ----------
@@ -511,8 +541,8 @@ def test_doctor_names_where_the_binary_came_from(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("PAPERHANGER_UPSCAYL_BIN", str(binary))
     code, out = run(["doctor"], capsys)
     assert code == 0
-    assert str(binary) in out
-    assert "PAPERHANGER_UPSCAYL_BIN" in out
+    assert str(binary) in binary_line(out)
+    assert "PAPERHANGER_UPSCAYL_BIN" in binary_line(out)
 
 
 def test_doctor_does_not_claim_the_found_binary_is_the_pinned_release(
@@ -533,7 +563,8 @@ def test_doctor_says_when_the_binary_is_missing(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("PAPERHANGER_UPSCAYL_BIN", str(tmp_path / "nowhere"))
     code, out = run(["doctor"], capsys)
     assert code == 0
-    assert "paperhanger setup" in out
+    assert "NOT FOUND" in binary_line(out)
+    assert "paperhanger setup" in binary_line(out)
 
 
 def test_setup_reports_a_toolchain_error(monkeypatch, capsys):
@@ -771,6 +802,168 @@ def test_cheap_photos_run_first(inbox, tmp_path, ready_toolchain, capsys):
                      str(tmp_path / "processing"), str(inbox)], capsys)
     assert code == 0
     assert out.index("z_native.png:") < out.index("a_needs_the_model.png:")
+
+
+# ---------- Ctrl-C ----------
+
+def interrupt_on(monkeypatch, stem: str):
+    """Raise KeyboardInterrupt when `run_and_archive` reaches this photo.
+
+    The real thing arrives from the terminal at an arbitrary instant inside
+    the executor. Raising it at the top of `run_and_archive` reproduces the
+    part the CLI is responsible for -- everything finished stays finished,
+    this photo and everything behind it does not start -- without pretending
+    to reproduce the executor's own interrupt safety, which `run_photo`'s
+    `finally` clauses own and test_execute covers.
+    """
+    real = execute.run_and_archive
+
+    def maybe_interrupt(work, ctx):
+        if work.source.stem == stem:
+            raise KeyboardInterrupt
+        return real(work, ctx)
+
+    monkeypatch.setattr(cli.execute, "run_and_archive", maybe_interrupt)
+
+
+def test_ctrl_c_prints_a_summary_instead_of_a_traceback(
+        inbox, tmp_path, no_upscaler, monkeypatch, capsys):
+    """`cheapest_first` reasons about this moment by name, staging-then-rename
+    exists to survive it, and the CLI is the one layer that turns any of that
+    into something the user sees. A stack trace throws it away."""
+    for name in ("a.png", "b.png", "c.png"):
+        fixture(inbox / name, 2000, 3000)
+    interrupt_on(monkeypatch, "b")
+    processing = tmp_path / "processing"
+
+    code, out = run(["-p", "--format", "png", "--processing-dir",
+                     str(processing), str(inbox)], capsys)
+
+    assert code == 130
+    assert summary_line(out).startswith(cli.SUMMARY_INTERRUPTED)
+    assert "1 ok" in summary_line(out)
+    assert "2 never started" in summary_line(out)
+    # What photo 1 produced is complete, and its original was archived.
+    assert (processing / "to_sort_phone" / "below_target"
+            / "a_phone_2000x3000_native.png").exists()
+    assert (processing / "originals" / "a.png").exists()
+    # b and c were never touched.
+    assert (inbox / "b.png").exists() and (inbox / "c.png").exists()
+    assert not (processing / cli.WORKROOT_NAME).exists()
+
+
+def test_ctrl_c_names_what_finished(inbox, tmp_path, no_upscaler,
+                                    monkeypatch, capsys):
+    for name in ("a.png", "b.png", "c.png"):
+        fixture(inbox / name, 2000, 3000)
+    interrupt_on(monkeypatch, "c")
+    code, out = run(["-p", "--format", "png", "--processing-dir",
+                     str(tmp_path / "processing"), str(inbox)], capsys)
+    assert code == 130
+    assert "[1/3] a.png: ok" in out
+    assert "[2/3] b.png: ok" in out
+    assert "[3/3] c.png" not in out
+    assert "2 ok" in summary_line(out)
+    assert "1 never started" in summary_line(out)
+
+
+def test_an_interrupted_run_does_not_count_rejections_it_never_reached(
+        inbox, tmp_path, no_upscaler, monkeypatch, capsys):
+    """`rejected_everywhere` is a property of the PLAN, true before any photo
+    runs. Summed over every work rather than over the ones the run REACHED, a
+    run interrupted on its first photo still reports a rejection -- a
+    judgement about the user's file that nothing ever looked at.
+
+    Interrupted on the first photo precisely so the two readings differ:
+    `cheapest_first` sorts a photo with no plans to the front, so the rejected
+    one is both the first candidate and, here, the one never examined.
+    """
+    fixture(inbox / "tiny.png", 100, 100)
+    fixture(inbox / "lichen.png", 2000, 3000)
+    interrupt_on(monkeypatch, "tiny")
+    code, out = run(["-p", "--format", "png", "--processing-dir",
+                     str(tmp_path / "processing"), str(inbox)], capsys)
+    assert code == 130
+    assert "0 ok" in summary_line(out)
+    assert "0 rejected" in summary_line(out)
+    assert "2 never started" in summary_line(out)
+    assert "1 rejected" in out, "the report header still describes the plan"
+
+
+def test_a_routing_bug_still_escapes_the_interrupt_handler(
+        inbox, tmp_path, no_upscaler, monkeypatch):
+    """The KeyboardInterrupt catch must not have widened into a bare except."""
+    def routing_bug(work, ctx):
+        raise ValueError("_upscale_one_plan requires a crop plan")
+
+    monkeypatch.setattr(cli.execute, "run_and_archive", routing_bug)
+    fixture(inbox / "lichen.png", 2000, 3000)
+    with pytest.raises(ValueError, match="requires a crop plan"):
+        cli.main(["-p", "--format", "png", "--processing-dir",
+                  str(tmp_path / "processing"), str(inbox)])
+
+
+# ---------- the writability pre-flight ----------
+
+def test_an_uncreatable_processing_dir_fails_once(inbox, tmp_path, capsys):
+    for name in ("a.png", "b.png", "c.png"):
+        fixture(inbox / name, 2000, 3000)
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    locked.chmod(0o555)
+    try:
+        code, out = run(["-p", "--format", "png", "--processing-dir",
+                         str(locked / "processing"), str(inbox)], capsys)
+    finally:
+        locked.chmod(0o755)
+    assert code == 1
+    assert "cannot write to" in error_block(out)
+    assert "[1/3]" not in out, "894 identical failures is what this prevents"
+
+
+def test_an_existing_unwritable_processing_dir_fails_once(
+        inbox, tmp_path, capsys):
+    """The case `mkdir(exist_ok=True)` alone cannot see, and the common one:
+    the directory exists because the FIRST run made it."""
+    fixture(inbox / "a.png", 2000, 3000)
+    processing = tmp_path / "processing"
+    processing.mkdir()
+    processing.chmod(0o555)
+    try:
+        code, out = run(["-p", "--format", "png", "--processing-dir",
+                         str(processing), str(inbox)], capsys)
+    finally:
+        processing.chmod(0o755)
+    assert code == 1
+    assert "cannot write to" in error_block(out)
+    assert "[1/1]" not in out
+
+
+def test_the_writability_probe_leaves_nothing_behind(
+        inbox, tmp_path, no_upscaler, capsys):
+    fixture(inbox / "lichen.png", 2000, 3000)
+    processing = tmp_path / "processing"
+    code, _ = run(["-p", "--format", "png", "--processing-dir",
+                   str(processing), str(inbox)], capsys)
+    assert code == 0
+    assert list(processing.glob(f"*{execute.PARTIAL_SUFFIX}")) == []
+
+
+def test_dry_run_does_not_probe_an_unwritable_target(inbox, tmp_path, capsys):
+    """The pre-flight writes, so it sits after the --dry-run return. A
+    dry run against a target it could never write to still reports."""
+    fixture(inbox / "lichen.png", 2000, 3000)
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    locked.chmod(0o555)
+    try:
+        code, out = run(["-p", "--dry-run", "--processing-dir",
+                         str(locked / "processing"), str(inbox)], capsys)
+    finally:
+        locked.chmod(0o755)
+    assert code == 0
+    assert "1 image," in out
+    assert not (locked / "processing").exists()
 
 
 def test_an_empty_directory_is_not_an_error(inbox, tmp_path, capsys):
