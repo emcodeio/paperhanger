@@ -114,23 +114,40 @@ def _plan_everything(inbox, processing):
     """Plan the whole sample exactly as `cli` would, writing nothing."""
     opts = plan.OutputSettings(processing, "heic", formats.quality_for("heic"))
     images, non_images = cli.scan(inbox)
-    works = [plan.plan_photo(p, w, h, f, list(sizes.DEVICES), opts)
+    works = [plan.plan_photo(p, w, h, list(sizes.DEVICES), opts)
              for p, w, h, f in images]
     return works, non_images
+
+
+# Where a finished run is allowed to have put something. Everything else under
+# the processing directory is an output, wherever it landed.
+ARCHIVE_DIRS = ("originals", "error")
 
 
 def _outputs(processing: Path) -> list:
     """Every file the run FILED as a wallpaper, and nothing else.
 
-    Scoped to the `to_sort_` trees rather than globbed over the whole
-    processing directory, because the two are not the same set and one of them
-    grew a decoy: `purple_nebula_glow_0312_x.heic` is a HEIC SOURCE, so a
-    `processing.rglob("*.heic")` sweeps up the archived original beside the
-    102 wallpapers and answers 103 -- measured, not imagined. An assertion
-    that counts a directory it did not mean is the filesystem version of the
-    substring that matched the report header in task 12.
+    The archive trees are excluded by NAME, not by scoping the glob to
+    `to_sort_*`. Both spellings agree on a correct run, and they part company
+    on exactly the failure worth catching: an output written somewhere the
+    sorter will never look. Globbed at `to_sort_*` such a file is invisible to
+    every assertion in this module, including the set-equality one that exists
+    to catch strays -- it would report a clean run while a wallpaper sat in
+    the processing root.
+
+    Excluded by name rather than by extension, because
+    `purple_nebula_glow_0312_x.heic` is a HEIC SOURCE: a bare
+    `processing.rglob("*.heic")` sweeps the archived original up beside the
+    102 wallpapers and answers 103 -- measured, not imagined. `.work` is
+    swept by the CLI and gone by the time anything reads this; if it is not,
+    that is a finding and this will show it.
     """
-    return sorted(p for p in processing.glob("to_sort_*/**/*") if p.is_file())
+    return sorted(
+        p for p in processing.rglob("*")
+        if p.is_file()
+        and not any(part in ARCHIVE_DIRS or part == cli.WORKROOT_NAME
+                    for part in p.relative_to(processing).parts)
+    )
 
 
 def _summary_line(stdout: str) -> str:
@@ -158,12 +175,17 @@ class SampleRun:
 
 
 @pytest.fixture(scope="module")
-def sample_run(tmp_path_factory):
+def sample_run(tmp_path_factory, corpus_sample):
     """One real run over the sample. Module-scoped: it costs seven minutes.
 
-    Its own copy of the sample, not the shared `corpus_sample` one, because a
-    run MOVES the originals it was given and would empty a directory the
-    planning tests still need.
+    Its own copy of the sample, not the shared `corpus_sample` directory
+    itself, because a run MOVES the originals it was given and would empty a
+    directory the planning tests still need. But copied FROM that directory
+    rather than from the corpus a second time: 192 MB was being read out of
+    `~/Pictures/wallpaper` twice per module run for two identical results,
+    and the corpus is the one tree nothing here is allowed to touch more than
+    it must. `corpus_sample` has already skipped for a missing image by the
+    time this runs, so the second read had nothing left to discover either.
 
     The stub is the conftest one, which refuses anything that is not jpg, png
     or webp exactly as `upscayl-bin` does. That is what makes this run a test
@@ -172,9 +194,8 @@ def sample_run(tmp_path_factory):
     `_upscale_whole_frame` converted them to PNG first. Drop that conversion
     and this fixture fails outright.
     """
-    corpus = corpus_or_skip()
     root = tmp_path_factory.mktemp("corpus-sample-run")
-    inbox = copy_sample(corpus, root / "inbox")
+    inbox = copy_sample(corpus_sample, root / "inbox")
     processing = root / "processing"
 
     # Planned BEFORE the run, because the run empties the inbox. These are the

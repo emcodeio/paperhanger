@@ -40,17 +40,19 @@ def estimate_seconds(works, done_outputs=()) -> float:
     return total
 
 
-def _strip_trailing_zero(text: str) -> str:
-    """'1.0' -> '1', '1.5' -> '1.5'. Same rule as bands.factor_token."""
-    return text.rstrip("0").rstrip(".") if "." in text else text
-
-
 def format_duration(seconds: float) -> str:
+    """'~45 s', '~14 min', '~1.5 h'. Never '~1.0 h'.
+
+    The last rule is `bands.drop_trailing_zero`, called rather than copied:
+    this module held its own `_strip_trailing_zero` under a comment reading
+    "same rule as bands.factor_token", which is the note written immediately
+    before two copies of a rule drift apart.
+    """
     if seconds < 90:
         return f"~{seconds:.0f} s"
     if seconds < 3600:
         return f"~{seconds / 60:.0f} min"
-    return f"~{_strip_trailing_zero(f'{seconds / 3600:.1f}')} h"
+    return f"~{bands.drop_trailing_zero(f'{seconds / 3600:.1f}')} h"
 
 
 def _action(target) -> str:

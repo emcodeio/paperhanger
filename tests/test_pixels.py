@@ -2,7 +2,7 @@ import subprocess
 
 import pytest
 
-from tests.pngwriter import write_png
+from tests.pixels import write_png
 
 
 def _sips_dimensions(path):

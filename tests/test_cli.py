@@ -21,7 +21,7 @@ from pathlib import Path
 import pytest
 
 from paperhanger import cli, execute, imaging, sizes, toolchain
-from tests.pngwriter import write_png
+from tests.pixels import write_png
 
 # The same handful of sizes is wanted by two dozen tests, and the 6 Mpx one
 # costs about a quarter second to generate. Generated once, written from bytes
@@ -637,7 +637,7 @@ def test_every_skip_existing_decision_goes_through_one_function(
 
     source = fixture(inbox / "sunset.png", 480, 720)
     opts = plan.OutputSettings(tmp_path / "proc", "png", None)
-    works = [plan.plan_photo(source, 480, 720, "png", [sizes.PHONE], opts)]
+    works = [plan.plan_photo(source, 480, 720, [sizes.PHONE], opts)]
     assert works[0].needs_upscale
 
     monkeypatch.setattr(execute, "is_pending",
@@ -1064,7 +1064,7 @@ def test_a_finished_photo_is_never_counted_as_interrupted(tmp_path):
 
     source = Path("/src/a.png")
     opts = plan.OutputSettings(tmp_path / "proc", "png", None)
-    works = [plan.plan_photo(source, 2000, 3000, "png", [sizes.PHONE], opts)]
+    works = [plan.plan_photo(source, 2000, 3000, [sizes.PHONE], opts)]
     results = [execute.PhotoResult(source=source, outcome=execute.OK)]
 
     line = cli._summary(works, results, interrupted=True, in_flight=[source])

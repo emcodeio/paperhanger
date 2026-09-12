@@ -60,6 +60,10 @@ Every decision is made before anything is written.
 input path
   -> scan       candidate files, filtered by probing with sips (not by extension)
   -> measure    imaging.probe() -> (w, h, source_format)   one sips call per file
+                The format decides nothing past this point and the planner does
+                not take it: normalizing unconditionally on the upscale path
+                (constraint 5) left it with no consumer. It is what tells an
+                image from a .DS_Store, and it stops at the scan.
   -> classify   pure: device(s), axis, ideal, floor
   -> plan       pure: a flat list of OutputPlans, grouped by source photo. Crop
                 slices are planned, not written, because

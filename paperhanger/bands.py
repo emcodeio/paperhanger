@@ -76,9 +76,19 @@ def net_factor(governing: int, target: sizes.Target, band: int):
     return target.ideal / governing
 
 
+def drop_trailing_zero(text: str) -> str:
+    """'1.0' -> '1', '1.5' -> '1.5'. One decimal place, minus a useless zero.
+
+    Shared with `report.format_duration`, which wants the same rule for hours
+    -- '~1 h' rather than '~1.0 h'. It lived in both, under a comment in the
+    second copy saying "same rule as bands.factor_token", which is the comment
+    written immediately before two copies of a rule drift apart.
+    """
+    return text.rstrip("0").rstrip(".") if "." in text else text
+
+
 def factor_token(factor) -> str:
     """The filename token: 'native', '4x', '1.6x'. Never '4.0x'."""
     if factor is None:
         return "native"
-    text = f"{factor:.1f}".rstrip("0").rstrip(".")
-    return f"{text}x"
+    return f"{drop_trailing_zero(f'{factor:.1f}')}x"

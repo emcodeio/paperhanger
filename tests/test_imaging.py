@@ -6,7 +6,7 @@ import pytest
 
 from paperhanger import geometry, imaging
 from paperhanger.geometry import Rect
-from tests.pngwriter import read_png_rgb, write_marked_png, write_png
+from tests.pixels import read_png_rgb, write_marked_png, write_png
 
 
 # ---------- probe ----------

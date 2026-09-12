@@ -9,10 +9,14 @@ HEIGHT = "height"
 
 UPSCALE_FACTOR = 4
 
-# The one enlargement the upscaler is allowed to skip: anything already at or
-# above its floor keeps its real pixels. ideal/floor IS that ratio, so there is
-# no separate constant -- see test_ratio_is_exactly_one_and_a_half.
-MIN_ENLARGEMENT = 1.5
+# There is deliberately no MIN_ENLARGEMENT constant. Global constraint 2 --
+# nothing is enlarged by less than 1.5x -- is not a number this module
+# consults; it is a property of the table below, where ideal/floor is exactly
+# 1.5 on all four device-axis pairs. So "needs less than 1.5x" and "is at or
+# above the floor" are one comparison, which is what `bands.band_for` makes,
+# and `test_ratio_is_exactly_one_and_a_half` is what keeps the table honest.
+# A constant sat here for a while, defined, commented at length and referenced
+# by nothing, reading as though something consulted it.
 
 
 @dataclass(frozen=True)

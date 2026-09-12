@@ -26,7 +26,7 @@ def test_estimate_counts_each_photo_once(tmp_path):
     this fixture alone cannot tell them apart. See
     test_estimate_counts_each_photo_once_with_overlapping_crop below, which can.
     """
-    work = plan.plan_photo(Path("/s/sunset.jpg"), 1440, 720, "jpeg",
+    work = plan.plan_photo(Path("/s/sunset.jpg"), 1440, 720,
                            [sizes.PHONE], settings(tmp_path))
     assert len(work.plans) == 3
     expected = 0.8 * 16 * 1440 * 720 / 1_000_000
@@ -45,7 +45,7 @@ def test_estimate_counts_each_photo_once_with_overlapping_crop(tmp_path):
     and both differ from 192.0, so this fixture catches what the tiling
     fixture cannot.
     """
-    work = plan.plan_photo(Path("/s/cliffs.jpg"), 3000, 5000, "jpeg",
+    work = plan.plan_photo(Path("/s/cliffs.jpg"), 3000, 5000,
                            [sizes.DESKTOP], settings(tmp_path))
     assert len(work.plans) == 3
     expected = 0.8 * 16 * 3000 * 5000 / 1_000_000
@@ -54,7 +54,7 @@ def test_estimate_counts_each_photo_once_with_overlapping_crop(tmp_path):
 
 
 def test_estimate_is_zero_without_upscaling(tmp_path):
-    work = plan.plan_photo(Path("/s/big.jpg"), 9216, 6144, "jpeg",
+    work = plan.plan_photo(Path("/s/big.jpg"), 9216, 6144,
                            [sizes.DESKTOP], settings(tmp_path))
     assert work.plans and not work.needs_upscale
     assert report.estimate_seconds([work]) == 0
@@ -69,10 +69,10 @@ def test_header_counts(tmp_path):
     """
     opts = settings(tmp_path)
     works = [
-        plan.plan_photo(Path("/s/a.jpg"), 9216, 6144, "jpeg", [sizes.DESKTOP], opts),
-        plan.plan_photo(Path("/s/tiny.jpg"), 200, 300, "jpeg", list(sizes.DEVICES), opts),
+        plan.plan_photo(Path("/s/a.jpg"), 9216, 6144, [sizes.DESKTOP], opts),
+        plan.plan_photo(Path("/s/tiny.jpg"), 200, 300, list(sizes.DEVICES), opts),
     ]
-    finished = [plan.plan_photo(Path(f"/s/d{n}.jpg"), 9216, 6144, "jpeg",
+    finished = [plan.plan_photo(Path(f"/s/d{n}.jpg"), 9216, 6144,
                                 [sizes.DESKTOP], opts) for n in (1, 2, 3)]
     done = {p.destination for w in finished for p in w.plans}
 
@@ -86,7 +86,7 @@ def test_header_counts(tmp_path):
 
 
 def test_single_image_header_is_singular(tmp_path):
-    work = plan.plan_photo(Path("/s/a.jpg"), 9216, 6144, "jpeg", [sizes.DESKTOP],
+    work = plan.plan_photo(Path("/s/a.jpg"), 9216, 6144, [sizes.DESKTOP],
                            settings(tmp_path))
     text = report.render_report([work])
     assert "1 image," in text
@@ -96,7 +96,7 @@ def test_single_image_header_is_singular(tmp_path):
 def test_singular_output_and_non_image_nouns(tmp_path):
     """The image noun was singularized in round 1 but the others weren't, so
     a single-output header read '1 image, 1 outputs'. Same rule, every noun."""
-    work = plan.plan_photo(Path("/s/a.jpg"), 9216, 6144, "jpeg", [sizes.DESKTOP],
+    work = plan.plan_photo(Path("/s/a.jpg"), 9216, 6144, [sizes.DESKTOP],
                            settings(tmp_path))
     assert len(work.plans) == 1
     text = report.render_report([work], non_images=1)
@@ -108,8 +108,8 @@ def test_singular_output_and_non_image_nouns(tmp_path):
 
 def test_plural_output_and_non_image_nouns(tmp_path):
     opts = settings(tmp_path)
-    work1 = plan.plan_photo(Path("/s/a.jpg"), 9216, 6144, "jpeg", [sizes.DESKTOP], opts)
-    work2 = plan.plan_photo(Path("/s/b.jpg"), 9216, 6144, "jpeg", [sizes.DESKTOP], opts)
+    work1 = plan.plan_photo(Path("/s/a.jpg"), 9216, 6144, [sizes.DESKTOP], opts)
+    work2 = plan.plan_photo(Path("/s/b.jpg"), 9216, 6144, [sizes.DESKTOP], opts)
     assert len(work1.plans) == 1 and len(work2.plans) == 1
     text = report.render_report([work1, work2], non_images=2)
     assert "2 outputs" in text
@@ -128,9 +128,9 @@ def test_estimate_and_outputs_exclude_already_done(tmp_path):
     raw float.
     """
     opts = settings(tmp_path)
-    done_work = plan.plan_photo(Path("/s/heavy.jpg"), 3000, 5000, "jpeg",
+    done_work = plan.plan_photo(Path("/s/heavy.jpg"), 3000, 5000,
                                 [sizes.DESKTOP], opts)
-    pending_work = plan.plan_photo(Path("/s/sunset.jpg"), 1440, 720, "jpeg",
+    pending_work = plan.plan_photo(Path("/s/sunset.jpg"), 1440, 720,
                                    [sizes.PHONE], opts)
     assert len(done_work.plans) == 3
     assert len(pending_work.plans) == 3
@@ -162,7 +162,7 @@ def test_a_half_finished_photo_is_counted_by_plan_not_by_photo(tmp_path):
     whole-image plan -- four plans, so "three of four" is reachable, and the
     photo is not wholly done either way.
     """
-    work = plan.plan_photo(Path("/s/sunset.jpg"), 3000, 5000, "jpeg",
+    work = plan.plan_photo(Path("/s/sunset.jpg"), 3000, 5000,
                            list(sizes.DEVICES), settings(tmp_path))
     assert len(work.plans) == 4
 
@@ -183,7 +183,7 @@ def test_the_estimate_drops_a_photo_whose_upscaling_plans_are_all_done(tmp_path)
     upscaling plans are finished starts no model run, and one with any left
     pays for its whole frame once however many are left.
     """
-    work = plan.plan_photo(Path("/s/sunset.jpg"), 3000, 5000, "jpeg",
+    work = plan.plan_photo(Path("/s/sunset.jpg"), 3000, 5000,
                            [sizes.DESKTOP], settings(tmp_path))
     assert len(work.plans) == 3 and all(p.needs_upscale for p in work.plans)
     whole_frame = 0.8 * 16 * 3000 * 5000 / 1_000_000
@@ -200,7 +200,7 @@ def test_the_estimate_drops_a_photo_whose_upscaling_plans_are_all_done(tmp_path)
 def test_already_done_line_reachable_through_render_report(tmp_path):
     """AC 6 requires this line to come out of render_report, not just render_photo
     called directly -- render_report must be the thing that decides per photo."""
-    work = plan.plan_photo(Path("/s/done.jpg"), 9216, 6144, "jpeg", [sizes.DESKTOP],
+    work = plan.plan_photo(Path("/s/done.jpg"), 9216, 6144, [sizes.DESKTOP],
                            settings(tmp_path))
     done = {p.destination for p in work.plans}
     text = report.render_report([work], done_outputs=done)
@@ -208,7 +208,7 @@ def test_already_done_line_reachable_through_render_report(tmp_path):
 
 
 def test_whole_image_line(tmp_path):
-    work = plan.plan_photo(Path("/s/cliffs.jpg"), 8200, 5125, "jpeg",
+    work = plan.plan_photo(Path("/s/cliffs.jpg"), 8200, 5125,
                            [sizes.DESKTOP], settings(tmp_path))
     line = report.render_photo(work)
     assert "cliffs.jpg" in line
@@ -225,7 +225,7 @@ def test_native_band_is_marked_below_target(tmp_path):
     and plan.destination_dir agree on this) but the action label used to mark
     only the UPSCALE_ONLY branch. 6000x4000 desktop is width-governed (6000),
     between floor (5120) and ideal (7680): NATIVE, not a crop."""
-    work = plan.plan_photo(Path("/s/plain.jpg"), 6000, 4000, "jpeg",
+    work = plan.plan_photo(Path("/s/plain.jpg"), 6000, 4000,
                            [sizes.DESKTOP], settings(tmp_path))
     line = report.render_photo(work)
     assert "native" in line
@@ -233,7 +233,7 @@ def test_native_band_is_marked_below_target(tmp_path):
 
 
 def test_crop_lines_are_indented(tmp_path):
-    work = plan.plan_photo(Path("/s/sunset.jpg"), 3000, 5000, "jpeg",
+    work = plan.plan_photo(Path("/s/sunset.jpg"), 3000, 5000,
                            [sizes.DESKTOP], settings(tmp_path))
     text = report.render_photo(work)
     lines = text.splitlines()
@@ -247,7 +247,7 @@ def test_crop_lines_are_indented(tmp_path):
 
 
 def test_rejected_on_both_devices(tmp_path):
-    work = plan.plan_photo(Path("/s/tiny.gif"), 200, 300, "gif",
+    work = plan.plan_photo(Path("/s/tiny.gif"), 200, 300,
                            list(sizes.DEVICES), settings(tmp_path))
     assert "reject (too small for both)" in report.render_photo(work)
 
@@ -259,8 +259,8 @@ def test_a_single_device_run_does_not_say_both(tmp_path, device):
     to bother trying it on a phone. 620x1102 is rejected by desktop and is a
     perfectly good phone source; 1102x620 is the other way round.
     """
-    shape = (620, 1102) if device == sizes.DESKTOP else (1102, 620)
-    work = plan.plan_photo(Path("/s/foggy.JPG"), *shape, "jpeg", [device],
+    width, height = (620, 1102) if device == sizes.DESKTOP else (1102, 620)
+    work = plan.plan_photo(Path("/s/foggy.JPG"), width, height, [device],
                            settings(tmp_path))
     assert work.rejected_everywhere
 
@@ -271,7 +271,7 @@ def test_a_single_device_run_does_not_say_both(tmp_path, device):
 
 
 def test_rejected_on_one_device_only(tmp_path):
-    work = plan.plan_photo(Path("/s/small.jpg"), 900, 1400, "jpeg",
+    work = plan.plan_photo(Path("/s/small.jpg"), 900, 1400,
                            list(sizes.DEVICES), settings(tmp_path))
     line = report.render_photo(work)
     assert "desktop rejected" in line
@@ -279,7 +279,7 @@ def test_rejected_on_one_device_only(tmp_path):
 
 
 def test_already_done_line(tmp_path):
-    work = plan.plan_photo(Path("/s/done.jpg"), 9216, 6144, "jpeg",
+    work = plan.plan_photo(Path("/s/done.jpg"), 9216, 6144,
                            [sizes.DESKTOP], settings(tmp_path))
     assert "already done, skipping" in report.render_photo(work, already_done=True)
 

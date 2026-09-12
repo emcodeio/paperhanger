@@ -23,6 +23,7 @@ instead of once per slice; it is not implemented here.
 """
 
 import shutil
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -133,13 +134,29 @@ def _verify_dimensions(image, target) -> None:
     `s_left_phone_1920x2880_4x.png` at 480x720 -- measured. No enlargement, so
     constraint 1 is intact, but the name asserts dimensions the file does not
     have, and nothing downstream reads pixels to find out.
+
+    Two things this deliberately does not do:
+
+      * It does not check the FORMAT, though the probe returns one. `crop`
+        needs that check and makes it, because there a `.png` name over JPEG
+        bytes spends a lossy generation on an intermediate that fact 7 is
+        entirely about. Here the name comes from `formats.extension` and the
+        encoder was told `-s format <fmt>` by the same plan, so there is no
+        second source for the two to disagree between; checking it would test
+        one line of `resize_and_encode` against itself.
+      * It does not skip the non-resizing renders. The guard costs one probe
+        and it is the resizing renders that pay for the RESAMPLE -- but the
+        case above has no resample at all, so a post-condition that ran only
+        where the resample did would miss exactly the hole it exists for.
+        Every render published by this module is measured: about 3441 probes
+        across the corpus, roughly a minute in twenty-four hours.
     """
     measured = imaging.probe(image)
     if measured is None:
         raise imaging.ImagingError(
             f"{target.destination.name}: encoded file is not a readable image"
         )
-    width, height, _ = measured
+    width, height, _format = measured
     if (width, height) != (target.out_width, target.out_height):
         raise imaging.ImagingError(
             f"{target.destination.name} would be {width}x{height}, not the "
@@ -169,6 +186,13 @@ def render(target, source_image, scale: int, workdir) -> Path:
         filename claim. That covers the band 4 case the guard cannot see,
         where nothing is resampled and the slice is simply written at 1/4 the
         planned size.
+
+    `workdir` is created here but NOT removed here, and that asymmetry is the
+    point: one photo's three slices share it, so a render that swept the
+    directory on its way out would take the sibling still using it. It
+    belongs to `run_photo`, which makes it per photo and rmtree's it in a
+    `finally`. What render owns is its own intermediates, and it unlinks
+    exactly those.
     """
     workdir = Path(workdir)
     workdir.mkdir(parents=True, exist_ok=True)
@@ -238,7 +262,10 @@ class Context:
     workroot: Path
     upscayl: Path
     models_dir: Path
-    log: object = print
+    # Callable, not object: this is where the strategy decisions about an
+    # over-cap photo are reported, and the CLI replaces it in tests to read
+    # them back. `object` said nothing about what may be passed.
+    log: Callable[[str], object] = print
     # Off by default, and read only by run_and_archive: an output already in
     # place is an earlier run's, produced from this same source by this same
     # plan, and re-making it costs an upscaler run to arrive at the same file.
@@ -254,12 +281,18 @@ def _upscale_whole_frame(work, ctx, workdir) -> Path:
     an order of magnitude larger than the spread the upscaler was chosen on.
     """
     normalized = workdir / "normalized.png"
-    imaging.normalize_to_srgb_png(work.source, normalized)
     enlarged = workdir / "frame_4x.png"
-    imaging.upscale(normalized, enlarged, ctx.upscayl, ctx.models_dir)
-    # Dropped as soon as the model has read it: the normalized copy is as large
-    # as the original PNG, and the frame it produced is sixteen times that.
-    normalized.unlink(missing_ok=True)
+    imaging.normalize_to_srgb_png(work.source, normalized)
+    try:
+        imaging.upscale(normalized, enlarged, ctx.upscayl, ctx.models_dir)
+    finally:
+        # Dropped as soon as the model has read it: the normalized copy is as
+        # large as the original PNG, and the frame it produced is sixteen
+        # times that. In a `finally` to match `_upscale_one_plan`, which has
+        # always cleaned up this way -- a failed model run left the normalized
+        # copy behind here and did not there, which is the same intermediate
+        # and the same reason for dropping it.
+        normalized.unlink(missing_ok=True)
     return enlarged
 
 

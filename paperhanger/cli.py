@@ -596,7 +596,7 @@ def _run(argv) -> int:
         # path it was given.
         print(f"error: cannot read {args.path}: {error}")
         return USAGE_ERROR
-    works = [plan.plan_photo(source, width, height, fmt, devices, opts)
+    works = [plan.plan_photo(source, width, height, devices, opts)
              for source, width, height, fmt in images]
 
     # Before anything is written, and before the toolchain is demanded: both

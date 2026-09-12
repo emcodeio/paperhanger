@@ -61,7 +61,7 @@ def test_formats_module_is_pure():
 # ---------- whole-image plans ----------
 
 def test_desktop_downscale_plan(tmp_path):
-    work = plan.plan_photo(Path("/src/cliffs.jpg"), 9216, 6144, "jpeg",
+    work = plan.plan_photo(Path("/src/cliffs.jpg"), 9216, 6144,
                            [sizes.DESKTOP], settings(tmp_path))
     assert len(work.plans) == 1
     p = work.plans[0]
@@ -89,7 +89,7 @@ def test_the_settings_quality_reaches_every_plan(tmp_path, fmt, quality):
     opts = settings(tmp_path, fmt)
     assert opts.quality == quality
 
-    work = plan.plan_photo(Path("/src/ocean.jpg"), 4000, 3000, fmt,
+    work = plan.plan_photo(Path("/src/ocean.jpg"), 4000, 3000,
                            list(sizes.DEVICES), opts)
 
     assert len(work.plans) == 4
@@ -100,13 +100,13 @@ def test_the_settings_quality_reaches_every_plan(tmp_path, fmt, quality):
 def test_a_quality_override_reaches_every_plan(tmp_path):
     """And it is the OVERRIDE, not the default, that arrives."""
     opts = settings(tmp_path, "jpeg", quality=55)
-    work = plan.plan_photo(Path("/src/cliffs.jpg"), 9216, 6144, "jpeg",
+    work = plan.plan_photo(Path("/src/cliffs.jpg"), 9216, 6144,
                            [sizes.DESKTOP], opts)
     assert [p.quality for p in work.plans] == [55]
 
 
 def test_below_target_goes_to_the_subfolder(tmp_path):
-    work = plan.plan_photo(Path("/src/lichen.jpg"), 6000, 3750, "jpeg",
+    work = plan.plan_photo(Path("/src/lichen.jpg"), 6000, 3750,
                            [sizes.DESKTOP], settings(tmp_path))
     p = work.plans[0]
     assert p.band == bands.NATIVE
@@ -122,7 +122,7 @@ def test_below_target_goes_to_the_subfolder(tmp_path):
 
 def test_upscale_reduce_plan_records_the_net_factor(tmp_path):
     """1920x1200 desktop-by-width: 1920 < 5120 floor, 1920*4 = 7680 >= ideal."""
-    work = plan.plan_photo(Path("/src/wide.jpg"), 1920, 1200, "jpeg",
+    work = plan.plan_photo(Path("/src/wide.jpg"), 1920, 1200,
                            [sizes.DESKTOP], settings(tmp_path))
     p = work.plans[0]
     assert p.target is sizes.DESKTOP_BY_WIDTH
@@ -135,7 +135,7 @@ def test_upscale_reduce_plan_records_the_net_factor(tmp_path):
 
 
 def test_upscale_only_plan(tmp_path):
-    work = plan.plan_photo(Path("/src/moth.png"), 1600, 1200, "png",
+    work = plan.plan_photo(Path("/src/moth.png"), 1600, 1200,
                            [sizes.DESKTOP], settings(tmp_path, "png"))
     p = work.plans[0]
     assert p.band == bands.UPSCALE_ONLY
@@ -148,7 +148,7 @@ def test_upscale_only_plan(tmp_path):
 # ---------- crop plans ----------
 
 def test_desktop_crop_produces_three_plans_with_positions(tmp_path):
-    work = plan.plan_photo(Path("/src/sunset.jpg"), 3000, 5000, "jpeg",
+    work = plan.plan_photo(Path("/src/sunset.jpg"), 3000, 5000,
                            [sizes.DESKTOP], settings(tmp_path))
     assert len(work.plans) == 3
     assert [p.position for p in work.plans] == ["top", "middle", "bottom"]
@@ -164,7 +164,7 @@ def test_desktop_crop_produces_three_plans_with_positions(tmp_path):
 
 
 def test_phone_crop_produces_three_plans(tmp_path):
-    work = plan.plan_photo(Path("/src/ocean.jpg"), 4000, 3000, "jpeg",
+    work = plan.plan_photo(Path("/src/ocean.jpg"), 4000, 3000,
                            [sizes.PHONE], settings(tmp_path))
     assert [p.position for p in work.plans] == ["left", "center", "right"]
     for p in work.plans:
@@ -175,7 +175,7 @@ def test_phone_crop_produces_three_plans(tmp_path):
 def test_both_devices_are_independent(tmp_path):
     """A 900x1400 image is too small for desktop but fine for phone. Global
     constraint: neither pass can abort the other."""
-    work = plan.plan_photo(Path("/src/small.jpg"), 900, 1400, "jpeg",
+    work = plan.plan_photo(Path("/src/small.jpg"), 900, 1400,
                            list(sizes.DEVICES), settings(tmp_path))
     devices = {p.device for p in work.plans}
     assert devices == {sizes.PHONE}
@@ -183,7 +183,7 @@ def test_both_devices_are_independent(tmp_path):
 
 
 def test_rejected_on_every_device(tmp_path):
-    work = plan.plan_photo(Path("/src/tiny.gif"), 200, 300, "gif",
+    work = plan.plan_photo(Path("/src/tiny.gif"), 200, 300,
                            list(sizes.DEVICES), settings(tmp_path))
     assert work.plans == []
     assert sorted(work.rejected_devices) == sorted(sizes.DEVICES)
@@ -198,7 +198,7 @@ def test_plans_are_flat(tmp_path):
     crops when w <= h and phone when w >= h. A portrait like 3000x5000 crops
     for desktop but takes the phone WIDTH path, giving 4 plans, not 6.
     """
-    work = plan.plan_photo(Path("/src/square.jpg"), 4000, 4000, "jpeg",
+    work = plan.plan_photo(Path("/src/square.jpg"), 4000, 4000,
                            list(sizes.DEVICES), settings(tmp_path))
     assert isinstance(work.plans, list)
     # `not hasattr(p, "children")` was the check here, and an OutputPlan is a
@@ -218,7 +218,7 @@ def test_plans_are_flat(tmp_path):
 
 def test_portrait_crops_for_desktop_but_not_for_phone(tmp_path):
     """The asymmetry the test above depends on, pinned explicitly."""
-    work = plan.plan_photo(Path("/src/sunset.jpg"), 3000, 5000, "jpeg",
+    work = plan.plan_photo(Path("/src/sunset.jpg"), 3000, 5000,
                            list(sizes.DEVICES), settings(tmp_path))
     assert len(work.plans) == 4
     desktop = [p for p in work.plans if p.device == sizes.DESKTOP]
@@ -230,10 +230,10 @@ def test_portrait_crops_for_desktop_but_not_for_phone(tmp_path):
 
 def test_needs_upscale_is_a_photo_level_question(tmp_path):
     """The upscaler runs once per photo, so the question is asked of the photo."""
-    work = plan.plan_photo(Path("/src/sunset.jpg"), 3000, 5000, "jpeg",
+    work = plan.plan_photo(Path("/src/sunset.jpg"), 3000, 5000,
                            [sizes.DESKTOP], settings(tmp_path))
     assert work.needs_upscale is True
-    big = plan.plan_photo(Path("/src/huge.jpg"), 9216, 6144, "jpeg",
+    big = plan.plan_photo(Path("/src/huge.jpg"), 9216, 6144,
                           [sizes.DESKTOP], settings(tmp_path))
     assert big.needs_upscale is False
 
@@ -247,7 +247,7 @@ def test_upscale_output_pixels_counts_the_4x_frame(tmp_path):
     a quarter of the truth, still a plausible-looking eight-digit number, and
     enough to let a 1.2-billion-pixel frame through a 300 Mpx cap.
     """
-    work = plan.plan_photo(Path("/src/square.jpg"), 4000, 4000, "jpeg",
+    work = plan.plan_photo(Path("/src/square.jpg"), 4000, 4000,
                            [sizes.DESKTOP], settings(tmp_path))
     assert work.upscale_output_pixels == 256_000_000
 
@@ -259,8 +259,8 @@ def test_collision_between_same_stem_different_extension(tmp_path):
     1920x1046 and collide on all four of their outputs."""
     opts = settings(tmp_path)
     works = [
-        plan.plan_photo(Path("/src/city.jpg"), 1920, 1046, "jpeg", list(sizes.DEVICES), opts),
-        plan.plan_photo(Path("/src/city.png"), 1920, 1046, "png", list(sizes.DEVICES), opts),
+        plan.plan_photo(Path("/src/city.jpg"), 1920, 1046, list(sizes.DEVICES), opts),
+        plan.plan_photo(Path("/src/city.png"), 1920, 1046, list(sizes.DEVICES), opts),
     ]
     collisions = plan.find_collisions(works)
     assert len(collisions) == 4 == len(works[0].plans)   # every output collides
@@ -272,8 +272,8 @@ def test_collision_between_same_stem_different_extension(tmp_path):
 def test_no_collision_between_different_stems(tmp_path):
     opts = settings(tmp_path)
     works = [
-        plan.plan_photo(Path("/src/a.jpg"), 1920, 1046, "jpeg", list(sizes.DEVICES), opts),
-        plan.plan_photo(Path("/src/b.jpg"), 1920, 1046, "jpeg", list(sizes.DEVICES), opts),
+        plan.plan_photo(Path("/src/a.jpg"), 1920, 1046, list(sizes.DEVICES), opts),
+        plan.plan_photo(Path("/src/b.jpg"), 1920, 1046, list(sizes.DEVICES), opts),
     ]
     assert plan.find_collisions(works) == {}
 

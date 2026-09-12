@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-# Tests import `tests.pngwriter`; make the repo root importable.
+# Tests import `tests.pixels`; make the repo root importable.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from paperhanger import toolchain                    # noqa: E402 - after sys.path

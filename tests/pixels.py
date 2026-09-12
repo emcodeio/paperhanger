@@ -1,13 +1,18 @@
-"""Minimal PNG writer and reader, stdlib only.
+"""Fixtures measured in pixels: a minimal PNG writer and reader, stdlib only.
 
-Exists so boundary tests can use images that differ by one pixel. Committing a
-file per boundary would be absurd; generating them costs nothing.
+Three things, which is why this is no longer called `pngwriter`. Writing was
+the first of them and the file kept the name through the other two.
 
-The reader is here so a crop test can prove WHERE a crop landed rather than
-only how big it came out. Checking dimensions alone cannot tell a correct crop
-from one with its arguments transposed, and sips takes both of its crop
-arguments backwards from the usual convention (-c is HEIGHT WIDTH, --cropOffset
-is Y X), so that is the mistake most worth catching.
+  * `write_png` exists so boundary tests can use images that differ by one
+    pixel. Committing a file per boundary would be absurd; generating them
+    costs nothing.
+  * `write_marked_png` puts a solid block at a known rectangle, so a test can
+    say which REGION it expects rather than only which size.
+  * `read_png_rgb` reads the result back. Checking dimensions alone cannot
+    tell a correct crop from one with its arguments transposed, and sips takes
+    both of its crop arguments backwards from the usual convention (-c is
+    HEIGHT WIDTH, --cropOffset is Y X), so that is the mistake most worth
+    catching -- and the only way to catch it is to look at the pixels.
 """
 
 import struct

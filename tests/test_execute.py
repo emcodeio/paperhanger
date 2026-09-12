@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from paperhanger import bands, execute, formats, geometry, imaging, plan, sizes
-from tests.pngwriter import read_png_rgb, write_marked_png, write_png
+from tests.pixels import read_png_rgb, write_marked_png, write_png
 
 MARKER = (240, 30, 200)
 BASE = (10, 10, 10)
@@ -77,7 +77,7 @@ def test_render_whole_image_plan(tmp_path):
     2880x4320. The smallest band-1 fixture available -- desktop band 1 would
     need 7680 px on the governing axis."""
     source = write_png(tmp_path / "cliffs.png", 3000, 4500)
-    work = plan.plan_photo(source, 3000, 4500, "png", [sizes.PHONE], settings(tmp_path))
+    work = plan.plan_photo(source, 3000, 4500, [sizes.PHONE], settings(tmp_path))
     target = work.plans[0]
     assert target.band == bands.DOWNSCALE
     assert (target.out_width, target.out_height) == (2880, 4320)
@@ -93,7 +93,7 @@ def test_render_native_plan_does_not_resample(tmp_path):
     """2000x3000 phone-by-height: 3000 is between the 2880 floor and the 4320
     ideal, so the pixels are untouched and only the container changes."""
     source = write_png(tmp_path / "lichen.png", 2000, 3000)
-    work = plan.plan_photo(source, 2000, 3000, "png", [sizes.PHONE], settings(tmp_path))
+    work = plan.plan_photo(source, 2000, 3000, [sizes.PHONE], settings(tmp_path))
     target = work.plans[0]
     assert target.band == bands.NATIVE
     execute.render(target, source, scale=1, workdir=tmp_path / "work")
@@ -103,7 +103,7 @@ def test_render_native_plan_does_not_resample(tmp_path):
 def test_render_creates_the_destination_directory(tmp_path, monkeypatch):
     """Nothing creates to_sort_phone/ before the first output lands in it."""
     source = write_png(tmp_path / "lichen.png", 2000, 3000)
-    work = plan.plan_photo(source, 2000, 3000, "png", [sizes.PHONE], settings(tmp_path))
+    work = plan.plan_photo(source, 2000, 3000, [sizes.PHONE], settings(tmp_path))
     target = work.plans[0]
     stub_encoder(monkeypatch)
 
@@ -128,7 +128,7 @@ def test_render_crop_plan_cuts_the_right_region(tmp_path):
     at scale=1 would make sips ENLARGE the crop, which global constraint 1
     forbids; those bands are rendered from the 4x frame, in Task 9.
     """
-    work = plan.plan_photo(tmp_path / "ocean.png", 4000, 3000, "png",
+    work = plan.plan_photo(tmp_path / "ocean.png", 4000, 3000,
                            [sizes.PHONE], settings(tmp_path))
     middle = work.plans[1]
     assert middle.position == "center" and middle.crop is not None
@@ -150,7 +150,7 @@ def test_render_crop_plan_cuts_the_right_region(tmp_path):
 def test_the_region_check_would_fail_on_a_neighbouring_slice(tmp_path):
     """Guards the guard: the LEFT slice of the same marked source must NOT
     come back all-marker, or the assertion above proves nothing."""
-    work = plan.plan_photo(tmp_path / "ocean.png", 4000, 3000, "png",
+    work = plan.plan_photo(tmp_path / "ocean.png", 4000, 3000,
                            [sizes.PHONE], settings(tmp_path))
     left, middle = work.plans[0], work.plans[1]
     source = write_marked_png(tmp_path / "ocean.png", 4000, 3000, middle.crop,
@@ -180,7 +180,7 @@ def test_render_crops_before_it_resizes(tmp_path):
     row is why constraint 4's both-axes rule is not merely about rounding: a
     single flag can mask the fusion bug as easily as expose it.
     """
-    work = plan.plan_photo(tmp_path / "ocean.png", 4000, 3000, "png",
+    work = plan.plan_photo(tmp_path / "ocean.png", 4000, 3000,
                            [sizes.PHONE], settings(tmp_path))
     middle = work.plans[1]
     resizing = replace(middle, band=bands.DOWNSCALE, out_width=1000, out_height=1500)
@@ -205,7 +205,7 @@ def test_render_scales_the_crop_rect_for_an_upscaled_frame(tmp_path, monkeypatch
     are stubbed: this test is about the rect arithmetic, not about pixels.
     """
     source = write_png(tmp_path / "s.png", 1440, 720)
-    work = plan.plan_photo(source, 1440, 720, "png", [sizes.PHONE], settings(tmp_path))
+    work = plan.plan_photo(source, 1440, 720, [sizes.PHONE], settings(tmp_path))
     target = work.plans[0]
     assert target.band == bands.UPSCALE_ONLY
     assert target.crop is not None and target.needs_upscale
@@ -252,7 +252,7 @@ def test_a_scale_4_input_is_reduced_even_in_a_band_that_never_resizes(
     2 Mpx and nothing stubbed: this measures the file, not the argv.
     """
     frame = write_png(tmp_path / "frame_4x.png", 1600, 1200)
-    work = plan.plan_photo(tmp_path / "moss.png", 2000, 3000, "png",
+    work = plan.plan_photo(tmp_path / "moss.png", 2000, 3000,
                            [sizes.PHONE], settings(tmp_path))
     native = work.plans[0]
     assert native.band == bands.NATIVE and not native.needs_resize
@@ -270,7 +270,7 @@ def test_render_passes_the_rect_through_unscaled_at_scale_one(tmp_path, monkeypa
     """The other half: the original's own coordinates are used untouched, and
     a band-2 plan at scale 1 resamples not at all."""
     source = write_png(tmp_path / "s.png", 4000, 3000)
-    work = plan.plan_photo(source, 4000, 3000, "png", [sizes.PHONE], settings(tmp_path))
+    work = plan.plan_photo(source, 4000, 3000, [sizes.PHONE], settings(tmp_path))
     middle = work.plans[1]
 
     crops, encodes = [], []
@@ -304,7 +304,7 @@ def test_render_passes_the_plans_quality_to_the_encoder(tmp_path, monkeypatch,
     either way.
     """
     source = write_png(tmp_path / "lichen.png", 2000, 3000)
-    work = plan.plan_photo(source, 2000, 3000, "png", [sizes.PHONE],
+    work = plan.plan_photo(source, 2000, 3000, [sizes.PHONE],
                            settings(tmp_path, fmt))
     target = work.plans[0]
     assert target.quality == quality
@@ -335,7 +335,7 @@ def test_a_band_3_plan_rendered_from_its_original_is_refused(tmp_path):
     invented detail no check downstream could question. It must raise instead.
     """
     source = write_png(tmp_path / "small.png", 1440, 2160)
-    work = plan.plan_photo(source, 1440, 2160, "png", [sizes.PHONE], settings(tmp_path))
+    work = plan.plan_photo(source, 1440, 2160, [sizes.PHONE], settings(tmp_path))
     target = work.plans[0]
     assert target.band == bands.UPSCALE_REDUCE
     assert (target.out_width, target.out_height) == (2880, 4320)
@@ -367,7 +367,7 @@ def test_a_frame_that_came_back_short_of_4x_is_refused(tmp_path, monkeypatch,
     both single-axis cases.
     """
     source = write_png(tmp_path / "s.png", 1440, 720)
-    work = plan.plan_photo(source, 1440, 720, "png", [sizes.PHONE], settings(tmp_path))
+    work = plan.plan_photo(source, 1440, 720, [sizes.PHONE], settings(tmp_path))
     target = work.plans[0]
     assert (target.out_width, target.out_height) == (1920, 2880)
 
@@ -394,7 +394,7 @@ def test_the_guard_allows_the_4x_frame_at_exactly_the_planned_size(tmp_path,
     guard written with > rather than >= would refuse the commonest legitimate
     render in the whole pipeline."""
     source = write_png(tmp_path / "s.png", 1440, 720)
-    work = plan.plan_photo(source, 1440, 720, "png", [sizes.PHONE], settings(tmp_path))
+    work = plan.plan_photo(source, 1440, 720, [sizes.PHONE], settings(tmp_path))
     target = work.plans[0]
     assert target.band == bands.UPSCALE_ONLY
     assert (target.out_width, target.out_height) == (1920, 2880)
@@ -413,7 +413,7 @@ def test_the_guard_does_not_run_for_a_plan_that_never_resamples(tmp_path,
     """Band 2 encodes the pixels untouched, so there is nothing to measure and
     no probe to pay for."""
     source = write_png(tmp_path / "lichen.png", 2000, 3000)
-    work = plan.plan_photo(source, 2000, 3000, "png", [sizes.PHONE], settings(tmp_path))
+    work = plan.plan_photo(source, 2000, 3000, [sizes.PHONE], settings(tmp_path))
     target = work.plans[0]
     assert target.band == bands.NATIVE
 
@@ -438,7 +438,7 @@ def test_a_render_that_would_be_the_wrong_size_is_refused(tmp_path):
     whose own name asserts dimensions it does not have.
     """
     source = write_png(tmp_path / "s.png", 1440, 720)
-    work = plan.plan_photo(source, 1440, 720, "png", [sizes.PHONE], settings(tmp_path))
+    work = plan.plan_photo(source, 1440, 720, [sizes.PHONE], settings(tmp_path))
     target = work.plans[0]
     assert target.band == bands.UPSCALE_ONLY and not target.needs_resize
     assert target.destination.name == "s_left_phone_1920x2880_4x.png"
@@ -451,7 +451,7 @@ def test_a_render_that_would_be_the_wrong_size_is_refused(tmp_path):
 def test_a_wrong_sized_render_publishes_nothing(tmp_path):
     """Neither the destination nor a stray `.partial` survives the refusal."""
     source = write_png(tmp_path / "s.png", 1440, 720)
-    work = plan.plan_photo(source, 1440, 720, "png", [sizes.PHONE], settings(tmp_path))
+    work = plan.plan_photo(source, 1440, 720, [sizes.PHONE], settings(tmp_path))
     target = work.plans[0]
 
     with pytest.raises(imaging.ImagingError):
@@ -472,7 +472,7 @@ def test_a_wrong_sized_render_leaves_an_earlier_runs_output_standing(tmp_path):
     wrong file at the destination at all.
     """
     source = write_png(tmp_path / "s.png", 1440, 720)
-    work = plan.plan_photo(source, 1440, 720, "png", [sizes.PHONE], settings(tmp_path))
+    work = plan.plan_photo(source, 1440, 720, [sizes.PHONE], settings(tmp_path))
     target = work.plans[0]
     target.destination.parent.mkdir(parents=True)
     target.destination.write_bytes(b"an earlier run's wallpaper")
@@ -488,7 +488,7 @@ def test_an_unreadable_output_is_refused(tmp_path, monkeypatch):
     satisfies that. Probing it is the only way to tell, and a file that cannot
     be measured must not be published either."""
     source = write_png(tmp_path / "s.png", 2000, 3000)
-    work = plan.plan_photo(source, 2000, 3000, "png", [sizes.PHONE], settings(tmp_path))
+    work = plan.plan_photo(source, 2000, 3000, [sizes.PHONE], settings(tmp_path))
     target = work.plans[0]
 
     monkeypatch.setattr(imaging, "resize_and_encode",
@@ -510,7 +510,7 @@ def test_the_post_condition_can_measure_every_output_format(tmp_path, fmt):
     fixture that lands in band 2: 2880 is exactly the floor.
     """
     source = write_png(tmp_path / "lichen.png", 1920, 2880)
-    work = plan.plan_photo(source, 1920, 2880, "png", [sizes.PHONE],
+    work = plan.plan_photo(source, 1920, 2880, [sizes.PHONE],
                            settings(tmp_path, fmt))
     target = work.plans[0]
     assert target.band == bands.NATIVE
@@ -524,7 +524,7 @@ def test_the_post_condition_passes_a_correct_render_through(tmp_path):
     """The normal path is unchanged: a plan whose output is the planned size
     publishes exactly as before."""
     source = write_png(tmp_path / "cliffs.png", 3000, 4500)
-    work = plan.plan_photo(source, 3000, 4500, "png", [sizes.PHONE], settings(tmp_path))
+    work = plan.plan_photo(source, 3000, 4500, [sizes.PHONE], settings(tmp_path))
     target = work.plans[0]
 
     written = execute.render(target, source, scale=1, workdir=tmp_path / "work")
@@ -538,7 +538,7 @@ def test_the_post_condition_passes_a_correct_render_through(tmp_path):
 
 def test_no_partial_survives_success(tmp_path):
     source = write_png(tmp_path / "s.png", 2000, 3000)
-    work = plan.plan_photo(source, 2000, 3000, "png", [sizes.PHONE], settings(tmp_path))
+    work = plan.plan_photo(source, 2000, 3000, [sizes.PHONE], settings(tmp_path))
     target = work.plans[0]
     execute.render(target, source, scale=1, workdir=tmp_path / "work")
     assert list(target.destination.parent.glob("*.partial")) == []
@@ -550,7 +550,7 @@ def test_the_output_is_staged_beside_its_destination(tmp_path, monkeypatch):
     user sorts from. A successful render leaves nothing to inspect afterwards,
     so this watches where the encoder was asked to write."""
     source = write_png(tmp_path / "s.png", 2000, 3000)
-    work = plan.plan_photo(source, 2000, 3000, "png", [sizes.PHONE], settings(tmp_path))
+    work = plan.plan_photo(source, 2000, 3000, [sizes.PHONE], settings(tmp_path))
     target = work.plans[0]
     seen = []
     stub_encoder(monkeypatch, seen)
@@ -567,7 +567,7 @@ def test_failure_leaves_nothing_behind(tmp_path):
     imaging's post-condition turns it into an ImagingError, and render must
     not leave a truncated or stale file where the sorter will see it."""
     source = write_png(tmp_path / "s.png", 2000, 3000)
-    work = plan.plan_photo(source, 2000, 3000, "png", [sizes.PHONE], settings(tmp_path))
+    work = plan.plan_photo(source, 2000, 3000, [sizes.PHONE], settings(tmp_path))
     target = work.plans[0]
     with pytest.raises(imaging.ImagingError):
         execute.render(target, tmp_path / "absent.png", scale=1,
@@ -587,7 +587,7 @@ def test_a_failure_leaves_an_earlier_runs_output_alone(tmp_path):
     pure loss. This is the archive-never-overwrites rule in another costume.
     """
     source = write_png(tmp_path / "s.png", 2000, 3000)
-    work = plan.plan_photo(source, 2000, 3000, "png", [sizes.PHONE], settings(tmp_path))
+    work = plan.plan_photo(source, 2000, 3000, [sizes.PHONE], settings(tmp_path))
     target = work.plans[0]
     target.destination.parent.mkdir(parents=True)
     target.destination.write_bytes(b"an earlier run's wallpaper")
@@ -604,7 +604,7 @@ def test_a_failure_after_staging_removes_the_staged_file(tmp_path, monkeypatch):
     """The encoder can succeed and the rename still fail -- a full volume, a
     destination turned read-only. The staged file must not survive that."""
     source = write_png(tmp_path / "s.png", 2000, 3000)
-    work = plan.plan_photo(source, 2000, 3000, "png", [sizes.PHONE], settings(tmp_path))
+    work = plan.plan_photo(source, 2000, 3000, [sizes.PHONE], settings(tmp_path))
     target = work.plans[0]
     stub_encoder(monkeypatch)
 
@@ -652,7 +652,7 @@ def test_render_removes_its_intermediates(tmp_path):
     retaining them to process exit would fill the volume a fifth of the way
     into a real run."""
     source = write_png(tmp_path / "ocean.png", 4000, 3000)
-    work = plan.plan_photo(source, 4000, 3000, "png", [sizes.PHONE], settings(tmp_path))
+    work = plan.plan_photo(source, 4000, 3000, [sizes.PHONE], settings(tmp_path))
     workdir = tmp_path / "work"
     execute.render(work.plans[0], source, scale=1, workdir=workdir)
     leftovers = [p for p in workdir.rglob("*") if p.is_file()] if workdir.exists() else []
@@ -663,7 +663,7 @@ def test_intermediates_are_removed_on_failure_too(tmp_path, monkeypatch):
     """A run that dies on plan 200 of 2467 must not have kept plans 1-199's
     intermediates alive on the way there."""
     source = write_png(tmp_path / "ocean.png", 4000, 3000)
-    work = plan.plan_photo(source, 4000, 3000, "png", [sizes.PHONE], settings(tmp_path))
+    work = plan.plan_photo(source, 4000, 3000, [sizes.PHONE], settings(tmp_path))
     workdir = tmp_path / "work"
 
     def explode(*args, **kwargs):
@@ -680,7 +680,7 @@ def test_an_intermediate_left_by_a_failed_crop_is_removed_too(tmp_path, monkeypa
     post-condition that trips after the file appears. The cleanup must cover
     the file it was ASKED for, not only the one it was told about."""
     source = write_png(tmp_path / "ocean.png", 4000, 3000)
-    work = plan.plan_photo(source, 4000, 3000, "png", [sizes.PHONE], settings(tmp_path))
+    work = plan.plan_photo(source, 4000, 3000, [sizes.PHONE], settings(tmp_path))
     workdir = tmp_path / "work"
 
     def crop_then_fail(src, rect, out_path):
@@ -704,7 +704,7 @@ def test_crop_intermediates_are_png_and_one_per_plan(tmp_path, monkeypatch):
     from the destination's own suffix.
     """
     source = write_png(tmp_path / "ocean.png", 4000, 3000)
-    work = plan.plan_photo(source, 4000, 3000, "png", [sizes.PHONE],
+    work = plan.plan_photo(source, 4000, 3000, [sizes.PHONE],
                            settings(tmp_path, "heic"))
     assert {p.destination.suffix for p in work.plans} == {".heic"}
     crops = []
@@ -762,7 +762,7 @@ def test_one_upscale_for_three_crop_plans(tmp_path, fake_upscaler, monkeypatch):
     5760x2880; the desktop equivalent would be 26 Mpx.
     """
     source = write_png(tmp_path / "sunset.png", 1440, 720)
-    work = plan.plan_photo(source, 1440, 720, "png", [sizes.PHONE], settings(tmp_path))
+    work = plan.plan_photo(source, 1440, 720, [sizes.PHONE], settings(tmp_path))
     assert len(work.plans) == 3 and work.needs_upscale
 
     calls = spy_on(monkeypatch, "upscale")
@@ -829,7 +829,7 @@ def test_a_band_3_photo_renders_its_reduced_slices_end_to_end(tmp_path,
     of the band the real corpus mostly consists of.
     """
     opts = settings(tmp_path)
-    work = plan.plan_photo(tmp_path / "dunes.png", 2400, 1200, "png",
+    work = plan.plan_photo(tmp_path / "dunes.png", 2400, 1200,
                            [sizes.PHONE], opts)
     left, centre, right = work.plans
     assert [p.band for p in work.plans] == [bands.UPSCALE_REDUCE] * 3
@@ -859,7 +859,7 @@ def test_a_band_3_photo_renders_its_reduced_slices_end_to_end(tmp_path,
 
 def test_no_upscale_when_nothing_needs_it(tmp_path, fake_upscaler, monkeypatch):
     source = write_png(tmp_path / "big.png", 2000, 3000)
-    work = plan.plan_photo(source, 2000, 3000, "png", [sizes.PHONE], settings(tmp_path))
+    work = plan.plan_photo(source, 2000, 3000, [sizes.PHONE], settings(tmp_path))
     assert not work.needs_upscale
 
     calls = spy_on(monkeypatch, "upscale")
@@ -876,7 +876,7 @@ def test_normalize_always_runs_on_the_upscale_path(tmp_path, fake_upscaler,
     non-sRGB files are all JPEG or PNG, so a format-based condition would never
     fire for any of them."""
     source = write_png(tmp_path / "s.png", 1440, 720)
-    work = plan.plan_photo(source, 1440, 720, "png", [sizes.PHONE], settings(tmp_path))
+    work = plan.plan_photo(source, 1440, 720, [sizes.PHONE], settings(tmp_path))
 
     calls = spy_on(monkeypatch, "normalize_to_srgb_png")
     execute.run_photo(work, context(tmp_path, fake_upscaler))
@@ -890,7 +890,7 @@ def test_the_upscaler_never_reads_the_original(tmp_path, fake_upscaler, monkeypa
     the model satisfies 'normalize was called' while wasting the call, and the
     fake upscaler would accept a PNG source without complaint."""
     source = write_png(tmp_path / "s.png", 1440, 720)
-    work = plan.plan_photo(source, 1440, 720, "png", [sizes.PHONE], settings(tmp_path))
+    work = plan.plan_photo(source, 1440, 720, [sizes.PHONE], settings(tmp_path))
 
     calls = spy_on(monkeypatch, "upscale")
     execute.run_photo(work, context(tmp_path, fake_upscaler))
@@ -900,7 +900,7 @@ def test_the_upscaler_never_reads_the_original(tmp_path, fake_upscaler, monkeypa
 
 def test_pixel_cap_falls_back_to_per_plan(tmp_path, fake_upscaler, monkeypatch):
     source = write_png(tmp_path / "s.png", 1440, 720)
-    work = plan.plan_photo(source, 1440, 720, "png", [sizes.PHONE], settings(tmp_path))
+    work = plan.plan_photo(source, 1440, 720, [sizes.PHONE], settings(tmp_path))
     # 1 Mpx rather than 1 px: the message names both numbers, and a cap of one
     # pixel would make it report a 0.0 Mpx cap.
     monkeypatch.setattr(execute, "UPSCALE_PIXEL_CAP", 1_000_000)
@@ -940,14 +940,14 @@ def test_the_over_cap_line_is_printed_before_the_model_runs(
     `test_over_the_cap_a_cropless_plan_keeps_the_whole_frame` uses.
     """
     if strategy == "per plan":
-        shape, devices = (1440, 720), [sizes.PHONE]
+        width, height, devices = 1440, 720, [sizes.PHONE]
         expected = "falling back to per-plan upscaling"
     else:
-        shape, devices = (1280, 800), list(sizes.DEVICES)
+        width, height, devices = 1280, 800, list(sizes.DEVICES)
         expected = "upscaling it anyway"
 
-    source = write_png(tmp_path / "s.png", *shape)
-    work = plan.plan_photo(source, *shape, "png", devices, settings(tmp_path))
+    source = write_png(tmp_path / "s.png", width, height)
+    work = plan.plan_photo(source, width, height, devices, settings(tmp_path))
     assert work.needs_upscale
     cropless = any(p.crop is None for p in work.plans if p.needs_upscale)
     assert cropless is (strategy == "whole frame")
@@ -982,7 +982,7 @@ def test_the_cap_is_measured_against_the_4x_output(tmp_path, fake_upscaler,
     against anything smaller than the 4x output leaves the cap unfired.
     """
     source = write_png(tmp_path / "s.png", 1440, 720)
-    work = plan.plan_photo(source, 1440, 720, "png", [sizes.PHONE], settings(tmp_path))
+    work = plan.plan_photo(source, 1440, 720, [sizes.PHONE], settings(tmp_path))
     assert work.upscale_output_pixels == 16_588_800
 
     calls = spy_on(monkeypatch, "upscale")
@@ -1008,7 +1008,7 @@ def test_over_the_cap_a_cropless_plan_keeps_the_whole_frame(tmp_path, fake_upsca
     90 seconds each -- and bounds nothing.
     """
     source = write_png(tmp_path / "s.png", 1280, 800)
-    work = plan.plan_photo(source, 1280, 800, "png", list(sizes.DEVICES),
+    work = plan.plan_photo(source, 1280, 800, list(sizes.DEVICES),
                            settings(tmp_path))
     upscaling = [p for p in work.plans if p.needs_upscale]
     assert len(upscaling) == 4
@@ -1045,7 +1045,7 @@ def test_the_cap_message_names_both_numbers_at_the_boundary(tmp_path, monkeypatc
     the two steps that would touch pixels are stubbed. This is about the
     sentence.
     """
-    work = plan.plan_photo(Path("/src/tall.jpg"), 1300, 14450, "jpeg",
+    work = plan.plan_photo(Path("/src/tall.jpg"), 1300, 14450,
                            [sizes.DESKTOP], settings(tmp_path))
     assert work.upscale_output_pixels == 300_560_000
     assert all(p.crop is not None for p in work.plans if p.needs_upscale)
@@ -1076,7 +1076,7 @@ def test_the_whole_frame_message_names_both_numbers_at_the_boundary(tmp_path,
     output, over the cap, and the fallback cannot help -- so it keeps the whole
     frame, which is the several-minute pause this line exists to explain.
     """
-    work = plan.plan_photo(Path("/src/wide.jpg"), 8000, 2400, "jpeg",
+    work = plan.plan_photo(Path("/src/wide.jpg"), 8000, 2400,
                            [sizes.DESKTOP], settings(tmp_path))
     assert work.upscale_output_pixels == 307_200_000
     assert [p.crop for p in work.plans if p.needs_upscale] == [None]
@@ -1104,7 +1104,7 @@ def test_a_photo_under_the_cap_reports_no_strategy_at_all(tmp_path, fake_upscale
     would satisfy either assertion above while saying nothing, and the cap is
     the whole point of saying anything."""
     source = write_png(tmp_path / "s.png", 1440, 720)
-    work = plan.plan_photo(source, 1440, 720, "png", [sizes.PHONE], settings(tmp_path))
+    work = plan.plan_photo(source, 1440, 720, [sizes.PHONE], settings(tmp_path))
     assert work.upscale_output_pixels < execute.UPSCALE_PIXEL_CAP
 
     messages = []
@@ -1127,7 +1127,7 @@ def test_upscale_one_plan_refuses_a_cropless_plan(tmp_path, fake_upscaler):
     the 2880 floor and 2160*4 clear of the 4320 ideal, so band 3.
     """
     source = write_png(tmp_path / "s.png", 1440, 2160)
-    work = plan.plan_photo(source, 1440, 2160, "png", [sizes.PHONE], settings(tmp_path))
+    work = plan.plan_photo(source, 1440, 2160, [sizes.PHONE], settings(tmp_path))
     target = work.plans[0]
     assert target.crop is None and target.band == bands.UPSCALE_REDUCE
 
@@ -1148,7 +1148,7 @@ def test_upscale_one_plan_leaves_only_the_enlargement(tmp_path, fake_upscaler):
     intermediate as well as the crop and the normalized copy -- three files
     that must all be gone, against one that must remain."""
     source = write_png(tmp_path / "s.png", 1440, 720)
-    work = plan.plan_photo(source, 1440, 720, "png", [sizes.PHONE], settings(tmp_path))
+    work = plan.plan_photo(source, 1440, 720, [sizes.PHONE], settings(tmp_path))
     target = work.plans[0]
     assert target.position == "left" and target.crop == geometry.Rect(0, 0, 480, 720)
 
@@ -1175,7 +1175,7 @@ def test_run_photo_takes_bands_1_and_2_from_the_original(tmp_path, fake_upscaler
     and then thrown away again, and every check in render would pass.
     """
     source = write_png(tmp_path / "s.png", 1440, 720)
-    work = plan.plan_photo(source, 1440, 720, "png", [sizes.PHONE], settings(tmp_path))
+    work = plan.plan_photo(source, 1440, 720, [sizes.PHONE], settings(tmp_path))
     work.plans[1] = replace(work.plans[1], band=bands.NATIVE,
                             out_width=480, out_height=720)
     assert [p.needs_upscale for p in work.plans] == [True, False, True]
@@ -1203,7 +1203,7 @@ def test_run_photo_takes_bands_1_and_2_from_the_original(tmp_path, fake_upscaler
 
 def test_enlarged_frame_is_deleted_after_the_last_plan(tmp_path, fake_upscaler):
     source = write_png(tmp_path / "s.png", 1440, 720)
-    work = plan.plan_photo(source, 1440, 720, "png", [sizes.PHONE], settings(tmp_path))
+    work = plan.plan_photo(source, 1440, 720, [sizes.PHONE], settings(tmp_path))
     ctx = context(tmp_path, fake_upscaler)
     execute.run_photo(work, ctx)
     leftovers = [p for p in Path(ctx.workroot).rglob("*") if p.is_file()] \
@@ -1223,7 +1223,7 @@ def test_one_enlargement_is_alive_at_a_time(tmp_path, fake_upscaler, monkeypatch
     instead: one enlargement, the one about to be read.
     """
     source = write_png(tmp_path / "s.png", 1440, 720)
-    work = plan.plan_photo(source, 1440, 720, "png", [sizes.PHONE], settings(tmp_path))
+    work = plan.plan_photo(source, 1440, 720, [sizes.PHONE], settings(tmp_path))
     if strategy == "per plan":
         monkeypatch.setattr(execute, "UPSCALE_PIXEL_CAP", 1)
 
@@ -1254,7 +1254,7 @@ def test_a_failed_plan_still_takes_the_frame_with_it(tmp_path, fake_upscaler,
     fallback allocates its frames somewhere else entirely.
     """
     source = write_png(tmp_path / "s.png", 1440, 720)
-    work = plan.plan_photo(source, 1440, 720, "png", [sizes.PHONE], settings(tmp_path))
+    work = plan.plan_photo(source, 1440, 720, [sizes.PHONE], settings(tmp_path))
     if strategy == "per plan":
         monkeypatch.setattr(execute, "UPSCALE_PIXEL_CAP", 1)
 
@@ -1326,7 +1326,7 @@ def test_archive_moves_to_originals_on_success(tmp_path, fake_upscaler,
                         or real_copy(src, dst, **kw))
 
     source = write_png(import_dir(tmp_path) / "ok.png", 2000, 3000)
-    work = plan.plan_photo(source, 2000, 3000, "png", [sizes.PHONE], settings(tmp_path))
+    work = plan.plan_photo(source, 2000, 3000, [sizes.PHONE], settings(tmp_path))
     ctx = context(tmp_path, fake_upscaler)
     result = execute.run_and_archive(work, ctx)
     assert result.outcome == execute.OK
@@ -1337,7 +1337,7 @@ def test_archive_moves_to_originals_on_success(tmp_path, fake_upscaler,
 
 def test_rejected_everywhere_goes_to_error(tmp_path, fake_upscaler):
     source = write_png(import_dir(tmp_path) / "tiny.png", 200, 300, noise=True)
-    work = plan.plan_photo(source, 200, 300, "png", list(sizes.DEVICES),
+    work = plan.plan_photo(source, 200, 300, list(sizes.DEVICES),
                            settings(tmp_path))
     ctx = context(tmp_path, fake_upscaler)
     result = execute.run_and_archive(work, ctx)
@@ -1352,7 +1352,7 @@ def test_partial_failure_leaves_the_source_in_place(tmp_path, fake_upscaler, mon
     and the missing wallpaper could never be recovered by a re-run, because the
     re-run would look in a directory the source had left."""
     source = write_png(import_dir(tmp_path) / "half.png", 1440, 720)
-    work = plan.plan_photo(source, 1440, 720, "png", [sizes.PHONE], settings(tmp_path))
+    work = plan.plan_photo(source, 1440, 720, [sizes.PHONE], settings(tmp_path))
     assert len(work.plans) == 3
 
     calls = {"n": 0}
@@ -1381,7 +1381,7 @@ def test_a_partial_failure_still_renders_the_surviving_plans(tmp_path, fake_upsc
     the source is staying put either way -- so giving up costs the user two
     wallpapers and throws away the enlargement the run has already paid for."""
     source = write_png(import_dir(tmp_path) / "half.png", 1440, 720)
-    work = plan.plan_photo(source, 1440, 720, "png", [sizes.PHONE], settings(tmp_path))
+    work = plan.plan_photo(source, 1440, 720, [sizes.PHONE], settings(tmp_path))
     left, center, right = work.plans
 
     calls = {"n": 0}
@@ -1406,7 +1406,7 @@ def test_every_plan_failing_is_failed_not_partial(tmp_path, fake_upscaler, monke
     that calls both 'partial' cannot tell a flaky slice from a photo sips will
     never read at all."""
     source = write_png(import_dir(tmp_path) / "doomed.png", 1440, 720)
-    work = plan.plan_photo(source, 1440, 720, "png", [sizes.PHONE], settings(tmp_path))
+    work = plan.plan_photo(source, 1440, 720, [sizes.PHONE], settings(tmp_path))
 
     def explode(*args, **kwargs):
         raise imaging.ImagingError("sips exited 13: unrecognized format")
@@ -1430,7 +1430,7 @@ def test_a_routing_bug_aborts_rather_than_counting_as_a_failure(tmp_path, fake_u
     to show for it than a line in a report read the next morning.
     """
     source = write_png(import_dir(tmp_path) / "s.png", 1440, 720)
-    work = plan.plan_photo(source, 1440, 720, "png", [sizes.PHONE], settings(tmp_path))
+    work = plan.plan_photo(source, 1440, 720, [sizes.PHONE], settings(tmp_path))
     monkeypatch.setattr(execute, "UPSCALE_PIXEL_CAP", 1)
 
     def routed_wrong(target, work, ctx, workdir):
@@ -1455,7 +1455,7 @@ def test_a_plan_neither_rendered_nor_reported_is_not_archived(tmp_path, fake_ups
     otherwise archive the original while its wallpaper does not exist, which is
     the one arrangement no re-run can repair."""
     source = write_png(import_dir(tmp_path) / "lost.png", 2000, 3000)
-    work = plan.plan_photo(source, 2000, 3000, "png", [sizes.PHONE], settings(tmp_path))
+    work = plan.plan_photo(source, 2000, 3000, [sizes.PHONE], settings(tmp_path))
 
     monkeypatch.setattr(execute, "run_photo", lambda work, ctx, failures=None: [])
     result = execute.run_and_archive(work, context(tmp_path, fake_upscaler))
@@ -1543,7 +1543,7 @@ def test_an_unrenamed_archive_says_nothing(tmp_path):
 
 def test_existing_output_is_skipped(tmp_path, fake_upscaler):
     source = write_png(import_dir(tmp_path) / "done.png", 2000, 3000)
-    work = plan.plan_photo(source, 2000, 3000, "png", [sizes.PHONE], settings(tmp_path))
+    work = plan.plan_photo(source, 2000, 3000, [sizes.PHONE], settings(tmp_path))
     target = work.plans[0]
     target.destination.parent.mkdir(parents=True, exist_ok=True)
     target.destination.write_bytes(b"already here")
@@ -1562,7 +1562,7 @@ def test_a_fully_skipped_photo_never_starts_the_upscaler(tmp_path, fake_upscaler
     handed over: the enlargement costs minutes per photo, and a plan that is
     not going to be written does not need one."""
     source = write_png(import_dir(tmp_path) / "again.png", 1440, 720)
-    work = plan.plan_photo(source, 1440, 720, "png", [sizes.PHONE], settings(tmp_path))
+    work = plan.plan_photo(source, 1440, 720, [sizes.PHONE], settings(tmp_path))
     for target in work.plans:
         target.destination.parent.mkdir(parents=True, exist_ok=True)
         target.destination.write_bytes(b"from the last run")
@@ -1577,7 +1577,7 @@ def test_a_fully_skipped_photo_never_starts_the_upscaler(tmp_path, fake_upscaler
 
 def test_a_half_done_photo_only_renders_what_is_missing(tmp_path, fake_upscaler):
     source = write_png(import_dir(tmp_path) / "resumed.png", 1440, 720)
-    work = plan.plan_photo(source, 1440, 720, "png", [sizes.PHONE], settings(tmp_path))
+    work = plan.plan_photo(source, 1440, 720, [sizes.PHONE], settings(tmp_path))
     left, center, right = work.plans
     left.destination.parent.mkdir(parents=True, exist_ok=True)
     left.destination.write_bytes(b"from the last run")
@@ -1592,7 +1592,7 @@ def test_a_half_done_photo_only_renders_what_is_missing(tmp_path, fake_upscaler)
 
 def test_overwrite_re_renders(tmp_path, fake_upscaler):
     source = write_png(import_dir(tmp_path) / "again.png", 2000, 3000)
-    work = plan.plan_photo(source, 2000, 3000, "png", [sizes.PHONE], settings(tmp_path))
+    work = plan.plan_photo(source, 2000, 3000, [sizes.PHONE], settings(tmp_path))
     target = work.plans[0]
     target.destination.parent.mkdir(parents=True, exist_ok=True)
     target.destination.write_bytes(b"stale")
@@ -1611,7 +1611,7 @@ def test_an_archive_that_cannot_move_reports_instead_of_ending_the_run(tmp_path,
     skips the finished outputs and tries the move again -- rather than ending a
     twenty-four-hour import on one photo's permissions."""
     source = write_png(import_dir(tmp_path) / "stuck.png", 2000, 3000)
-    work = plan.plan_photo(source, 2000, 3000, "png", [sizes.PHONE], settings(tmp_path))
+    work = plan.plan_photo(source, 2000, 3000, [sizes.PHONE], settings(tmp_path))
     ctx = context(tmp_path, fake_upscaler)
     ctx.processing_dir.mkdir(parents=True, exist_ok=True)
     (ctx.processing_dir / "originals").write_bytes(b"not a directory")
@@ -1638,7 +1638,7 @@ def test_a_rejected_photo_that_cannot_reach_error_is_partial_not_failed(
     and a re-run retries exactly that.
     """
     source = write_png(import_dir(tmp_path) / "tiny.png", 100, 100)
-    work = plan.plan_photo(source, 100, 100, "png", list(sizes.DEVICES),
+    work = plan.plan_photo(source, 100, 100, list(sizes.DEVICES),
                            settings(tmp_path))
     assert work.rejected_everywhere and not work.plans
     ctx = context(tmp_path, fake_upscaler)
@@ -1662,7 +1662,7 @@ def test_a_photo_that_produced_nothing_at_all_is_still_failed(tmp_path,
     says a second run is unlikely to help.
     """
     source = write_png(import_dir(tmp_path) / "broken.png", 2000, 3000)
-    work = plan.plan_photo(source, 2000, 3000, "png", [sizes.PHONE],
+    work = plan.plan_photo(source, 2000, 3000, [sizes.PHONE],
                            settings(tmp_path))
     assert not work.rejected_everywhere
     source.write_bytes(b"not an image any more")
@@ -1680,8 +1680,8 @@ def test_batch_runs_cheapest_first(tmp_path, fake_upscaler):
     dear_src = write_png(import_dir(tmp_path) / "dear.png", 1440, 720)
     opts = settings(tmp_path)
     works = [
-        plan.plan_photo(dear_src, 1440, 720, "png", [sizes.PHONE], opts),
-        plan.plan_photo(cheap_src, 2000, 3000, "png", [sizes.PHONE], opts),
+        plan.plan_photo(dear_src, 1440, 720, [sizes.PHONE], opts),
+        plan.plan_photo(cheap_src, 2000, 3000, [sizes.PHONE], opts),
     ]
     order = [w.source.name for w in execute.cheapest_first(works)]
     assert order == ["cheap.png", "dear.png"]
@@ -1694,11 +1694,11 @@ def test_cheapest_first_orders_the_upscaling_photos_by_cost(tmp_path):
     ordering on source pixels alone would put it last."""
     opts = settings(tmp_path)
     works = [
-        plan.plan_photo(tmp_path / "big_frame.png", 2000, 1000, "png",
+        plan.plan_photo(tmp_path / "big_frame.png", 2000, 1000,
                         [sizes.PHONE], opts),
-        plan.plan_photo(tmp_path / "cheap.png", 4000, 6000, "png",
+        plan.plan_photo(tmp_path / "cheap.png", 4000, 6000,
                         [sizes.PHONE], opts),
-        plan.plan_photo(tmp_path / "small_frame.png", 1440, 720, "png",
+        plan.plan_photo(tmp_path / "small_frame.png", 1440, 720,
                         [sizes.PHONE], opts),
     ]
     assert [w.needs_upscale for w in works] == [True, False, True]
@@ -1719,7 +1719,7 @@ def test_a_failed_enlargement_is_not_held_while_the_next_plan_runs(tmp_path,
     already said memory is tight.
     """
     source = write_png(import_dir(tmp_path) / "s.png", 1440, 720)
-    work = plan.plan_photo(source, 1440, 720, "png", [sizes.PHONE], settings(tmp_path))
+    work = plan.plan_photo(source, 1440, 720, [sizes.PHONE], settings(tmp_path))
     monkeypatch.setattr(execute, "UPSCALE_PIXEL_CAP", 1)
 
     real_upscale = imaging.upscale
@@ -1853,7 +1853,7 @@ def test_a_second_photo_of_the_same_name_is_archived_beside_the_first(tmp_path,
     (originals / "IMG_0042.png").write_bytes(b"the first import's original")
 
     source = write_png(import_dir(tmp_path) / "IMG_0042.png", 2000, 3000)
-    work = plan.plan_photo(source, 2000, 3000, "png", [sizes.PHONE], settings(tmp_path))
+    work = plan.plan_photo(source, 2000, 3000, [sizes.PHONE], settings(tmp_path))
 
     messages = []
     ctx.log = messages.append
@@ -1878,7 +1878,7 @@ def test_a_plan_in_both_lists_is_not_reported_as_a_negative(tmp_path, fake_upsca
     neither rendered nor reported" describes nothing that happened.
     """
     source = write_png(import_dir(tmp_path) / "s.png", 1440, 720)
-    work = plan.plan_photo(source, 1440, 720, "png", [sizes.PHONE], settings(tmp_path))
+    work = plan.plan_photo(source, 1440, 720, [sizes.PHONE], settings(tmp_path))
     monkeypatch.setattr(execute, "UPSCALE_PIXEL_CAP", 1)
 
     real_unlink = Path.unlink
@@ -1914,7 +1914,7 @@ def test_a_destination_reported_written_is_measured_on_disk(tmp_path, fake_upsca
     it and renames it into place -- but that is render's property, not this
     function's, and this function is the one that moves the original."""
     source = write_png(import_dir(tmp_path) / "phantom.png", 2000, 3000)
-    work = plan.plan_photo(source, 2000, 3000, "png", [sizes.PHONE], settings(tmp_path))
+    work = plan.plan_photo(source, 2000, 3000, [sizes.PHONE], settings(tmp_path))
 
     monkeypatch.setattr(execute, "run_photo",
                         lambda work, ctx, failures=None: [work.plans[0].destination])
@@ -1934,7 +1934,7 @@ def test_a_photo_nothing_was_asked_of_is_not_archived(tmp_path, fake_upscaler):
     to write, nothing rejected" as ALREADY_DONE and move an original for zero
     work."""
     source = write_png(import_dir(tmp_path) / "unasked.png", 2000, 3000)
-    work = plan.plan_photo(source, 2000, 3000, "png", [], settings(tmp_path))
+    work = plan.plan_photo(source, 2000, 3000, [], settings(tmp_path))
     assert work.plans == [] and work.rejected_devices == []
 
     ctx = context(tmp_path, fake_upscaler)
@@ -1957,7 +1957,7 @@ def test_an_interrupt_as_the_workdir_is_created_leaves_nothing_behind(
     than the debris.
     """
     source = write_png(tmp_path / "lichen.png", 2000, 3000)
-    work = plan.plan_photo(source, 2000, 3000, "png", [sizes.PHONE],
+    work = plan.plan_photo(source, 2000, 3000, [sizes.PHONE],
                            settings(tmp_path))
     ctx = context(tmp_path, fake_upscaler)
     workdir = Path(ctx.workroot) / source.stem
