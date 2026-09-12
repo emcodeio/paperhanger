@@ -6,7 +6,7 @@ It runs on macOS and is designed to need almost nothing installed: the Upscayl n
 
 ## Status
 
-Implemented and reviewed. Of the sixteen planned tasks (Task 0 through Task 15 — scaffold, classification, cropping, execution, the CLI, the report, and this documentation), all sixteen are complete, and Tier 3 — the real-upscaler gate confirming whole-frame upscale equivalence against the real binary — passed at 44.83 dB PSNR against a 40 dB threshold. `paperhanger` is installable and runnable as described below. The 24-hour full-corpus run (tier 4, see Testing) is the author's acceptance pass and is not a gate on any of this.
+Implemented and reviewed. Of the sixteen planned tasks (Task 0 through Task 15 — scaffold, classification, cropping, execution, the CLI, the report, and this documentation), all sixteen are complete. Tier 3 — the real-upscaler gate confirming whole-frame upscale equivalence against the real binary — runs clean end to end, but its equivalence figure is being re-measured on real photographs rather than a synthetic fixture, so treat that one number as open. `paperhanger` is installable and runnable as described below. The 24-hour full-corpus run (tier 4, see Testing) is the author's acceptance pass and is not a gate on any of this.
 
 ## Install
 

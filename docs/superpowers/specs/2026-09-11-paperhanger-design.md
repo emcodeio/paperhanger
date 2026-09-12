@@ -335,12 +335,18 @@ enlarging — true because the model carries no whole-image context. **Measured 
 PSNR** between the two arms on a 700x1800 source (`tests/test_real_upscaler.py`), against a
 40 dB pass threshold. Section 13 records the gate.
 
-The gate measures the middle slice, whose crop origin has a non-zero y and so never touches
-the pad-and-shift workaround section 7.1 describes. The top slice was measured too, at
-**50.87 dB**, precisely because its origin is `0,0` — the offset `sips` silently ignores. Had
-either arm been cutting the wrong region, that is the measurement that would have shown it,
-and it came back better than the gate's own. The equivalence is the model's, not an artifact
-of how the slices were cut.
+**That figure is under re-measurement and should not be relied on yet.** It was taken on a
+generated-noise fixture, which this model flattens almost to uniform — the research document
+measured that same inflation directly, at 53 dB on a synthetic image against 40 dB on a real
+photograph. Run over twelve real windows from the corpus sample, the same procedure spans
+34.17 to 53.49 dB: five fall under the 40 dB bar and one under the 35 dB revert floor. The
+equivalence may well hold; one draw on synthetic input does not show it.
+
+A top-slice measurement was also recorded, on the theory that its `0,0` origin would catch an
+arm cutting the wrong region. It does not: under that bug both arms receive `sips`' centred
+crop, and those centres are exactly a factor of four apart (2724 = 4 x 681), so the two slide
+onto the middle slice together and still agree. It catches an off-by-one, which is all its
+own docstring claims.
 
 **One process per upscale.** Directory mode would work, since the scale is always 4, but it
 buys only process startup against a 10-30 second run and costs per-photo progress and failure
