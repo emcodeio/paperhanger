@@ -113,7 +113,7 @@ The legacy aliases map to paperhanger as follows, offered here as the intended r
 | `mkwphone` | `paperhanger -p` |
 | `mkwproc` | no successor |
 
-`legacy/README.md` names a fourth alias, `mkwproc`, alongside these three. It has no paperhanger equivalent: nothing in this repository records what it invoked beyond the name (the alias body lives only in the dotfiles, not in `legacy/`), and no `-d`/`-p`/`-b`-shaped flag in `paperhanger/cli.py` obviously matches it, so it is left unmapped rather than guessed at.
+`legacy/README.md` names a fourth alias, `mkwproc`, alongside these three. It is left unmapped rather than guessed at. All four aliases pointed at the same script, so what is missing is not *what* `mkwproc` invoked but the arguments it passed: the alias bodies live in the dotfiles at `shell/old/aliases_shared.zsh`, not in `legacy/`. The script itself parses only `getopts ":dpb"` (`legacy/make_wallpaper.zsh:383`), so `mkwproc` was not a fourth mode — it wrapped one of these three, and nothing kept here says which.
 
 See also:
 
