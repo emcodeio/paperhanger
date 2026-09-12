@@ -352,13 +352,38 @@ def test_intermediates_are_removed_on_failure_too(tmp_path, monkeypatch):
     assert [p for p in workdir.rglob("*") if p.is_file()] == []
 
 
-def test_crop_intermediates_are_png_and_one_per_plan(tmp_path, monkeypatch):
-    """Three slices are cut from one frame into one workdir. imaging.crop
-    always writes PNG bytes whatever the name says, so a name that is not .png
-    would lie about its own contents; and named by the source alone the three
-    would collide, which matters the moment anything holds two at once."""
+def test_an_intermediate_left_by_a_failed_crop_is_removed_too(tmp_path, monkeypatch):
+    """A crop can write its output and still fail -- sips killed mid-write, a
+    post-condition that trips after the file appears. The cleanup must cover
+    the file it was ASKED for, not only the one it was told about."""
     source = write_png(tmp_path / "ocean.png", 4000, 3000)
     work = plan.plan_photo(source, 4000, 3000, "png", [sizes.PHONE], settings(tmp_path))
+    workdir = tmp_path / "work"
+
+    def crop_then_fail(src, rect, out_path):
+        Path(out_path).write_bytes(b"half a cropped region")
+        raise imaging.ImagingError("sips exited 13 after writing")
+
+    monkeypatch.setattr(imaging, "crop", crop_then_fail)
+    with pytest.raises(imaging.ImagingError):
+        execute.render(work.plans[1], source, scale=1, workdir=workdir)
+    assert [p for p in workdir.rglob("*") if p.is_file()] == []
+
+
+def test_crop_intermediates_are_png_and_one_per_plan(tmp_path, monkeypatch):
+    """Three slices are cut from one frame into one workdir. imaging.crop
+    always writes PNG bytes whatever the name says, so an intermediate named
+    after the OUTPUT format would lie about its own contents; and named by the
+    source alone the three would collide, which matters the moment anything
+    holds two at once.
+
+    The outputs are heic here precisely so that `.png` cannot come for free
+    from the destination's own suffix.
+    """
+    source = write_png(tmp_path / "ocean.png", 4000, 3000)
+    work = plan.plan_photo(source, 4000, 3000, "png", [sizes.PHONE],
+                           settings(tmp_path, "heic"))
+    assert {p.destination.suffix for p in work.plans} == {".heic"}
     crops = []
     stub_crop(monkeypatch, crops)
     stub_encoder(monkeypatch)

@@ -59,8 +59,11 @@ def render(target, source_image, scale: int, workdir) -> Path:
             # .png because imaging.crop always writes PNG bytes, and named per
             # plan because one photo's three slices share this workdir.
             cropped = workdir / f"crop_{target.destination.stem}.png"
-            imaging.crop(current, rect, cropped)
+            # Registered BEFORE the call: a crop that writes its output and
+            # then fails would otherwise leave that file behind, and unlinking
+            # a path nothing wrote costs nothing.
             intermediates.append(cropped)
+            imaging.crop(current, rect, cropped)
             current = cropped
 
         # Never fused with the crop above: sips applies a resample against the
