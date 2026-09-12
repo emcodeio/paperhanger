@@ -246,7 +246,7 @@ no temp file; `sips` reads HEIC natively, so no conversion is needed there. Slic
 always need at least two invocations, and 672 of the corpus's 974 band-1 and band-2 plans
 are slices.
 
-Three measured constraints produced that block. Each fails silently if ignored:
+Five measured constraints produced that block. Each fails silently if ignored:
 
 - **Crop must never be fused with a resample.** `sips -c 1080 1920 --cropOffset 0 500
   --resampleWidth 960` on a 3840-wide source returns 480x270, not 960x540: the resample is
@@ -267,6 +267,35 @@ Three measured constraints produced that block. Each fails silently if ignored:
   order of magnitude larger than the 33.6-to-36.0 dB spread the upscaler itself was chosen
   on. Normalizing only unreadable formats would never fire for any of them, since all are
   JPEG or PNG.
+- **A write `sips` skips still exits 0.** Given a path it cannot read — one that does not
+  exist, or a directory — `sips` prints `Warning: <path> not a valid file - skipping` to
+  stderr, exits 0, and writes no output file at all. A corrupt file, an unwritable
+  destination and an unknown format all exit 13 and are caught by the status check, but
+  these are not, so the executor would carry on to the next stage against a file that was
+  never written. Every operation therefore asserts its post-condition — that the file it
+  asked for exists afterwards — and clears the destination first, so a stale file from an
+  earlier run cannot stand in for output this run never produced.
+- **Two `--cropOffset` shapes are silently ignored, and the geometry produces both.** Both
+  need `x == 0`. `--cropOffset 0 0` drops the offset and `sips` falls back to its default
+  *centered* crop; `--cropOffset <y> 0` with `y + height == source height` drops the crop
+  entirely and returns the whole source. Measured on 1600x1200: `horizontal_thirds`' top
+  slice, asked for 1600x1000 at (0,0), comes back as the rows at y=100 — the middle slice;
+  its bottom slice, asked for 1600x1000 at (0,200), comes back as the full 1600x1200 image;
+  and `vertical_thirds`' left slice, asked for 800x1200 at (0,0), comes back as the band at
+  x=400. Two of the three desktop slices and one of the three phone slices, wrong, at
+  exactly the requested size — so no dimension check can see it, and only comparing the
+  returned pixels against the region asked for will. An `x` of 1 or more is correct at every
+  `y`, and `x == 0` is correct for every `y` strictly between those two. `crop` works around
+  it by padding one pixel on every side and cropping at +1, which costs one extra full-image
+  pass on the affected slices; the executor could pad each 4x frame once instead.
+
+A related trap bounds what `crop` may be asked for: **an out-of-bounds crop pads with
+black** rather than clamping or failing. A 400x200 source cropped at x=900,y=900 returns a
+120x80 image that is entirely black, at exit 0, as a valid file. `crop` therefore probes its
+source and refuses a rect that does not fit — the post-condition cannot help, because the
+file exists and is exactly the size asked for. This matters most on the upscale path, where
+slices are cut with `rect.scaled(4)`: an enlargement even a pixel short of exactly 4x would
+otherwise produce a black-edged wallpaper with nothing raising.
 
 There is no copy-instead-of-encode shortcut for band 2. It would fire on 1 of 3441 corpus
 plans, and for a slice triple it would bypass `crop` and emit three identical full frames.
