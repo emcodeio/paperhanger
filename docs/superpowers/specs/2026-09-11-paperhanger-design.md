@@ -371,8 +371,10 @@ moth_desktop_6400x4800_4x.heic           band 4, in below_target/
 ```
 
 `<factor>` is the **net** enlargement in the finished file, to one decimal: `native` for
-bands 1 and 2, where the model never ran, and `I/d` for bands 3 and 4 — which is `4x` exactly
-in band 4 and between `1.5x` and `4x` in band 3. Net rather than the model's own factor,
+bands 1 and 2, where the model never ran; `I/d` in band 3, which falls between `1.5x` and
+`4x` because the 4x frame is reduced to the ideal; and a flat `4x` in band 4, where nothing
+is reduced and the 4x frame *is* the output. It is not `I/d` in band 4: that band is defined
+by `d*4 < I`, so `I/d` there exceeds 4 and describes an enlargement that never happened. Net rather than the model's own factor,
 because a photo enlarged 4x and then reduced carries less invented detail into the result
 than one left at 4x.
 
