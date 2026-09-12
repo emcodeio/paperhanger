@@ -330,7 +330,6 @@ def run_photo(work, ctx, failures=None) -> list:
     made, so it is the only place that can report it without re-deriving it.
     """
     workdir = Path(ctx.workroot) / work.source.stem
-    workdir.mkdir(parents=True, exist_ok=True)
     written = []
     frame = None
     over_cap = work.upscale_output_pixels > UPSCALE_PIXEL_CAP
@@ -338,6 +337,14 @@ def run_photo(work, ctx, failures=None) -> list:
         p.crop is not None for p in work.plans if p.needs_upscale)
 
     try:
+        # INSIDE the try, so the `finally` below covers it. Created above it,
+        # a signal arriving as `mkdir` returns leaves the directory with
+        # nothing to remove it -- and the CLI's `workroot.rmdir()` then fails
+        # ENOTEMPTY and is swallowed, so the residue outlives the run that
+        # made it. Microseconds wide, but the CLI states this cleanup as a
+        # guarantee, and a guarantee with a window in it is a comment that
+        # lies rather than a rule.
+        workdir.mkdir(parents=True, exist_ok=True)
         if work.needs_upscale and not fall_back:
             if over_cap:
                 # Said BEFORE the model runs, because this is the slowest

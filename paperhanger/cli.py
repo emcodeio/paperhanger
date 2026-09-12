@@ -211,6 +211,24 @@ def upscaler_is_needed(works, overwrite: bool) -> bool:
                for work in works for p in work.plans)
 
 
+def probe_path(processing_dir: Path) -> Path:
+    """The one file `check_writable` writes. Unique to this process.
+
+    A fixed name is defeatable. `Path.touch()` defaults to `exist_ok=True`,
+    which short-circuits to `os.utime` when the file is already there, and
+    `utime` succeeds on a file you own even inside a directory you cannot
+    write -- so a probe stranded by a run killed between the touch and the
+    unlink would let the NEXT run's pre-flight pass a directory it cannot
+    write to. `check_writable` runs before `sweep_partials`, so the sweep
+    cannot rescue it either.
+
+    The pid makes a fresh name that cannot inherit a stranded one, and the
+    `.partial` suffix keeps `sweep_partials` able to tidy it.
+    """
+    return processing_dir / (f".paperhanger-write-test-{os.getpid()}"
+                             f"{execute.PARTIAL_SUFFIX}")
+
+
 def check_writable(processing_dir: Path):
     """Fail once rather than 894 times. Returns a complaint, or None.
 
@@ -227,6 +245,15 @@ def check_writable(processing_dir: Path):
     what creates the directory. So the check also writes the kind of file the
     tool writes, and removes it.
 
+    `exist_ok=False` on the touch, and a per-process name from `probe_path`,
+    because `Path.touch()`'s default is the hole: it short-circuits to
+    `os.utime` on an existing file, and `utime` succeeds inside a directory
+    you cannot write. Either measure alone would close the demonstrated case;
+    both together leave no version of it. If the two ever do collide -- a
+    hard-killed earlier run, the same pid, the same directory -- the check
+    refuses and names the file, which is the right way round for a tool that
+    moves originals.
+
     `.partial`, deliberately: `sweep_partials` already clears strays by that
     suffix from exactly this tree, so a crash between the create and the
     unlink leaves nothing a later run will not tidy on its own.
@@ -236,10 +263,10 @@ def check_writable(processing_dir: Path):
     would have worked -- and refusing a run that was going to succeed is worse
     than the repetition this exists to prevent.
     """
-    probe = processing_dir / f".paperhanger-write-test{execute.PARTIAL_SUFFIX}"
+    probe = probe_path(processing_dir)
     try:
         processing_dir.mkdir(parents=True, exist_ok=True)
-        probe.touch()
+        probe.touch(exist_ok=False)
     except OSError as error:
         return f"cannot write to {processing_dir}: {error}"
     finally:
@@ -335,8 +362,24 @@ def _run_batch(works, ctx, results) -> None:
 
 
 def main(argv=None) -> int:
-    argv = list(sys.argv[1:] if argv is None else argv)
+    """The entry point. Exit codes are the module docstring's four, all of them.
 
+    A `KeyboardInterrupt` from anywhere outside the batch is caught here.
+    `_run` protects the batch itself AND everything it prints afterwards, so
+    reaching this handler means no photo was ever started -- which is what
+    lets the message say so. The two places slow enough to be interrupted in
+    are the scan, which probes every file in the directory, and the
+    toolchain's model hashing; neither has written anything.
+    """
+    try:
+        return _run(list(sys.argv[1:] if argv is None else argv))
+    except KeyboardInterrupt:
+        print()
+        print(f"{SUMMARY_INTERRUPTED} before any photo was touched")
+        return INTERRUPTED
+
+
+def _run(argv) -> int:
     if argv and argv[0] in SUBCOMMANDS:
         if len(argv) > 1:
             print(f"error: `paperhanger {argv[0]}` takes no arguments; "
@@ -462,18 +505,27 @@ def main(argv=None) -> int:
     except OSError:
         pass
 
-    print()
-    print(_summary(works, results, interrupted=interrupted))
-
-    failed = [r for r in results if r.outcome in (execute.PARTIAL, execute.FAILED)]
-    if failed:
-        # Paths only. Each one's reasons were printed beside it as it
-        # happened; this is the list to feed back in, not a second copy of
-        # the diagnosis.
+    # A second Ctrl-C can land in here, and this block catches it rather than
+    # leaving it to `main` -- whose message says no photo was touched, while
+    # the progress lines already on screen say otherwise. This does not make
+    # the window smaller; it stops the outer handler describing it wrongly.
+    failed = []
+    try:
         print()
-        print("left in place for a re-run:")
-        for result in failed:
-            print(f"  {result.source}")
+        print(_summary(works, results, interrupted=interrupted))
+
+        failed = [r for r in results
+                  if r.outcome in (execute.PARTIAL, execute.FAILED)]
+        if failed:
+            # Paths only. Each one's reasons were printed beside it as it
+            # happened; this is the list to feed back in, not a second copy
+            # of the diagnosis.
+            print()
+            print("left in place for a re-run:")
+            for result in failed:
+                print(f"  {result.source}")
+    except KeyboardInterrupt:
+        interrupted = True
 
     # The interrupt outranks the failures it may have travelled with: the run
     # did not finish, and 2 would describe it as one that did and lost photos.

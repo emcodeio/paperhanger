@@ -13,6 +13,7 @@ Flat fill throughout: the largest is 6 Mpx, well above the ~1 Mpx where
 behaviour.
 """
 
+import os
 import shutil
 import tempfile
 from pathlib import Path
@@ -890,6 +891,50 @@ def test_an_interrupted_run_does_not_count_rejections_it_never_reached(
     assert "1 rejected" in out, "the report header still describes the plan"
 
 
+def test_ctrl_c_during_the_scan_is_not_a_traceback(
+        inbox, tmp_path, monkeypatch, capsys):
+    """The scan probes every file in the directory -- ~18 ms each, so about
+    sixteen seconds on the author's corpus, and the likeliest place outside
+    the batch for an interrupt to land. Nothing has been written yet, but the
+    module docstring promises four exit codes, and a bare traceback is none
+    of them."""
+    fixture(inbox / "a.png", 2000, 3000)
+    fixture(inbox / "b.png", 2000, 3000)
+    real = imaging.probe
+
+    def probe(path):
+        if Path(path).stem == "b":
+            raise KeyboardInterrupt
+        return real(path)
+
+    monkeypatch.setattr(cli.imaging, "probe", probe)
+    processing = tmp_path / "processing"
+    code, out = run(["-p", "--processing-dir", str(processing), str(inbox)],
+                    capsys)
+    assert code == 130
+    assert "before any photo was touched" in out
+    assert not processing.exists()
+    assert sorted(p.name for p in inbox.glob("*.png")) == ["a.png", "b.png"]
+
+
+def test_a_second_ctrl_c_while_reporting_does_not_claim_nothing_happened(
+        inbox, tmp_path, no_upscaler, monkeypatch, capsys):
+    """`main`'s handler says no photo was touched. If it caught an interrupt
+    that arrived while the summary was printing, it would say that over the
+    top of the progress lines that prove otherwise."""
+    fixture(inbox / "lichen.png", 2000, 3000)
+
+    def boom(*args, **kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli, "_summary", boom)
+    code, out = run(["-p", "--format", "png", "--processing-dir",
+                     str(tmp_path / "processing"), str(inbox)], capsys)
+    assert code == 130
+    assert "[1/1] lichen.png: ok" in out
+    assert "before any photo was touched" not in out
+
+
 def test_a_routing_bug_still_escapes_the_interrupt_handler(
         inbox, tmp_path, no_upscaler, monkeypatch):
     """The KeyboardInterrupt catch must not have widened into a bare except."""
@@ -947,6 +992,40 @@ def test_the_writability_probe_leaves_nothing_behind(
                    str(processing), str(inbox)], capsys)
     assert code == 0
     assert list(processing.glob(f"*{execute.PARTIAL_SUFFIX}")) == []
+
+
+def test_a_stranded_probe_cannot_defeat_the_writability_check(
+        inbox, tmp_path, capsys):
+    """`Path.touch()` defaults to exist_ok=True, which short-circuits to
+    `os.utime` -- and utime succeeds on a file you own even inside a directory
+    you cannot write. A probe left behind by a run killed between the touch
+    and the unlink would then wave the next run through, and `check_writable`
+    runs before `sweep_partials`, so the sweep cannot rescue it.
+
+    The stranded file is named by `cli.probe_path`, so this reproduces the
+    inheritance rather than guessing at a spelling.
+    """
+    fixture(inbox / "lichen.png", 2000, 3000)
+    processing = tmp_path / "processing"
+    processing.mkdir()
+    cli.probe_path(processing).touch()
+    processing.chmod(0o555)
+    try:
+        code, out = run(["-p", "--format", "png", "--processing-dir",
+                         str(processing), str(inbox)], capsys)
+    finally:
+        processing.chmod(0o755)
+    assert code == 1
+    assert "cannot write to" in error_block(out)
+    assert "[1/1]" not in out
+
+
+def test_the_probe_name_is_unique_to_this_process(tmp_path):
+    """A fresh name cannot inherit a stranded one, and `sweep_partials` can
+    still tidy whatever a hard kill leaves behind."""
+    name = cli.probe_path(tmp_path).name
+    assert str(os.getpid()) in name
+    assert name.endswith(execute.PARTIAL_SUFFIX)
 
 
 def test_dry_run_does_not_probe_an_unwritable_target(inbox, tmp_path, capsys):

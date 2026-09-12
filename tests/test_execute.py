@@ -1670,3 +1670,37 @@ def test_a_photo_nothing_was_asked_of_is_not_archived(tmp_path, fake_upscaler):
     assert result.outcome == execute.FAILED
     assert result.failures and source.exists()
     assert not (ctx.processing_dir / "originals").exists()
+
+
+def test_an_interrupt_as_the_workdir_is_created_leaves_nothing_behind(
+        tmp_path, fake_upscaler, monkeypatch):
+    """The signal arrives as `mkdir` returns.
+
+    Created above the `try`, the workdir has no `finally` to remove it: the
+    directory outlives the run, and the CLI's `workroot.rmdir()` then fails
+    ENOTEMPTY and swallows it -- which turns that cleanup from a rule into a
+    comment with a window in it. Microseconds wide, and the residue is one
+    empty directory the next run reuses, so this is about the guarantee rather
+    than the debris.
+    """
+    source = write_png(tmp_path / "lichen.png", 2000, 3000)
+    work = plan.plan_photo(source, 2000, 3000, "png", [sizes.PHONE],
+                           settings(tmp_path))
+    ctx = context(tmp_path, fake_upscaler)
+    workdir = Path(ctx.workroot) / source.stem
+
+    real_mkdir = Path.mkdir
+
+    def mkdir_then_interrupt(self, *args, **kwargs):
+        real_mkdir(self, *args, **kwargs)
+        if self == workdir:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(Path, "mkdir", mkdir_then_interrupt)
+
+    with pytest.raises(KeyboardInterrupt):
+        execute.run_photo(work, ctx)
+
+    monkeypatch.undo()
+    assert not workdir.exists(), (
+        "the workdir outlived the interrupt that created it")
