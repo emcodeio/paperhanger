@@ -105,22 +105,9 @@ def no_upscaler(tmp_path, monkeypatch):
     monkeypatch.setenv("PAPERHANGER_UPSCAYL_BIN", str(tmp_path / "nowhere"))
 
 
-@pytest.fixture
-def ready_toolchain(fake_upscaler, monkeypatch):
-    """upscayl-bin installed, its model present and verified.
-
-    Only the MODEL half is faked, and only because it cannot be faked
-    honestly: `toolchain.find_models` hashes both files against pinned
-    SHA-256s, and the real pair is 60 MB that Tier 1 does not download. The
-    binary is still resolved by the real `find_upscayl` through the same
-    PAPERHANGER_UPSCAYL_BIN seam production uses, and whatever this returns
-    has to reach `execute.Context` for the run to produce anything at all --
-    so the wiring under test is not the part being stubbed.
-    """
-    _binary, models = fake_upscaler
-    monkeypatch.setattr(cli.toolchain, "ensure_ready",
-                        lambda: (toolchain.find_upscayl(), models))
-    return models
+# `ready_toolchain` lives in conftest.py: Tier 2 needs the same arrangement,
+# and a second copy of a fixture that fakes half the toolchain is how the two
+# halves drift apart.
 
 
 DOOMED_WRAPPER = """#!/usr/bin/env python3

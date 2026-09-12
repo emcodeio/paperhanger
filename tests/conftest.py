@@ -1,4 +1,5 @@
 import ast
+import shutil
 import sys
 from pathlib import Path
 
@@ -7,7 +8,10 @@ import pytest
 # Tests import `tests.pngwriter`; make the repo root importable.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from paperhanger import toolchain                    # noqa: E402 - after sys.path
+
 CORPUS = Path.home() / "Pictures" / "wallpaper"
+SAMPLE_MANIFEST = Path(__file__).parent / "corpus_sample.txt"
 
 
 @pytest.fixture
@@ -16,12 +20,69 @@ def processing_dir(tmp_path):
     return tmp_path / "processing"
 
 
-@pytest.fixture
-def corpus():
-    """The read-only image corpus, or skip. Never written to."""
+def corpus_or_skip() -> Path:
+    """The corpus directory, or skip. Callable from any fixture scope.
+
+    A plain function rather than only a fixture because the Tier 2 run is
+    module-scoped -- 192 MB of photographs and seven minutes of sips -- and a
+    module-scoped fixture cannot depend on a function-scoped one.
+    """
     if not CORPUS.is_dir():
         pytest.skip(f"corpus not present at {CORPUS}")
     return CORPUS
+
+
+@pytest.fixture
+def corpus():
+    """The read-only image corpus, or skip. Never written to."""
+    return corpus_or_skip()
+
+
+def sample_names() -> list:
+    """The 27 coverage filenames, in manifest order."""
+    return [line.strip() for line in SAMPLE_MANIFEST.read_text().splitlines()
+            if line.strip() and not line.startswith("#")]
+
+
+def copy_sample(corpus, into: Path) -> Path:
+    """Copy the sample OUT of the corpus into `into`, or skip.
+
+    Copied rather than used in place because a run MOVES its inputs: pointed
+    at the corpus, one `paperhanger` invocation would relocate the author's
+    photographs into a processing directory. Nothing in the test suite is
+    allowed to write to `CORPUS`, and copying is the measure that makes that
+    true rather than intended.
+
+    Skips rather than fails when an image has been renamed or deleted: the
+    sample is a list of filenames in a folder no test controls, and a machine
+    missing one of them has nothing to say about this codebase.
+    """
+    into.mkdir(parents=True, exist_ok=True)
+    missing = []
+    for name in sample_names():
+        source = Path(corpus) / name
+        if not source.exists():
+            missing.append(name)
+            continue
+        shutil.copy2(source, into / name)
+    if missing:
+        pytest.skip(f"{len(missing)} sample image(s) missing from the corpus: "
+                    f"{', '.join(missing[:3])}")
+    return into
+
+
+@pytest.fixture(scope="module")
+def corpus_sample(tmp_path_factory):
+    """The 27 coverage images, copied out. READ ONLY, and shared.
+
+    Module-scoped because copying 192 MB of photographs per test buys nothing:
+    every test that takes this fixture probes and plans, and planning is pure
+    arithmetic that writes nothing. Anything that RUNS the tool takes its own
+    copy -- see `sample_run` in test_corpus_sample.py -- because a run empties
+    the directory it was given.
+    """
+    return copy_sample(corpus_or_skip(),
+                       tmp_path_factory.mktemp("corpus-sample") / "inbox")
 
 
 def assert_pure_module(module, allowed):
@@ -90,14 +151,48 @@ subprocess.run(["/usr/bin/sips", "--resampleHeightWidth", str(height * 4),
 """
 
 
+def install_fake_upscaler(directory: Path, monkeypatch):
+    """Write the stub into `directory` and point the env seam at it.
+
+    A function as well as a fixture because the Tier 2 run is module-scoped
+    and cannot take a function-scoped fixture. One copy of the stub, reachable
+    from either scope: a second copy would drift from the format rule above,
+    which is the only thing making the normalize step testable at all.
+    """
+    binary = directory / "fake-upscayl-bin"
+    binary.write_text(FAKE_UPSCALER)
+    binary.chmod(0o755)
+    monkeypatch.setenv("PAPERHANGER_UPSCAYL_BIN", str(binary))
+    models = directory / "models"
+    models.mkdir(exist_ok=True)
+    return binary, models
+
+
 @pytest.fixture
 def fake_upscaler(tmp_path, monkeypatch):
     """A 4x upscaler that costs milliseconds. Uses the same env-var seam the
     tool needs in production, so the executor is tested end to end."""
-    binary = tmp_path / "fake-upscayl-bin"
-    binary.write_text(FAKE_UPSCALER)
-    binary.chmod(0o755)
-    monkeypatch.setenv("PAPERHANGER_UPSCAYL_BIN", str(binary))
-    models = tmp_path / "models"
-    models.mkdir()
-    return binary, models
+    return install_fake_upscaler(tmp_path, monkeypatch)
+
+
+def install_fake_models(models: Path, monkeypatch) -> None:
+    """Make `toolchain.ensure_ready` accept `models`, whatever is on disk.
+
+    Only the MODEL half is faked, and only because it cannot be faked
+    honestly: `toolchain.find_models` hashes both files against pinned
+    SHA-256s, and the real pair is 60 MB that the test suite does not
+    download. The binary is still resolved by the real `find_upscayl` through
+    the same PAPERHANGER_UPSCAYL_BIN seam production uses, and whatever this
+    returns has to reach `execute.Context` for the run to produce anything at
+    all -- so the wiring under test is not the part being stubbed.
+    """
+    monkeypatch.setattr(toolchain, "ensure_ready",
+                        lambda: (toolchain.find_upscayl(), models))
+
+
+@pytest.fixture
+def ready_toolchain(fake_upscaler, monkeypatch):
+    """upscayl-bin installed, its model present and verified."""
+    _binary, models = fake_upscaler
+    install_fake_models(models, monkeypatch)
+    return models
