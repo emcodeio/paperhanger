@@ -317,10 +317,23 @@ at sorting time are not strictly comparable. Cut from one enlargement, the overl
 identical.
 
 **Two qualifications.** Above a 300 Mpx cap on the enlarged frame, the photo falls back to
-per-slice upscaling; 92 of the 756 whole-frame jobs exceed it. And this rests on the
-assumption that enlarging then cutting equals cutting then enlarging — true if the model has
-no whole-image context, which is how this architecture works, but **not measured**, because
-`upscayl-bin` is not installed on the author's machine. Section 13 gates it on a test.
+per-slice upscaling — but only when every plan that needs the upscaler is a *slice*. 92 of
+the 756 whole-frame jobs exceed the cap.
+
+The cap alone is not the condition, because falling back bounds nothing unless there is a
+crop rect to be bounded by. A plan with no crop covers the whole photo, so enlarging "just
+its region" enlarges the whole frame: the fallback's peak is then identical to the
+whole-frame path's, for one model run per plan instead of one per photo. Measured on
+1280x800 — a desktop whole-image plan plus three phone slices — both strategies peak at
+16,384,000 px of 4x output, the fallback taking four runs to get there and the whole frame
+one. Sweeping 400-20000 on both axes, 2878 of 7413 over-cap shapes have a cropless upscaling
+plan. Those photos stay on the whole-frame path: there is no cheaper decomposition, and
+attempting the frame is the only thing that can produce that output at all.
+
+The second qualification: this rests on the assumption that enlarging then cutting equals
+cutting then enlarging — true if the model has no whole-image context, which is how this
+architecture works, but **not measured**, because `upscayl-bin` is not installed on the
+author's machine. Section 13 gates it on a test.
 
 **One process per upscale.** Directory mode would work, since the scale is always 4, but it
 buys only process startup against a 10-30 second run and costs per-photo progress and failure

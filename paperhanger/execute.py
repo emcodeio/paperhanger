@@ -23,8 +23,18 @@ from . import imaging
 PARTIAL_SUFFIX = ".partial"
 
 # 300 Mpx of 4x output. Above this a whole-frame enlargement strains memory, so
-# the photo falls back to per-plan upscaling. On the author's corpus 92 of 756
-# whole-frame jobs exceed it; the largest would otherwise be 622 Mpx.
+# the photo falls back to enlarging each plan's region on its own. On the
+# author's corpus 92 of 756 whole-frame jobs exceed it; the largest would
+# otherwise be 622 Mpx.
+#
+# Being over the cap is necessary but NOT sufficient -- see run_photo. A plan
+# with no crop rect covers the whole photo, so enlarging "just its region"
+# enlarges the whole frame: the fallback's peak is then identical to the
+# whole-frame path's, for N model runs instead of one. Measured on 1280x800,
+# which is a desktop whole-image plan plus three phone slices: both strategies
+# peak at 16,384,000 px of 4x output, the fallback taking four runs to get
+# there and the whole frame one. Sweeping 400-20000 on both axes, 2878 of 7413
+# over-cap shapes have a cropless upscaling plan.
 UPSCALE_PIXEL_CAP = 300_000_000
 
 
@@ -217,9 +227,23 @@ def _upscale_one_plan(target, work, ctx, workdir) -> Path:
 
     Cropping BEFORE the model rather than after is the whole point of the
     fallback -- it is what keeps a photo over the cap from ever holding its
-    whole 4x frame. The crop runs before the normalize because it is cheaper
-    to convert a third of an image than all of it, and sips carries the
-    source's profile into the crop untouched.
+    whole 4x frame, and it is why run_photo only falls back when every plan
+    that needs the model HAS a crop to be bounded by.
+
+    The crop runs before the normalize because it is cheaper to convert a third
+    of an image than all of it. That ordering is safe only because sips carries
+    the source's profile into the crop untouched, which is measured rather than
+    assumed: strip the profile from the crop and sips reports the result as
+    sRGB, `--matchTo` becomes a no-op, and the wide-gamut numbers survive into
+    a file that claims to be sRGB -- 144 out of 255 on a single channel, at
+    exit 0, with nothing to see in any dimension or file-exists check. Both
+    orderings are pinned byte-identical in test_imaging.
+
+    The `crop is None` branch below is unreachable from run_photo, which now
+    keeps such photos on the whole-frame path. It stays because this function
+    means "enlarge just this plan's region" and a whole-image plan's region is
+    a legitimate answer to that; the cap policy is what excludes it, and policy
+    is the thing most likely to move.
 
     Every intermediate is named after the plan, because one photo's three
     slices share this workdir. The caller drops each enlargement before it asks
@@ -259,25 +283,41 @@ def run_photo(work, ctx) -> list:
     for the phone pass anyway. Measured on the author's 894-image corpus: 2467
     upscaler runs and 37.2 hours become 756 runs and 24.3 hours.
 
-    Above the pixel cap the photo falls back to enlarging each plan's region on
-    its own. That is reported rather than done quietly: it is the one thing
-    that makes a photo's timing unlike every other photo's, and a run whose
-    strategy changed without saying so is a run nobody can account for
-    afterwards.
+    The pixel cap alone does not decide that. Falling back is worth doing only
+    when it actually bounds the enlargement, and it bounds nothing unless every
+    plan that needs the model has a crop rect to be bounded BY. A cropless
+    plan's region is the whole photo, so the fallback asks the model for
+    exactly the frame the cap declined -- same peak, one run per plan instead
+    of one per photo. Over-cap photos with a cropless upscaling plan therefore
+    keep the whole-frame path: there is no cheaper decomposition to fall back
+    to, and attempting the frame is the only thing that can produce that output
+    at all.
+
+    When the fallback does apply it is reported rather than done quietly: it is
+    the one thing that makes a photo's timing unlike every other photo's, and a
+    run whose strategy changed without saying so is a run nobody can account
+    for afterwards.
     """
     workdir = Path(ctx.workroot) / work.source.stem
     workdir.mkdir(parents=True, exist_ok=True)
     written = []
     frame = None
     over_cap = work.upscale_output_pixels > UPSCALE_PIXEL_CAP
+    fall_back = over_cap and all(
+        p.crop is not None for p in work.plans if p.needs_upscale)
 
     try:
-        if work.needs_upscale and not over_cap:
+        if work.needs_upscale and not fall_back:
             frame = _upscale_whole_frame(work, ctx, workdir)
         elif work.needs_upscale:
+            # One decimal place: 300,560,000 px against this cap is over it,
+            # and integer division prints that as "300 Mpx exceeds the 300 Mpx
+            # cap". Reachable at 1300x14450, and this is the one line a
+            # twenty-four-hour run gives the user about the change.
             ctx.log(
-                f"  {work.source.name}: {work.upscale_output_pixels // 1_000_000} Mpx "
-                f"exceeds the {UPSCALE_PIXEL_CAP // 1_000_000} Mpx cap; "
+                f"  {work.source.name}: "
+                f"{work.upscale_output_pixels / 1_000_000:.1f} Mpx "
+                f"exceeds the {UPSCALE_PIXEL_CAP / 1_000_000:.1f} Mpx cap; "
                 f"falling back to per-plan upscaling"
             )
 

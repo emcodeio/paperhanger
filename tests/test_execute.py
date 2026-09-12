@@ -743,7 +743,9 @@ def test_the_upscaler_never_reads_the_original(tmp_path, fake_upscaler, monkeypa
 def test_pixel_cap_falls_back_to_per_plan(tmp_path, fake_upscaler, monkeypatch):
     source = write_png(tmp_path / "s.png", 1440, 720)
     work = plan.plan_photo(source, 1440, 720, "png", [sizes.PHONE], settings(tmp_path))
-    monkeypatch.setattr(execute, "UPSCALE_PIXEL_CAP", 1)   # force the fallback
+    # 1 Mpx rather than 1 px: the message names both numbers, and a cap of one
+    # pixel would make it report a 0.0 Mpx cap.
+    monkeypatch.setattr(execute, "UPSCALE_PIXEL_CAP", 1_000_000)
 
     calls = spy_on(monkeypatch, "upscale")
     messages = []
@@ -752,8 +754,10 @@ def test_pixel_cap_falls_back_to_per_plan(tmp_path, fake_upscaler, monkeypatch):
     execute.run_photo(work, ctx)
 
     assert len(calls) == 3, "the fallback upscales each plan separately"
-    assert any("cap" in m or "per-plan" in m for m in messages), \
-        "the fallback must be reported, not silent"
+    assert messages == [
+        "  s.png: 16.6 Mpx exceeds the 1.0 Mpx cap; "
+        "falling back to per-plan upscaling"
+    ], "the fallback must be reported, not silent, and with its own numbers"
     for target in work.plans:
         assert imaging.probe(target.destination)[:2] == (target.out_width,
                                                          target.out_height)
@@ -781,6 +785,101 @@ def test_the_cap_is_measured_against_the_4x_output(tmp_path, fake_upscaler,
     monkeypatch.setattr(execute, "UPSCALE_PIXEL_CAP", 16_588_799)
     execute.run_photo(work, context(tmp_path, fake_upscaler))
     assert len(calls) == 3, "one pixel over the cap must fall back"
+
+
+def test_over_the_cap_a_cropless_plan_keeps_the_whole_frame(tmp_path, fake_upscaler,
+                                                            monkeypatch):
+    """Being over the cap is necessary but not sufficient.
+
+    1280x800 plans as one cropless desktop band 4 plus three phone slices. Its
+    cropless plan's region IS the photo, so per-plan upscaling asks the model
+    for exactly the frame the cap declined: both strategies peak at 16,384,000
+    px of 4x output, the fallback taking four runs to get there against the
+    whole frame's one. Falling back there costs three extra model runs -- 30 to
+    90 seconds each -- and bounds nothing.
+    """
+    source = write_png(tmp_path / "s.png", 1280, 800)
+    work = plan.plan_photo(source, 1280, 800, "png", list(sizes.DEVICES),
+                           settings(tmp_path))
+    upscaling = [p for p in work.plans if p.needs_upscale]
+    assert len(upscaling) == 4
+    assert sum(1 for p in upscaling if p.crop is None) == 1
+
+    peak = max(p.out_width * p.out_height for p in upscaling)
+    assert peak == work.upscale_output_pixels == 16_384_000, \
+        "the fallback's largest single enlargement is the whole frame anyway"
+
+    calls = spy_on(monkeypatch, "upscale")
+    messages = []
+    monkeypatch.setattr(execute, "UPSCALE_PIXEL_CAP", 1)   # far over the cap
+    ctx = context(tmp_path, fake_upscaler)
+    ctx.log = messages.append
+    execute.run_photo(work, ctx)
+
+    assert len(calls) == 1, f"expected the whole frame, got {len(calls)} runs"
+    assert messages == [], "nothing fell back, so nothing should be reported"
+    for target in work.plans:
+        assert imaging.probe(target.destination)[:2] == (target.out_width,
+                                                         target.out_height)
+
+
+def test_the_cap_message_names_both_numbers_at_the_boundary(tmp_path, monkeypatch):
+    """1300x14450 is 300,560,000 px of 4x output against the real 300 Mpx cap:
+    over it, and a shape the corpus's own aspect ratios reach. Printed with
+    integer division both numbers read 300, so the one line a twenty-four-hour
+    run gives the user is `300 Mpx exceeds the 300 Mpx cap`.
+
+    The fixture is 18.8 Mpx, so nothing is rendered -- the planner is pure and
+    the two steps that would touch pixels are stubbed. This is about the
+    sentence.
+    """
+    work = plan.plan_photo(Path("/src/tall.jpg"), 1300, 14450, "jpeg",
+                           [sizes.DESKTOP], settings(tmp_path))
+    assert work.upscale_output_pixels == 300_560_000
+    assert all(p.crop is not None for p in work.plans if p.needs_upscale)
+
+    monkeypatch.setattr(execute, "_upscale_one_plan",
+                        lambda target, work, ctx, workdir: tmp_path / "absent.png")
+    monkeypatch.setattr(execute, "render",
+                        lambda target, source_image, scale, workdir: target.destination)
+    messages = []
+    execute.run_photo(work, execute.Context(
+        processing_dir=tmp_path / "processing", workroot=tmp_path / "work",
+        upscayl=tmp_path / "bin", models_dir=tmp_path / "models",
+        log=messages.append,
+    ))
+
+    assert messages == [
+        "  tall.jpg: 300.6 Mpx exceeds the 300.0 Mpx cap; "
+        "falling back to per-plan upscaling"
+    ]
+
+
+def test_upscale_one_plan_handles_a_cropless_plan(tmp_path, fake_upscaler):
+    """`_upscale_one_plan` is called directly because run_photo can no longer
+    reach this branch: a photo whose upscaling plans are all cropless keeps the
+    whole-frame path however far over the cap it is. The branch stays because
+    this function means "enlarge just this plan's region" and a whole-image
+    plan's region is a legitimate answer; the cap policy is what excludes it,
+    and policy is the thing most likely to move.
+
+    1440x2160 on the phone path: one whole-image plan, governing 2160, below
+    the 2880 floor and 2160*4 clear of the 4320 ideal, so band 3.
+    """
+    source = write_png(tmp_path / "s.png", 1440, 2160)
+    work = plan.plan_photo(source, 1440, 2160, "png", [sizes.PHONE], settings(tmp_path))
+    target = work.plans[0]
+    assert target.crop is None and target.band == bands.UPSCALE_REDUCE
+
+    ctx = context(tmp_path, fake_upscaler)
+    workdir = Path(ctx.workroot) / "one"
+    workdir.mkdir(parents=True)
+
+    enlarged = execute._upscale_one_plan(target, work, ctx, workdir)
+
+    assert imaging.probe(enlarged)[:2] == (1440 * 4, 2160 * 4)
+    assert [p.name for p in workdir.iterdir()] == [enlarged.name], \
+        "the normalized copy must not outlive the call"
 
 
 def test_run_photo_takes_bands_1_and_2_from_the_original(tmp_path, fake_upscaler,

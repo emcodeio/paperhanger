@@ -437,6 +437,80 @@ def test_normalize_converts_to_srgb_png(tmp_path, corpus):
     assert "sRGB" in (_profile(out) or "")
 
 
+ADOBE_RGB_PROFILE = "/System/Library/ColorSync/Profiles/AdobeRGB1998.icc"
+
+
+def _wide_gamut_png(tmp_path, name, width, height):
+    """A local Adobe RGB fixture, built from a system profile.
+
+    The only other colour test in the suite is corpus-marked and skips on any
+    machine without the author's photographs, which is exactly the machine
+    where a colour regression would go unnoticed.
+    """
+    flat = write_png(tmp_path / f"flat_{name}", width, height, noise=True)
+    wide = tmp_path / name
+    subprocess.run(["/usr/bin/sips", "--matchTo", ADOBE_RGB_PROFILE,
+                    "-s", "format", "png", str(flat), "--out", str(wide)],
+                   capture_output=True, check=True)
+    assert "Adobe RGB" in (_profile(wide) or ""), _profile(wide)
+    return wide
+
+
+def test_crop_carries_the_source_profile_through(tmp_path):
+    """The executor's per-plan fallback crops BEFORE it normalizes, which is
+    only safe if the crop keeps the profile it was cut from.
+
+    If sips dropped it, `--matchTo` afterwards would convert from an assumed
+    sRGB -- which is to say, not convert at all -- and global constraint 5
+    would be lost on that path alone, at exit 0, with the right dimensions and
+    an sRGB tag over wide-gamut numbers.
+
+    Both branches, because a rect sips would otherwise ignore goes the long way
+    round through a padded intermediate and a second invocation.
+    """
+    wide = _wide_gamut_png(tmp_path, "wide.png", 400, 300)
+
+    direct = tmp_path / "direct.png"
+    imaging.crop(wide, Rect(x=100, y=50, width=200, height=150), direct)
+    assert "Adobe RGB" in (_profile(direct) or ""), _profile(direct)
+
+    padded = tmp_path / "padded.png"
+    imaging.crop(wide, Rect(x=0, y=0, width=200, height=150), padded)
+    assert "Adobe RGB" in (_profile(padded) or ""), _profile(padded)
+
+
+def test_cropping_before_normalizing_is_the_same_picture(tmp_path):
+    """The claim the fallback's ordering actually rests on, in pixels.
+
+    A profile tag proves the metadata survived; this proves the conversion
+    still happens and lands in the same place. Byte-identical, measured -- and
+    not vacuously so: deleting the profile from the crop first makes sips
+    report it as sRGB, turns `--matchTo` into a no-op, and leaves a single
+    channel 144 out of 255 away from this result.
+    """
+    wide = _wide_gamut_png(tmp_path, "wide.png", 120, 90)
+    rect = Rect(x=20, y=10, width=60, height=40)
+
+    cropped = tmp_path / "cropped.png"
+    imaging.crop(wide, rect, cropped)
+    crop_first = tmp_path / "crop_first.png"
+    imaging.normalize_to_srgb_png(cropped, crop_first)
+
+    normalized = tmp_path / "normalized.png"
+    imaging.normalize_to_srgb_png(wide, normalized)
+    normalize_first = tmp_path / "normalize_first.png"
+    imaging.crop(normalized, rect, normalize_first)
+
+    _, _, one = read_png_rgb(crop_first)
+    _, _, two = read_png_rgb(normalize_first)
+    assert one == two
+
+    # And the conversion is not a no-op on this fixture, or the equality above
+    # would hold however badly the profile were handled.
+    _, _, raw = read_png_rgb(cropped)
+    assert raw != one
+
+
 def test_failure_raises_with_stderr(tmp_path):
     """Fact 4. sips does not fail here -- it exits 0, warns on stderr, and
     writes nothing. Measured: `sips -s format png missing.png --out x.png`
