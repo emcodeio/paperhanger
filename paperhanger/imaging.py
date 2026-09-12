@@ -1,6 +1,6 @@
 """Every subprocess call the tool makes. The only module that touches images.
 
-Four measured facts shape this file. Each fails SILENTLY if ignored:
+Six measured facts shape this file. Each fails SILENTLY if ignored:
 
   1. sips -g pixelWidth exits 0 while printing `pixelWidth: <nil>` for text,
      empty and truncated files, and dies by signal on .DS_Store. Exit status is
@@ -22,6 +22,28 @@ Four measured facts shape this file. Each fails SILENTLY if ignored:
      exit-0 no-op, whatever its wording. A corrupt file, an unwritable
      destination and an unknown format all exit 13 and are caught by the
      status check; this is only for the ones that do not.
+  5. An out-of-bounds crop PADS WITH BLACK. sips neither clamps nor errors:
+     a 400x200 source cropped at x=900,y=900 returns a 120x80 image that is
+     entirely black, at exit 0, with the requested dimensions and a valid
+     file. Neither the status check nor fact 4's post-condition can see it --
+     the file exists and is exactly the size asked for. Only comparing the
+     rect against the measured source catches it, which is why `crop` probes.
+  6. sips SILENTLY IGNORES two --cropOffset shapes, both of which need X == 0,
+     and the pure geometry layer produces both of them for real wallpapers:
+       * `--cropOffset 0 0` -- the offset is dropped and sips does its DEFAULT
+         CENTERED crop. Measured on 1600x1200: horizontal_thirds' TOP slice,
+         asked for 1600x1000 at (0,0), comes back as the rows at y=100, which
+         is the MIDDLE slice. vertical_thirds' LEFT slice, asked for 800x1200
+         at (0,0), comes back as the band at x=400 -- the middle one again.
+       * `--cropOffset <y> 0` with y + height == source height (flush with the
+         bottom edge) -- the crop is dropped entirely and the FULL SOURCE
+         comes back. Measured: horizontal_thirds' BOTTOM slice, asked for
+         1600x1000 at (0,200), returns the whole 1600x1200 image.
+     An x of 1 or more is correct at every y, and x == 0 is correct for every
+     y strictly between those two. So two of the three desktop slices and one
+     of the three phone slices were silently wrong. `crop` works around it by
+     padding 1px on every side and cropping at +1, which makes x non-zero and
+     the bottom edge non-flush; verified region-exact for all six slices.
 """
 
 import subprocess
@@ -35,16 +57,46 @@ class ImagingError(RuntimeError):
     """A sips or upscayl-bin invocation failed."""
 
 
+def _tail(stream) -> str:
+    """The useful end of a captured stream, however it was captured."""
+    if not stream:
+        return ""
+    if isinstance(stream, bytes):
+        stream = stream.decode("utf-8", "replace")
+    return stream.strip()[:400]
+
+
 def _run(argv, timeout=1800, produces=None):
     """Run a command, raising ImagingError unless it succeeded.
 
     `produces` is the file the command was asked to write. Passing it turns a
     silent skip into an error -- see fact 4; a zero exit alone does not mean
-    anything was written.
+    anything was written. The destination is deleted first, so that a stale
+    file from an earlier run cannot stand in for output this run never
+    produced. It must therefore name a file the command CREATES, never one of
+    its own inputs.
+
+    Everything that can go wrong leaves as ImagingError, including a missing
+    binary and a timeout -- a first run with upscayl-bin not installed is a
+    realistic case, and the caller should not have to catch three exception
+    types to report one failure.
     """
-    proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
     tool = Path(argv[0]).name
-    output = (proc.stderr or proc.stdout).strip()[:400]
+    if produces is not None:
+        Path(produces).unlink(missing_ok=True)
+
+    try:
+        proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        raise ImagingError(
+            f"{tool} timed out after {timeout}s: {_tail(exc.stderr)}"
+        ) from exc
+    except OSError as exc:
+        # FileNotFoundError for a missing binary, PermissionError for one that
+        # is not executable; both are OSError.
+        raise ImagingError(f"{tool} could not be run: {exc}") from exc
+
+    output = _tail(proc.stderr) or _tail(proc.stdout)
     if proc.returncode != 0:
         raise ImagingError(f"{tool} exited {proc.returncode}: {output}")
     if produces is not None and not Path(produces).exists():
@@ -110,12 +162,76 @@ def normalize_to_srgb_png(source, out_path) -> None:
           str(source), "--out", str(out_path)], produces=out_path)
 
 
+PAD_COLOUR = "FF00FF"     # never survives the crop; garish so a leak is obvious
+
+
+def _offset_is_ignored(rect, source_height: int) -> bool:
+    """Whether sips would silently drop this --cropOffset -- see fact 6.
+
+    Both shapes need x == 0: the offset `0 0`, which falls back to a centered
+    crop, and an offset flush with the bottom edge, which drops the crop
+    altogether. Every other rect sips handles correctly.
+    """
+    if rect.x != 0:
+        return False
+    return rect.y == 0 or rect.y + rect.height == source_height
+
+
+def _crop_via_padding(source, rect, out_path, width: int, height: int) -> None:
+    """Crop a rect sips would otherwise ignore, by moving it off the edge.
+
+    Padding one pixel on every side makes x == 1 and puts the bottom edge one
+    row short of flush, which is outside both shapes in fact 6. sips centers
+    an even pad, so the original lands at exactly (1, 1) and the rect shifts
+    by the same one pixel. The padding is always cropped away; PAD_COLOUR only
+    matters if this ever stops being true.
+
+    Costs one extra full-image pass. Task 8 crops three slices from one frame
+    and could pad that frame once instead of up to three times.
+    """
+    padded = Path(out_path).with_suffix(".padded.png")
+    try:
+        _run([SIPS, "-p", str(height + 2), str(width + 2),
+              "--padColor", PAD_COLOUR, "-s", "format", "png",
+              str(source), "--out", str(padded)], produces=padded)
+        _run([SIPS, "-c", str(rect.height), str(rect.width),
+              "--cropOffset", str(rect.y + 1), str(rect.x + 1),
+              str(padded), "--out", str(out_path)], produces=out_path)
+    finally:
+        padded.unlink(missing_ok=True)
+
+
 def crop(source, rect, out_path) -> None:
     """Cut `rect` out of `source`. ALWAYS its own invocation -- see fact 2.
 
     Note the argument order sips wants: -c takes HEIGHT then WIDTH, and
     --cropOffset takes Y then X.
+
+    The rect must lie entirely within the source -- see fact 5. This is the
+    only layer that can check rather than assume it, because it is the only
+    one holding both the rect and the image it will be cut from: the executor
+    crops the 4x frame using rect.scaled(4), so an enlargement that comes back
+    even a pixel short of exactly 4x overruns, and the user gets a black-edged
+    wallpaper with nothing raising.
+
+    Rects that sips would silently mis-crop go the long way round -- fact 6.
     """
+    measured = probe(source)
+    if measured is None:
+        raise ImagingError(f"cannot crop {source}: not a readable image")
+    width, height, _ = measured
+    if (rect.x < 0 or rect.y < 0
+            or rect.x + rect.width > width
+            or rect.y + rect.height > height):
+        raise ImagingError(
+            f"crop {rect.width}x{rect.height}+{rect.x}+{rect.y} does not fit "
+            f"inside {width}x{height} -- sips would pad with black"
+        )
+
+    if _offset_is_ignored(rect, height):
+        _crop_via_padding(source, rect, out_path, width, height)
+        return
+
     _run([SIPS, "-c", str(rect.height), str(rect.width),
           "--cropOffset", str(rect.y), str(rect.x),
           str(source), "--out", str(out_path)], produces=out_path)

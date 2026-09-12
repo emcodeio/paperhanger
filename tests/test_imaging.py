@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from paperhanger import imaging
+from paperhanger import geometry, imaging
 from paperhanger.geometry import Rect
 from tests.pngwriter import read_png_rgb, write_marked_png, write_png
 
@@ -142,6 +142,98 @@ def test_crop_marker_check_would_fail_on_a_wrong_region(tmp_path):
     assert {pixel for row in rows for pixel in row} != {marker}
 
 
+@pytest.mark.parametrize("rect,why", [
+    (Rect(x=350, y=40, width=120, height=80), "overruns the right edge"),
+    (Rect(x=900, y=900, width=120, height=80), "lies wholly outside"),
+    (Rect(x=0, y=0, width=900, height=900), "is larger than the source"),
+])
+def test_an_out_of_bounds_crop_is_refused(tmp_path, rect, why):
+    """Fact 5. sips does not clamp and does not error -- it PADS WITH BLACK.
+
+    Measured on this 400x200 source: every rect below comes back at exit 0,
+    with exactly the requested dimensions, as a valid file. The fact 4
+    post-condition cannot help, because the file really is there. Only
+    measuring the source and comparing catches it.
+    """
+    source = write_marked_png(tmp_path / "m.png", 400, 200,
+                              Rect(x=250, y=40, width=120, height=80))
+    out = tmp_path / "out.png"
+    with pytest.raises(imaging.ImagingError) as caught:
+        imaging.crop(source, rect, out)
+    assert "400x200" in str(caught.value)
+    assert not out.exists(), f"a rect that {why} still produced a file"
+
+
+def test_the_bounds_guard_allows_a_rect_flush_with_the_edges(tmp_path):
+    """The guard must use > and not >=. geometry.horizontal_thirds puts its
+    bottom slice flush against the bottom edge and every slice flush against
+    both side edges, so an off-by-one here would refuse every real crop."""
+    marker = (240, 30, 200)
+    flush = Rect(x=280, y=120, width=120, height=80)   # 280+120 == 400, 120+80 == 200
+    source = write_marked_png(tmp_path / "m.png", 400, 200, flush, marker=marker)
+    out = tmp_path / "out.png"
+    imaging.crop(source, flush, out)
+    assert imaging.probe(out)[:2] == (120, 80)
+    _, _, rows = read_png_rgb(out)
+    assert {pixel for row in rows for pixel in row} == {marker}
+
+
+def _crop_lands_on_the_marker(tmp_path, source_w, source_h, rect, tag):
+    """Put the marker exactly at `rect`, crop `rect`, and report whether the
+    pixels that came back are the marked ones. Dimensions cannot answer this:
+    sips returns the right SIZE from the wrong PLACE -- see fact 6."""
+    marker = (240, 30, 200)
+    source = write_marked_png(tmp_path / f"src_{tag}.png", source_w, source_h,
+                              rect, marker=marker)
+    out = tmp_path / f"out_{tag}.png"
+    imaging.crop(source, rect, out)
+    if imaging.probe(out)[:2] != (rect.width, rect.height):
+        return False
+    _, _, rows = read_png_rgb(out)
+    return {pixel for row in rows for pixel in row} == {marker}
+
+
+@pytest.mark.parametrize("slicer", ["horizontal_thirds", "vertical_thirds"])
+def test_every_real_geometry_slice_crops_the_region_it_asked_for(tmp_path, slicer):
+    """Fact 6, against the actual producer of rects rather than rects invented
+    to suit the code. Two of the three horizontal slices and one of the three
+    vertical ones sit on a --cropOffset shape sips silently ignores, so before
+    the padding workaround this failed for slices 0 and 2 horizontally and
+    slice 0 vertically -- each returning a plausible image of the right size
+    from the wrong part of the picture."""
+    width, height = 1600, 1200
+    for index, rect in enumerate(getattr(geometry, slicer)(width, height)):
+        assert _crop_lands_on_the_marker(tmp_path, width, height, rect,
+                                         f"{slicer}{index}"), \
+            f"{slicer}[{index}] {rect} cropped the wrong region"
+
+
+@pytest.mark.parametrize("rect", [
+    Rect(x=0, y=0, width=300, height=80),      # offset 0 0 -> centered crop
+    Rect(x=0, y=120, width=300, height=80),    # flush bottom -> no crop at all
+    Rect(x=0, y=120, width=400, height=80),    # flush bottom, full width
+    Rect(x=0, y=40, width=300, height=80),     # the shape sips gets right
+    Rect(x=1, y=120, width=300, height=80),    # x=1 rescues the flush case
+])
+def test_crop_is_region_exact_on_and_off_the_bad_offsets(tmp_path, rect):
+    """The boundary either side of fact 6, so the workaround is shown to fix
+    the broken shapes without disturbing the ones that already worked."""
+    assert _crop_lands_on_the_marker(tmp_path, 400, 200, rect, "b")
+
+
+def test_raw_sips_still_has_the_bug_the_workaround_exists_for(tmp_path):
+    """A canary on the defect itself, calling sips directly. If Apple ever
+    fixes this, this test fails and the padding pass can be deleted -- which
+    is worth knowing, because it costs a full extra pass per affected crop."""
+    marker = (240, 30, 200)
+    rect = Rect(x=0, y=120, width=300, height=80)      # flush with the bottom
+    source = write_marked_png(tmp_path / "m.png", 400, 200, rect, marker=marker)
+    out = tmp_path / "raw.png"
+    subprocess.run(["/usr/bin/sips", "-c", "80", "300", "--cropOffset", "120", "0",
+                    str(source), "--out", str(out)], check=True, capture_output=True)
+    assert imaging.probe(out)[:2] == (400, 200), "sips now honours the offset"
+
+
 def test_fusing_crop_and_resample_is_wrong(tmp_path):
     """Global constraint 3, proven rather than asserted. The fused call scales
     by the PRE-CROP width, so it returns a quarter of the requested size."""
@@ -270,10 +362,48 @@ def test_failure_raises_with_stderr(tmp_path):
 
 def test_a_directory_input_is_also_a_silent_skip(tmp_path):
     """The other exit-0 skip: a directory exists, so an input-side exists()
-    check would wave it through. The post-condition is what catches both."""
+    check would wave it through. Uses resize_and_encode rather than crop
+    because crop now rejects an unreadable source at its bounds probe, which
+    would take a different path and leave the post-condition uncovered."""
+    out = tmp_path / "out.png"
+    with pytest.raises(imaging.ImagingError) as caught:
+        imaging.resize_and_encode(tmp_path, 10, 10, "png", None, out,
+                                  resize=False)
+    assert "without writing" in str(caught.value)
+    assert not out.exists()
+
+
+def test_a_stale_destination_cannot_stand_in_for_output(tmp_path):
+    """The post-condition asks "is the file there?", so a leftover file from an
+    earlier run would answer yes for a run that wrote nothing. Clearing the
+    destination first is what makes the question mean what it looks like."""
+    missing = tmp_path / "nope.png"
+    out = tmp_path / "out.png"
+    write_png(out, 64, 64)                      # stale output from an earlier run
     with pytest.raises(imaging.ImagingError):
-        imaging.crop(tmp_path, Rect(x=0, y=0, width=10, height=10),
-                     tmp_path / "out.png")
+        imaging.resize_and_encode(missing, 10, 10, "png", None, out,
+                                  resize=True)
+    assert not out.exists(), "the stale file was left to be mistaken for output"
+
+
+def test_a_missing_binary_raises_imaging_error(tmp_path):
+    """Criterion 7 covers every failure, not only the ones that run. upscayl-bin
+    absent is the realistic first-run case, and it lands in Task 9."""
+    source = write_png(tmp_path / "s.png", 32, 24)
+    with pytest.raises(imaging.ImagingError) as caught:
+        imaging.upscale(source, tmp_path / "out.png",
+                        tmp_path / "no-such-upscayl", tmp_path / "models")
+    assert "could not be run" in str(caught.value)
+    assert isinstance(caught.value.__cause__, FileNotFoundError)
+
+
+def test_a_timeout_raises_imaging_error():
+    """The other escapee. Uses _run directly: no sips invocation is slow enough
+    to time out reliably, and inventing one would test the fixture."""
+    with pytest.raises(imaging.ImagingError) as caught:
+        imaging._run(["/bin/sleep", "5"], timeout=0.2)
+    assert "timed out" in str(caught.value)
+    assert isinstance(caught.value.__cause__, subprocess.TimeoutExpired)
 
 
 def test_a_nonzero_exit_raises_with_stderr(tmp_path):
