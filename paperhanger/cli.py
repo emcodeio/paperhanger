@@ -48,7 +48,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser = _Parser(
         prog="paperhanger",
         description="Turn a folder of images into desktop and phone wallpapers.",
-        epilog="paperhanger setup | doctor",
+        epilog="paperhanger setup   download and verify upscayl-bin and its model\n"
+               "paperhanger doctor  report what is found and what is missing",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     devices = parser.add_mutually_exclusive_group()
     devices.add_argument("-d", dest="devices", action="store_const",
@@ -225,6 +227,17 @@ def _run_batch(works, ctx) -> list:
     raises when it is handed a cropless plan -- is about this codebase rather
     than this photo. Recorded as "one photo failed" it would look exactly like
     a corrupt JPEG and would repeat, quietly, for every photo in the run.
+
+    The photo is recorded FAILED rather than PARTIAL, and the `skipped` list
+    `run_and_archive` had built is lost with the exception. That is the
+    honest label either way: the only step outside the per-plan try is the
+    whole-frame enlargement, which happens before any plan of that photo is
+    rendered, so nothing this run produced for it is on disk and its original
+    is still where it was found.
+
+    Reasons are printed where they happen, not only in the recap at the end.
+    A twenty-four-hour import is read as a log, and the answer to "why did
+    photo 340 fail" belongs beside photo 340.
     """
     results = []
     total = len(works)
@@ -239,6 +252,8 @@ def _run_batch(works, ctx) -> list:
         results.append(result)
         print(f"[{index}/{total}] {work.source.name}: {result.outcome}"
               f" ({len(result.written)} written)")
+        for message in result.failures:
+            print(f"    {message}")
     return results
 
 
@@ -282,7 +297,15 @@ def main(argv=None) -> int:
     devices = resolve_devices(args.devices)
     opts = plan.OutputSettings(args.processing_dir, args.format, quality)
 
-    images, non_images = scan(args.path)
+    try:
+        images, non_images = scan(args.path)
+    except OSError as error:
+        # A directory the user cannot read is the realistic one. `probe` never
+        # raises, so nothing else in here can -- but a traceback is not an
+        # error message, and this is the first thing the tool does with the
+        # path it was given.
+        print(f"error: cannot read {args.path}: {error}")
+        return USAGE_ERROR
     works = [plan.plan_photo(source, width, height, fmt, devices, opts)
              for source, width, height, fmt in images]
 
@@ -340,12 +363,13 @@ def main(argv=None) -> int:
 
     failed = [r for r in results if r.outcome in (execute.PARTIAL, execute.FAILED)]
     if failed:
+        # Paths only. Each one's reasons were printed beside it as it
+        # happened; this is the list to feed back in, not a second copy of
+        # the diagnosis.
         print()
         print("left in place for a re-run:")
         for result in failed:
             print(f"  {result.source}")
-            for message in result.failures:
-                print(f"    {message}")
         return SOME_FAILED
     return OK
 
@@ -384,7 +408,7 @@ def _doctor() -> int:
     state = toolchain.status()
     binary = state["binary"]
     if binary is None:
-        print(f"upscayl-bin    : NOT FOUND -- run `paperhanger setup`")
+        print("upscayl-bin    : NOT FOUND -- run `paperhanger setup`")
     else:
         print(f"upscayl-bin    : {binary}")
         print(f"                 {_binary_source(binary)}")

@@ -686,6 +686,36 @@ def test_a_photo_the_upscaler_chokes_on_does_not_end_the_batch(
     assert "1 ok" in out and "1 failed" in out
 
 
+def test_a_failure_says_why_beside_the_photo_it_happened_to(
+        inbox, tmp_path, doomed_upscaler, capsys):
+    """A 24-hour import is read as a log. "why did photo 340 fail" is a
+    question answered beside photo 340, not only in a recap at the end."""
+    doomed_upscaler("bad")
+    fixture(inbox / "bad.png", 480, 720)
+    fixture(inbox / "good.png", 480, 720)
+    code, out = run(["-p", "--format", "png", "--processing-dir",
+                     str(tmp_path / "processing"), str(inbox)], capsys)
+    assert code == 2
+    lines = out.splitlines()
+    progress = next(i for i, line in enumerate(lines) if "bad.png: failed" in line)
+    assert "exited 1" in lines[progress + 1]
+    assert lines.index("left in place for a re-run:") > progress
+
+
+def test_an_unreadable_directory_is_a_usage_error(tmp_path, capsys):
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    fixture(locked / "lichen.png", 2000, 3000)
+    locked.chmod(0o000)
+    try:
+        code, out = run(["--dry-run", "--processing-dir", str(tmp_path / "p"),
+                         str(locked)], capsys)
+    finally:
+        locked.chmod(0o755)
+    assert code == 1
+    assert "cannot read" in out
+
+
 def test_a_routing_bug_is_not_swallowed(inbox, tmp_path, no_upscaler, monkeypatch):
     """_upscale_one_plan raises ValueError for a cropless plan -- a fact about
     this codebase, not about the photo. Tallied as "one photo failed" it would
