@@ -182,6 +182,7 @@ def test_setup_installs_everything_then_re_verifies_without_downloading(
 
     binary = offline_upstream / "bin" / "upscayl-bin"
     assert first["binary"] == binary
+    assert binary.read_text() == "#!/bin/sh\nexit 0\n", "the member's bytes, whole"
     assert os.access(binary, os.X_OK), "the extracted binary has to be executable"
     assert not list(offline_upstream.rglob("*.partial")), "no scratch files left behind"
 
