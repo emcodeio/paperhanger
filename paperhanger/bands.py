@@ -67,6 +67,8 @@ def net_factor(governing: int, target: sizes.Target, band: int):
     Net rather than the model's own 4x: a photo enlarged 4x and then reduced
     carries less invented detail into the result than one left at 4x.
     """
+    if band == REJECT:
+        raise ValueError("rejected images have no enlargement factor")
     if band in (DOWNSCALE, NATIVE):
         return None
     if band == UPSCALE_ONLY:

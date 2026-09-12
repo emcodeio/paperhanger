@@ -22,18 +22,37 @@ def test_desktop_width_boundaries(governing, expected):
 
 
 def test_bands_are_disjoint_and_total():
-    """Global constraint: each row of the band table stands alone, so no
-    evaluation order is implied and each is testable in isolation."""
+    """Each row of the band table stands alone, so no evaluation order is
+    implied and each is testable in isolation.
+
+    This calls band_for and checks its ANSWER against the five predicates.
+    An earlier version rebuilt the predicates inline and never called the
+    function, which proved only that the arithmetic agreed with itself.
+    """
+    predicates = {
+        bands.DOWNSCALE:      lambda d, t: d >= t.ideal,
+        bands.NATIVE:         lambda d, t: t.floor <= d < t.ideal,
+        bands.UPSCALE_REDUCE: lambda d, t: d < t.floor and d * 4 >= t.ideal,
+        bands.UPSCALE_ONLY:   lambda d, t: d < t.floor and t.floor <= d * 4 < t.ideal,
+        bands.REJECT:         lambda d, t: d * 4 < t.floor,
+    }
     for target in sizes.ALL_TARGETS:
         for d in range(1, target.ideal + 200):
-            matches = [
-                d >= target.ideal,
-                target.floor <= d < target.ideal,
-                d < target.floor and d * 4 >= target.ideal,
-                d < target.floor and target.floor <= d * 4 < target.ideal,
-                d * 4 < target.floor,
-            ]
-            assert sum(matches) == 1, f"{target.name} d={d} matched {sum(matches)}"
+            answer = bands.band_for(d, target)
+            holding = [b for b, p in predicates.items() if p(d, target)]
+            assert holding == [answer], (
+                f"{target.name} d={d}: band_for said {answer}, "
+                f"predicates say {holding}"
+            )
+            # while we are here: no band may exceed the ideal on the
+            # governing axis, or sips would be enlarging (constraint 1)
+            if answer != bands.REJECT:
+                w, h = (d, d * 2) if target.axis == sizes.WIDTH else (d * 2, d)
+                out_w, out_h = bands.output_size(w, h, target, answer)
+                governing = out_w if target.axis == sizes.WIDTH else out_h
+                assert governing <= target.ideal, (
+                    f"{target.name} d={d} band={answer} -> {governing} > {target.ideal}"
+                )
 
 
 def test_output_size_downscale_by_width():
@@ -53,21 +72,6 @@ def test_output_size_upscale_only_is_exactly_four_times():
     assert bands.output_size(1600, 1200, T, bands.UPSCALE_ONLY) == (6400, 4800)
 
 
-def test_output_never_exceeds_ideal_on_the_governing_axis():
-    for target in sizes.ALL_TARGETS:
-        for d in (target.ideal + 500, target.ideal, target.floor, target.floor - 1,
-                  target.ideal // 4, target.floor // 4):
-            if d < 1:
-                continue
-            b = bands.band_for(d, target)
-            if b == bands.REJECT:
-                continue
-            w, h = (d, d * 2) if target.axis == sizes.WIDTH else (d * 2, d)
-            out_w, out_h = bands.output_size(w, h, target, b)
-            out_governing = out_w if target.axis == sizes.WIDTH else out_h
-            assert out_governing <= target.ideal, f"{target.name} d={d} band={b}"
-
-
 @pytest.mark.parametrize("governing,band,expected", [
     (9216, bands.DOWNSCALE, "native"),
     (6000, bands.NATIVE, "native"),
@@ -78,3 +82,10 @@ def test_output_never_exceeds_ideal_on_the_governing_axis():
 ])
 def test_factor_token(governing, band, expected):
     assert bands.factor_token(bands.net_factor(governing, T, band)) == expected
+
+
+def test_net_factor_refuses_a_rejected_band():
+    """Mirrors output_size's guard. A caller that forgets to filter REJECT
+    should fail loudly, not receive a meaningless factor."""
+    with pytest.raises(ValueError, match="rejected"):
+        bands.net_factor(100, T, bands.REJECT)
