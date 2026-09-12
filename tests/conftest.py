@@ -80,9 +80,20 @@ def corpus_sample(tmp_path_factory):
     arithmetic that writes nothing. Anything that RUNS the tool takes its own
     copy -- see `sample_run` in test_corpus_sample.py -- because a run empties
     the directory it was given.
+
+    The teardown says so rather than trusting it. One test pointing the CLI at
+    this directory would MOVE the originals out of it, and every test after it
+    in the module would then fail for a reason that has nothing to do with
+    what it was testing -- with the ordering deciding who gets blamed.
     """
-    return copy_sample(corpus_or_skip(),
-                       tmp_path_factory.mktemp("corpus-sample") / "inbox")
+    inbox = copy_sample(corpus_or_skip(),
+                        tmp_path_factory.mktemp("corpus-sample") / "inbox")
+    before = sorted(path.name for path in inbox.iterdir())
+    yield inbox
+    assert sorted(path.name for path in inbox.iterdir()) == before, (
+        f"{inbox} is shared and read only, and something in this module "
+        f"changed it -- a run was pointed at it, most likely. Take a copy."
+    )
 
 
 def assert_pure_module(module, allowed):

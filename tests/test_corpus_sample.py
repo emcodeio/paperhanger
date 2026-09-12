@@ -19,12 +19,22 @@ else -- every crop, resample, colour conversion and encode below is the real
 thing, on real pixels, at full size. That is also why the run is a MODULE
 fixture: it is one run, asked eleven different questions.
 
-What it cannot see: whether a slice is the RIGHT third of the photograph.
-Nothing here reads pixel values -- tier 1's marked fixtures do that. These
-tests measure dimensions, names, profiles and filing.
+What it cannot see, and where to look instead:
+
+  * Whether a slice holds the RIGHT pixels. Only one test here compares image
+    content at all, and it compares whole files rather than regions. Tier 1's
+    marked fixtures are what prove a crop lands where it was asked to.
+  * Whether `probe` is telling the truth. It is both the measurement and the
+    thing measured, so a probe that misreported every file would agree with
+    itself all the way through. Tier 1 measures it against PNGs of known size.
+  * Anything about encoder quality: `-s formatOptions 80` is checked where it
+    is passed, not in the bytes that come back.
+  * Any flag but `--format heic` over both devices. One run is what seven
+    minutes buys; the flags are Tier 1's.
 """
 
 import contextlib
+import hashlib
 import io
 import re
 import subprocess
@@ -70,6 +80,12 @@ LYING_EXTENSION = "snowy_forest_landscape_9522.jpg"      # really a WebP
 WIDE_GAMUT_UPSCALED = "red_tulips_with_mountain_background_4338"   # Adobe RGB
 WIDE_GAMUT_UNTOUCHED = "moss_with_pine_needles_5324"              # ProPhoto RGB
 OVER_CAP = "bokeh_nature_scene_7629.jpg"
+BOTH_SIDES_OF_THE_BAND_BOUNDARY = "katana_with_tag_2369"          # 1920x1080
+
+# 5482x8085, sliced into three 16:10 desktop thirds that are band 2: cut
+# straight from the original with no model run anywhere near them, so a
+# difference between them is a fact about `imaging.crop` and nothing else.
+DETAILED_CROP = ("snowy_mountain_4490", "desktop")
 
 NAME = re.compile(r"_(?P<w>\d+)x(?P<h>\d+)_(?P<factor>native|[\d.]+x)\.[a-z]+$")
 
@@ -128,7 +144,6 @@ class SampleRun:
     exit_code: int
     stdout: str
     works: list = field(default_factory=list)
-    non_images: int = 0
 
 
 @pytest.fixture(scope="module")
@@ -154,7 +169,7 @@ def sample_run(tmp_path_factory):
     # Planned BEFORE the run, because the run empties the inbox. These are the
     # destinations the tool committed to; the tests below compare them against
     # what is actually on disk afterwards.
-    works, non_images = _plan_everything(inbox, processing)
+    works, _non_images = _plan_everything(inbox, processing)
 
     with pytest.MonkeyPatch.context() as patch:
         _binary, models = install_fake_upscaler(root, patch)
@@ -166,8 +181,7 @@ def sample_run(tmp_path_factory):
                                   str(inbox)])
 
     return SampleRun(inbox=inbox, processing=processing, exit_code=exit_code,
-                     stdout=captured.getvalue(), works=works,
-                     non_images=non_images)
+                     stdout=captured.getvalue(), works=works)
 
 
 # ---------- the gate, on a machine that has never seen the photographs ----------
@@ -302,16 +316,54 @@ def test_below_target_holds_both_kinds(sample_run):
 
 
 def test_a_4x_token_does_not_by_itself_mean_below_target(sample_run):
-    """katana_with_tag_2369.jpg's phone slices are band 3 at exactly 4.0x:
-    quadrupling 1080 lands precisely on the 4320 ideal, which is the
-    reduce-afterwards side of the band 3/4 boundary. They are full-size
-    wallpapers and are filed as such. Reading the token as a band -- the
-    obvious shortcut, and the one the test above could have been written with
-    -- would misfile every one of them."""
-    full_size_4x = [p for p in _outputs(sample_run.processing)
-                    if NAME.search(p.name)["factor"] == "4x"
-                    and p.parent.name != "below_target"]
-    assert full_size_4x
+    """katana_with_tag_2369.jpg puts both sides of the band 3/4 boundary in
+    one photograph, and gives all four outputs the same `4x` token.
+
+    1920x1080. Its desktop plan is band 4 -- 1080 quadruples to 4320, short of
+    the 4800 ideal -- so it is filed below_target. Its three phone slices are
+    band 3: the same 1080 quadruples to exactly the 4320 phone ideal, which is
+    the reduce-afterwards side of the boundary, so they are full-size
+    wallpapers filed as such. The token is 4x for all four either way.
+
+    Reading the token as a band -- the obvious shortcut, and the one the test
+    above could have been written with -- would misfile three of them.
+    """
+    katana = [p for p in _outputs(sample_run.processing)
+              if p.name.startswith(BOTH_SIDES_OF_THE_BAND_BOUNDARY)]
+    assert {NAME.search(p.name)["factor"] for p in katana} == {"4x"}
+    below = sorted(p.name for p in katana if p.parent.name == "below_target")
+    full_size = sorted(p.name for p in katana if p.parent.name != "below_target")
+    assert len(below) == 1, below
+    assert len(full_size) == 3, full_size
+
+
+def test_the_three_slices_of_one_photo_are_three_different_pictures(sample_run):
+    """Fact 6, against a real photograph instead of a generated fixture.
+
+    `sips` silently ignores two --cropOffset shapes, and this trio produces
+    both of them: the top slice asks for (0, 0), which `sips` drops in favour
+    of its own CENTERED crop -- so an unrepaired top slice comes back as the
+    middle one, right size, right format, exit 0 -- and the bottom slice sits
+    flush with the bottom edge, which `sips` drops altogether. `imaging.crop`
+    pads its way around both, and nothing downstream can tell whether the
+    workaround fired: the dimensions are correct in every version of this.
+
+    Band 2, so the slices are cut straight from the original and no model run
+    stands between the crop and the file on disk.
+
+    Not asserted across all 25 trios in the run, tempting as that is.
+    katana_with_tag_2369.jpg is a blade on a pure black field: its left and
+    right phone thirds are byte-identical outputs from two correct crops of
+    two identical regions -- 12,441,600 pixels, every one of them zero,
+    measured. A rule that a photo's slices always differ calls that a bug.
+    """
+    stem, device = DETAILED_CROP
+    slices = [p for p in _outputs(sample_run.processing)
+              if p.name.startswith(stem) and f"_{device}_" in p.name]
+    assert len(slices) == 3, [p.name for p in slices]
+    digests = {hashlib.sha256(p.read_bytes()).hexdigest() for p in slices}
+    assert len(digests) == 3, \
+        f"two of {[p.name for p in slices]} are the same picture"
 
 
 def test_every_source_is_filed_and_none_left_behind(sample_run):
