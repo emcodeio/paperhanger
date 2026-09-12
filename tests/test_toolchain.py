@@ -1,6 +1,7 @@
 import hashlib
 import os
 import shutil
+import stat
 import zipfile
 from pathlib import Path
 
@@ -68,6 +69,7 @@ def test_download_verified_removes_a_mismatching_file(tmp_path):
     with pytest.raises(toolchain.ToolchainError, match="sha256"):
         toolchain.download_verified(source.as_uri(), target, "0" * 64)
     assert not target.exists(), "a failed download must not be left behind"
+    assert not list(tmp_path.glob("*.partial")), "nor under the name it downloaded to"
 
 
 def test_download_verified_keeps_a_matching_file(tmp_path):
@@ -117,6 +119,28 @@ def test_models_ok_is_false_for_a_present_but_truncated_model(tmp_path, monkeypa
     assert toolchain.models_ok() is False
     with pytest.raises(toolchain.ToolchainMissing, match="paperhanger setup"):
         toolchain.find_models()
+
+
+def test_status_survives_a_model_it_cannot_read(tmp_path, monkeypatch):
+    """doctor has to report, not crash -- and the raise has to stay the one
+    that names the fix, not a bare PermissionError from four frames down."""
+    monkeypatch.delenv("PAPERHANGER_UPSCAYL_BIN", raising=False)
+    monkeypatch.setenv("PATH", "")
+    monkeypatch.setattr(toolchain, "DATA_HOME", tmp_path)
+    models = tmp_path / "models"
+    models.mkdir()
+    for name in toolchain.MODEL_FILES:
+        (models / name).write_bytes(b"present, but the open will be denied")
+
+    def denied(path):
+        raise PermissionError(13, "Permission denied", str(path))
+
+    monkeypatch.setattr(toolchain, "sha256", denied)
+
+    assert toolchain.models_ok() is False
+    assert toolchain.status()["models_ok"] is False
+    with pytest.raises(toolchain.ToolchainMissing, match="paperhanger setup"):
+        toolchain.ensure_ready()
 
 
 def test_ensure_ready_raises_when_the_binary_is_missing(tmp_path, monkeypatch):
@@ -231,3 +255,23 @@ def test_setup_rejects_an_archive_without_the_binary(offline_upstream, monkeypat
     with pytest.raises(toolchain.ToolchainError, match="upscayl-bin"):
         toolchain.setup(log=lambda *_: None)
     assert not (offline_upstream / "bin" / "upscayl-bin").exists()
+
+
+def test_ensure_ready_returns_the_binary_then_the_models_dir(offline_upstream):
+    """Tasks 9 and 12 unpack this positionally, so the order is the contract."""
+    toolchain.setup(log=lambda *_: None)
+
+    binary, models = toolchain.ensure_ready()
+
+    assert binary == offline_upstream / "bin" / "upscayl-bin"
+    assert models == offline_upstream / "models"
+
+
+def test_setup_restores_a_binary_that_lost_its_executable_bit(offline_upstream):
+    toolchain.setup(log=lambda *_: None)
+    binary = offline_upstream / "bin" / "upscayl-bin"
+    binary.chmod(0o644)
+
+    toolchain.setup(log=lambda *_: None)
+
+    assert binary.stat().st_mode & stat.S_IXUSR, "the advertised fix has to fix it"

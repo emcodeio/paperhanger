@@ -117,11 +117,23 @@ def find_upscayl() -> Path:
 
 
 def models_ok() -> bool:
+    """Every model present and hashing to its pinned value. Never raises.
+
+    A model that cannot be read is not ok, so the unreadable case answers False
+    rather than escaping: `status` is what doctor reports with, and a bare
+    PermissionError out of `ensure_ready` would replace the one message a
+    first-run user needs -- the one naming `paperhanger setup`. Catching around
+    the hash also closes the window between `is_file` and the `open` inside it.
+    """
     directory = models_dir()
-    return all(
-        (directory / name).is_file() and verify_sha256(directory / name, digest)
-        for name, digest in MODEL_FILES.items()
-    )
+    for name, digest in MODEL_FILES.items():
+        path = directory / name
+        try:
+            if not path.is_file() or not verify_sha256(path, digest):
+                return False
+        except OSError:
+            return False
+    return True
 
 
 def find_models() -> Path:
@@ -180,8 +192,12 @@ def setup(log=print) -> dict:
                     partial.replace(binary)
                 finally:
                     partial.unlink(missing_ok=True)
-        binary.chmod(binary.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
         log(f"    installed to {binary}")
+
+    # Outside the branch: a binary that lost its +x bit is repaired by the
+    # command we tell people to run, instead of reporting "already installed"
+    # and failing later with a PermissionError out of the upscaler.
+    binary.chmod(binary.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
     for name, digest in MODEL_FILES.items():
         target = models_dir() / name
