@@ -21,22 +21,32 @@ def estimate_seconds(works) -> float:
     return total
 
 
+def _strip_trailing_zero(text: str) -> str:
+    """'1.0' -> '1', '1.5' -> '1.5'. Same rule as bands.factor_token."""
+    return text.rstrip("0").rstrip(".") if "." in text else text
+
+
 def format_duration(seconds: float) -> str:
     if seconds < 90:
         return f"~{seconds:.0f} s"
     if seconds < 3600:
         return f"~{seconds / 60:.0f} min"
-    return f"~{seconds / 3600:.1f} h"
+    return f"~{_strip_trailing_zero(f'{seconds / 3600:.1f}')} h"
 
 
 def _action(target) -> str:
+    """The band's effect, rendered once -- never duplicated with the caller's dims."""
     if target.band == bands.DOWNSCALE:
-        return "downscale"
+        return f"{target.out_width}x{target.out_height}  downscale"
     if target.band == bands.NATIVE:
-        return "native"
+        # NATIVE lands in below_target/ exactly like UPSCALE_ONLY -- see
+        # plan.destination_dir and bands.BELOW_TARGET. Mark it the same way.
+        return f"{target.out_width}x{target.out_height}  native  below_target"
     if target.band == bands.UPSCALE_REDUCE:
         return f"4x -> {target.out_width}x{target.out_height}"
-    return f"4x only -> {target.out_width}x{target.out_height}  below_target"
+    if target.band == bands.UPSCALE_ONLY:
+        return f"4x -> {target.out_width}x{target.out_height}  below_target"
+    raise ValueError(f"no report action for band {target.band}")
 
 
 def render_photo(work, already_done: bool = False) -> str:
@@ -57,10 +67,9 @@ def render_photo(work, already_done: bool = False) -> str:
     whole = [p for p in work.plans if p.crop is None]
 
     for target in whole:
-        governing = target.governing
         lines.append(
             f" {name:<34} {target.target.name:<15} "
-            f"{governing} -> {target.out_width}x{target.out_height}  {_action(target)}"
+            f"{target.governing} -> {_action(target)}"
             f"{note}"
         )
         note = ""
@@ -74,23 +83,31 @@ def render_photo(work, already_done: bool = False) -> str:
         note = ""
         for target in targets:
             lines.append(
-                f"   {target.position:<12} {target.governing} -> "
-                f"{target.out_width}x{target.out_height}  {_action(target)}"
+                f"   {target.position:<12} {target.governing} -> {_action(target)}"
             )
     return "\n".join(lines)
 
 
-def render_report(works, already_done: int = 0, non_images: int = 0) -> str:
+def render_report(works, already_done=(), non_images: int = 0) -> str:
+    """`already_done` is the set of source Paths already produced -- not a count.
+
+    A count could only ever inflate the header; it could never make the
+    per-photo 'already done, skipping' line reachable. Task 12's CLI already
+    computes this set to decide what to skip, so passing it here costs it
+    nothing.
+    """
+    done = set(already_done)
     rejected = sum(1 for w in works if w.rejected_everywhere)
     outputs = sum(len(w.plans) for w in works)
+    image_word = "image" if len(works) == 1 else "images"
     parts = [
-        f"{len(works)} images, {outputs} outputs, {rejected} rejected, "
-        f"{already_done} already done, {non_images} non-image skipped, "
+        f"{len(works)} {image_word}, {outputs} outputs, {rejected} rejected, "
+        f"{len(done)} already done, {non_images} non-image skipped, "
         f"{format_duration(estimate_seconds(works))}",
         "",
     ]
     for work in works:
-        rendered = render_photo(work)
+        rendered = render_photo(work, already_done=work.source in done)
         if rendered:
             parts.append(rendered)
     return "\n".join(parts)
