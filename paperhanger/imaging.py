@@ -52,11 +52,15 @@ Seven measured facts shape this file. Each fails SILENTLY if ignored:
      file suffix should be jpg` on stderr, which a zero exit discards.
      This is not cosmetic. A lossy padded intermediate puts the magenta pad
      inside the same 8x8 DCT blocks as the pixels being kept, so it bleeds into
-     the crop: measured on a uniform region, column 0 shifted R +4.5, G -7.5,
-     B +15.3 -- the signature of FF00FF -- with mean absolute error 9.34 at
-     column 0 and 8.20 at column 1 against 1.43 in the interior. Invisible to
-     any dimension or file-exists check. Both crop branches therefore put
-     `-s format png` FIRST, and `crop` always emits a lossless intermediate.
+     the crop. Measured on a uniform (20, 90, 40) region cropped out of a
+     q90 JPEG: mean absolute per-channel error 63.14 at column 0 and 21.87 at
+     column 1, against 0.33 in the interior, with column 0 shifted R +73.2,
+     G -49.1, B +67.1 -- FF00FF's own signature, a quarter of the way to
+     magenta on the outermost column. Forced to PNG the same columns measure
+     0.00: a uniform region survives the round trip exactly, so the whole of
+     that error is the pad. Invisible to any dimension or file-exists check.
+     Both crop branches therefore put `-s format png` FIRST, and `crop`
+     always emits a lossless intermediate.
      Note also that without -s format, sips keeps the SOURCE's format whatever
      the --out suffix says, so a .png filename proves nothing about the bytes.
 """

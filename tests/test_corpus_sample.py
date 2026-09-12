@@ -1,10 +1,21 @@
 """Tier 2: the 27-image coverage sample, real sips, stubbed upscaler.
 
-The sample covers every coverage tag the corpus contains: each routing branch
-paired with each band it reaches, each input format, each colour-profile
-class. Chosen once and recorded in `tests/corpus_sample.txt`; the images
-themselves stay out of the repo, and every test here skips cleanly on a
-machine that has never seen them.
+The sample was chosen to cover every branch-and-band pair the corpus reaches,
+all 23 of them, and all five of its input formats. Two of those three axes are
+ASSERTED here rather than trusted: `test_the_sample_covers_every_band` and
+`test_every_input_format_in_the_sample_is_read` both fail if the sample stops
+covering what it claims.
+
+Colour profile is the axis this does not cover, and the docstring used to say
+it did. 7 of the corpus's 12 profile classes are represented, nothing asserts
+even that, and the two profile tests below name their own files rather than
+working from a census -- so a sample that lost its last ProPhoto image would
+fail those two by name and say nothing about coverage. "Every coverage tag"
+was two thirds true and read as three thirds.
+
+Chosen once and recorded in `tests/corpus_sample.txt`; the images themselves
+stay out of the repo, and every test here skips cleanly on a machine that has
+never seen them.
 
 This is the first tier where the whole tool meets input nobody generated. Tier
 1 builds its fixtures, so it can only ever ask questions someone thought to

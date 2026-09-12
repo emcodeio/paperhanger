@@ -24,12 +24,30 @@ dependencies: `sips` ships with macOS and `upscayl-bin` is invoked as a subproce
 paperhanger/
   sizes.py       thresholds and the ideal/floor table         pure
   classify.py    (w, h) -> device, axis, ideal, floor         pure
+  bands.py       the five bands and the output dimensions     pure
+  geometry.py    the crop rectangles for both crop paths      pure
+  formats.py     extensions and the quality defaults          pure
   plan.py        OutputPlan dataclass and the planner         pure
+  report.py      renders plans as the dry-run report          pure
   imaging.py     sips and upscayl-bin subprocess wrappers     effects
   toolchain.py   locate / verify / download binary and model  effects
   execute.py     runs plans, calls imaging, files results     effects
-  cli.py         argument parsing, dry-run report, progress
+  cli.py         argument parsing, the run loop, progress     effects
 ```
+
+Seven pure modules, not three. `bands`, `geometry` and `formats` were folded into
+`plan.py`'s row in the first draft of this table and are separate files; `report.py` was
+listed on the effects side and never had any — it imports `bands` and `sizes`, takes the
+set of finished destinations as a parameter, and touches nothing, which is what lets the
+CLI render it before the toolchain check and before anything is written.
+
+`plan.py` stays pure while holding the `Path` arithmetic that builds every destination,
+which is a narrower claim than it looks: `/`, `.parent`, `.stem`, `.suffix` and
+`.with_name` compute a path without asking a disk anything. The one filesystem-dependent
+choice section 3 places at plan time — skipping a plan whose output already exists — is
+therefore NOT here. It is `execute.is_pending`, called by the report, by the toolchain
+pre-flight and by the executor, so that the dry-run and the run cannot disagree.
+`tests/conftest.assert_pure_module` enforces all seven rows by parsing imports and calls.
 
 Installed with `uv tool install .`; developed with `uv run paperhanger`.
 
@@ -230,10 +248,13 @@ once per source photo, only if some plan of its needs the upscaler:
                 upscayl-bin -i in.png -o 4x.png -m <models> -n upscayl-standard-4x -s 4
 
 then once per output plan:
-  |> crop       slice plans only, and always its own invocation:
-                sips -c H W --cropOffset Y X
+  |> crop       slice plans only, always its own invocation, and always PNG:
+                sips -s format png -c H W --cropOffset Y X
                 cut from the 4x frame for bands 3 and 4, from the source for bands
-                1 and 2 — so the rectangle is scaled by 4 on the upscaled path
+                1 and 2 — so the rectangle is scaled by 4 on the upscaled path.
+                Two --cropOffset shapes are silently ignored (below), and those
+                go the long way round: pad one pixel on every side, then crop at
+                +1, with -s format png BEFORE --padColor.
   |> resize     bands 1 and 3 only
   +  encode     resize and encode are one invocation, with BOTH axes explicit:
                 sips --resampleHeightWidth <H> <W> \
@@ -246,7 +267,8 @@ no temp file; `sips` reads HEIC natively, so no conversion is needed there. Slic
 always need at least two invocations, and 672 of the corpus's 974 band-1 and band-2 plans
 are slices.
 
-Five measured constraints produced that block. Each fails silently if ignored:
+Seven measured constraints produced that block: five found before implementation and
+two found during it. Each fails silently if ignored:
 
 - **Crop must never be fused with a resample.** `sips -c 1080 1920 --cropOffset 0 500
   --resampleWidth 960` on a 3840-wide source returns 480x270, not 960x540: the resample is
@@ -288,14 +310,34 @@ Five measured constraints produced that block. Each fails silently if ignored:
   `y`, and `x == 0` is correct for every `y` strictly between those two. `crop` works around
   it by padding one pixel on every side and cropping at +1, which costs one extra full-image
   pass on the affected slices; the executor could pad each 4x frame once instead.
+- **Argument order decides whether `-s format` is honoured.** Found during
+  implementation, and the reason the pad command above puts it first. Placed *after*
+  `--padColor` it is silently dropped: a 2560x1600 JPEG padded with `-p H W --padColor
+  FF00FF -s format png` comes back as JPEG, byte-identical in size to the same run with no
+  `-s format` at all (3580120 B both), while moving `-s format png` in front yields PNG
+  (11544706 B). `sips` warns `Output file suffix should be jpg` on stderr, which a zero
+  exit discards. Not cosmetic: a lossy padded intermediate puts the magenta pad inside the
+  same 8x8 DCT blocks as the pixels being kept, so it bleeds into the crop. On a uniform
+  (20, 90, 40) region cut from a q90 JPEG, mean absolute per-channel error is 63.14 at
+  column 0 and 21.87 at column 1 against 0.33 in the interior, with column 0 shifted
+  R +73.2, G -49.1, B +67.1 — `FF00FF`'s own signature, a quarter of the way to magenta on
+  the outermost column. Forced to PNG the same columns measure 0.00. Note also that without
+  `-s format`, `sips` keeps the *source's* format whatever the `--out` suffix says, so a
+  `.png` filename proves nothing about the bytes — which is why `crop` both forces PNG and
+  refuses an `out_path` named anything else.
 
-A related trap bounds what `crop` may be asked for: **an out-of-bounds crop pads with
+The seventh bounds what `crop` may be asked for: **an out-of-bounds crop pads with
 black** rather than clamping or failing. A 400x200 source cropped at x=900,y=900 returns a
 120x80 image that is entirely black, at exit 0, as a valid file. `crop` therefore probes its
 source and refuses a rect that does not fit — the post-condition cannot help, because the
 file exists and is exactly the size asked for. This matters most on the upscale path, where
 slices are cut with `rect.scaled(4)`: an enlargement even a pixel short of exactly 4x would
 otherwise produce a black-edged wallpaper with nothing raising.
+
+`paperhanger/imaging.py` opens with the same seven, numbered in the order it applies them,
+with one substitution: colour normalization is a rule about which path runs rather than a
+`sips` defect, so the module's slot for it is `sips -g pixelWidth` exiting 0 while printing
+`pixelWidth: <nil>` — section 12's non-image detection, not this section's business.
 
 There is no copy-instead-of-encode shortcut for band 2. It would fire on 1 of 3441 corpus
 plans, and for a slice triple it would bypass `crop` and emit three identical full frames.
@@ -466,17 +508,25 @@ all 56 ground-truth scores, the per-window win counts and medians, and the extre
 **Attributed — measured against the artifacts the test saves, but not computed by the test
 itself.** The test writes the two arms, the truth slice and a pair of auto-levelled difference
 images, which show *where* the arms disagree but not by how much, and it calculates no
-statistics. So these were measured separately, from those committed PNGs, with `magick`: the
+statistics. So these were measured separately, with `magick`, from the PNGs a tier-3 run
+saves: the
 widest-gap image's 38.71 dB between the arms and its 4.623 and 4.800 mean absolute errors
 against truth; the whole band table and everything drawn from it — the bit-identical first 800
 rows, the 93.9% and 99.9% squared-error shares, the 480-row divergence distance, and the second
-window's 88.9% and 100.0%. All of those were recomputed independently from the committed
+window's 88.9% and 100.0%. All of those were recomputed independently from those same
 artifacts by the controller, agreeing with the implementer's arithmetic to the digit. Also attributed,
 from the earlier arms-against-each-other work and likewise not recomputed by any test: the
 per-row edge range, the interior mean, its squared-error shares, the one-pixel-offset figure,
 both trim figures, the pinned-`-t` triple, and the 0.2898 → 0.0232 noise-flattening figures.
-Any of them can be reproduced from the saved artifacts; none of them will fail a test if the
-code changes underneath them.)
+
+**Nothing is committed, and these artifacts are not sitting in the repository.** An earlier
+draft of this paragraph said "those committed PNGs", which would send a reader looking for
+files that were never there: `CLAUDE.md` forbids wallpaper images in the repo, and the
+artifacts are git-ignored. `test_real_upscaler.py` writes them under the pytest `tmp_path`
+tree by default, where they vanish with it. To keep them, set
+`PAPERHANGER_EQUIVALENCE_ARTIFACTS` and `PAPERHANGER_GROUND_TRUTH_ARTIFACTS` to
+directories before the tier-3 run; then, and only then, can any of these numbers be
+reproduced. None of them will fail a test if the code changes underneath them.)
 
 Note also what the top-slice measurement does not establish, since the earlier draft claimed
 it did. It cannot catch an arm cutting the wrong region: under that bug both arms receive

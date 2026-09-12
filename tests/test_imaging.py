@@ -260,11 +260,22 @@ def test_cropping_a_lossy_source_does_not_bleed_the_pad_in(tmp_path, rect):
     this: the pad step's `-s format png` sat after --padColor, where sips drops
     it, and the magenta pad shared 8x8 DCT blocks with the pixels being kept.
 
-    Measured before the fix, on the offset-0-0 rect: column 0 mean absolute
-    error 9.34 and column 1 8.20 against 1.43 in the interior, with column 0
-    shifted R +4.5, G -7.5, B +15.3 -- FF00FF's own signature. The interior
-    figure is ordinary JPEG noise and is the right thing to compare against,
-    so the edges are required to be no worse than the middle.
+    Measured on THIS fixture, with the pad step's `-s format png` put back
+    after --padColor: column 0 mean absolute per-channel error 63.14 and
+    column 1 21.87, against 0.33 in the interior, with column 0 shifted
+    R +73.2, G -49.1, B +67.1 -- FF00FF's own signature, a quarter of the way
+    to magenta on the outermost column. The same columns measure 0.00 once
+    PNG is forced, so a uniform region survives the round trip exactly and
+    the whole of that error is the pad.
+
+    (The numbers here used to be 9.34 and 8.20 against 1.43, carried over
+    from a marked fixture this test abandoned for the uniform one below. They
+    understated the defect by a factor of seven, because a marked source rings
+    against its own colour boundary and that ringing was being counted as the
+    interior figure.)
+
+    The interior is ordinary JPEG noise and is the right thing to compare
+    against, so the edges are required to be no worse than the middle.
     """
     # A UNIFORM source, deliberately: a marked one has a hard colour boundary
     # at the rect edge, and JPEG rings against that boundary in the source
