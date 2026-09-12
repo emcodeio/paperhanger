@@ -112,9 +112,10 @@ def selection() -> list:
     interesting, and a selection I curated is one I could have curated toward
     the answer I wanted. The sample was already built for coverage -- every
     routing branch, every band, every input format, every colour-profile class
-    -- so taking all of it that fits inherits that spread instead of
-    re-deriving it. The content classes the spread has to cover, and where
-    they come from:
+    -- so taking all of it that fits inherits most of that spread instead of
+    re-deriving it. Not all of it: the height rule drops the Adobe RGB
+    photograph, so the profile spread narrows (see `_window`). The content
+    classes it does cover, and where they come from:
 
       fine detail / heavy texture  green_grass_texture_3997.png,
                                    moss_with_pine_needles_5324.jpg,
@@ -164,7 +165,7 @@ def old_rule_band(psnr: float) -> str:
     return BAND_AT_OR_ABOVE_BAR
 
 
-def test_the_retired_rule_classifies_its_own_boundaries(tmp_path):
+def test_the_retired_rule_classifies_its_own_boundaries():
     """The judgment band, driven by injection rather than by an upscale.
 
     This branch decided whether a human got consulted, and across the whole of
@@ -226,9 +227,12 @@ def _window(source: Path, out_png: Path) -> Path:
 
     Normalized because `execute.py` normalizes once per source photo before it
     enlarges anything, so a window that skipped it would be measuring a path
-    the tool does not take. It also makes the comparison profile-neutral: the
-    selection holds Adobe RGB and ProPhoto RGB photographs, and `upscayl-bin`
-    strips the profile either way.
+    the tool does not take. It also makes the comparison profile-neutral, which
+    matters less here than the selection's spread first suggested: the 1800-row
+    height rule drops the sample's Adobe RGB photograph, so what is left is 14
+    sRGB, 2 carrying no profile at all, 1 ProPhoto RGB
+    (moss_with_pine_needles_5324.jpg) and 1 tagged `c2`
+    (bokeh_nature_scene_7629.jpg). Measured with `sips -g profile`, not assumed.
     """
     measured = imaging.probe(source)
     assert measured is not None, f"{source.name} is not a readable image"
@@ -301,13 +305,17 @@ def test_whole_frame_equivalence_over_real_photographs(tmp_path, real_toolchain)
     agree on dimensions, and every image yields a number.
     """
     binary, models = real_toolchain
+    # The corpus check FIRST. `selection()` probes files in the corpus, so on a
+    # machine that has never seen it the count comes back zero and a length
+    # assertion placed above this line turns the documented clean skip into a
+    # failure about a folder no test controls.
+    inbox = copy_sample(corpus_or_skip(), tmp_path / "inbox")
     names = selection()
     assert len(names) >= 12, (
         f"only {len(names)} of the sample can host a {WINDOW_WIDTH}x{WINDOW_HEIGHT} "
         f"window; the measurement wants at least twelve"
     )
 
-    inbox = copy_sample(corpus_or_skip(), tmp_path / "inbox")
     processing = tmp_path / "processing"
     artifacts = Path(os.environ.get(ARTIFACTS_ENV,
                                     processing / "equivalence_worst_case"))
