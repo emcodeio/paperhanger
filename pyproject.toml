@@ -19,6 +19,15 @@ build-backend = "hatchling.build"
 testpaths = ["tests"]
 markers = [
     "real_upscaler: requires upscayl-bin installed (Tier 3); deselected by default",
-    "corpus: requires ~/Pictures/wallpaper (Tier 2); skips cleanly when absent",
+    "corpus: requires ~/Pictures/wallpaper (Tier 2); deselected by default",
 ]
-addopts = "-m 'not real_upscaler'"
+# Tier 1 alone, so that a bare `uv run pytest` IS the per-commit gate rather
+# than a command that quietly costs eight minutes. Tier 2 gates pushes, not
+# commits -- the spec has always said so and this is where the code agrees.
+#
+# A `-m` on the command line REPLACES this expression; it does not AND with
+# it. So `-m "not corpus"` puts tier 3 back and `-m corpus` puts tier 2 back
+# WITHOUT tier 3 -- which is the intent in both cases, but only because both
+# tiers are named here. README's Testing section spells out the command for
+# each tier for the same reason; this trap has already cost this project once.
+addopts = "-m 'not corpus and not real_upscaler'"

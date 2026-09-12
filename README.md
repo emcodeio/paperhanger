@@ -85,18 +85,30 @@ Four tiers. Only the first three are part of "implemented" — the full-corpus r
 
 | Tier | What | Cost | When |
 |---|---|---|---|
-| 1 | generated fixtures, pure functions, stubbed upscaler | milliseconds | every commit |
+| 1 | generated fixtures, pure functions, stubbed upscaler | ~90 s | every commit |
 | 2 | 27 real corpus images, stubbed upscaler | ~8 min | before every push |
 | 3 | the same 27 images, real upscaler (21 model calls) | ~25 min | once, before calling the tool done |
 | 4 | all 894 images in the real corpus | ~24 h | the author's acceptance pass, not a gate |
 
-Fast loop, every commit (note both exclusions: `pyproject.toml` sets `addopts = "-m 'not real_upscaler'"`, but a `-m` given on the command line replaces that expression rather than ANDing with it, so a bare `-m "not corpus"` would let tier 3 back in the moment it exists):
-
-    uv run pytest -m "not corpus and not real_upscaler"
-
-Full run, before a push (this does **not** skip the slow tier — tier 2's `corpus`-marked tests run and take about 8 minutes):
+Fast loop, every commit — tier 1 alone, 526 tests in about 90 seconds:
 
     uv run pytest
+
+That is the default: `pyproject.toml` sets `addopts = "-m 'not corpus and not real_upscaler'"`, so the bare command *is* the per-commit gate. It used to exclude only `real_upscaler`, which meant a bare `uv run pytest` quietly spent eight minutes running tier 2 and the fast gate depended on the developer remembering the full expression.
+
+Before a push — tiers 1 and 2, about 8 minutes:
+
+    uv run pytest -m "not real_upscaler"
+
+Either slow tier on its own:
+
+    uv run pytest -m corpus                    # tier 2, ~8 min
+    uv run pytest -m real_upscaler             # tier 3, ~25 min, needs the real binary
+
+**A `-m` on the command line REPLACES `addopts`; it does not AND with it.** Two consequences worth knowing before you type one:
+
+- `uv run pytest -m "not corpus"` re-admits tier 3 — 25 minutes and a hard failure without `upscayl-bin` installed. Say `-m "not real_upscaler"` when what you mean is "everything but the slowest tier".
+- `uv run pytest tests/test_corpus_sample.py` selects **nothing**: the default `-m` still applies and every test in that file carries the `corpus` marker, so pytest reports `no tests collected (19 deselected)`. Add `-m corpus` to run a slow-tier file by name.
 
 Tier 2 tests are marked `corpus` and skip cleanly on a machine that has never seen `~/Pictures/wallpaper` — that corpus is read-only; nothing in this repo writes to it, and the images themselves are never committed (`tests/corpus_sample.txt` names 27 filenames, copied to scratch at test time). Tier 4 is not a pytest run at all: it is the author processing all 894 images once, on purpose, to judge things no assertion covers — whether the crops are worth keeping, whether HEIC 80 was the right call, whether `below_target/` is a useful distinction in practice.
 
