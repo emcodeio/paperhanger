@@ -540,7 +540,7 @@ the author's acceptance pass, deliberately outside the definition of done:
 | Tier | What | Cost | When |
 |---|---|---|---|
 | 1 | generated fixtures, pure functions, stubbed upscaler | milliseconds | every commit |
-| 2 | 27 real corpus images, stubbed upscaler | seconds | every commit |
+| 2 | 27 real corpus images, stubbed upscaler | ~8 min | before every push |
 | 3 | the same 27 images, real upscaler | ~25 min | once, before calling it done |
 | 4 | all 894 images | ~24 h | the author, when he chooses |
 
@@ -583,25 +583,30 @@ machine that has never seen these photos.
 
 The 27 were chosen to cover every coverage tag the corpus contains — 36 of them: each of the
 six routing branches paired with each band it actually reaches, each input format, and each
-colour-profile class. They produce 102 outputs and 19 upscaler runs. Specific reasons some
+colour-profile class. They produce 102 outputs and 19 photos that need the model. That is 21 model calls in
+tier 3, not 19: the one over-cap image is upscaled per plan, so it calls three times. Specific reasons some
 are in the list:
 
 | Image | Why |
 |---|---|
 | `snowy_forest_landscape_9522.jpg` | **is actually a WebP.** A real file whose extension lies — the case section 12's probe rule exists for |
-| `moss_with_pine_needles_5324.jpg` | ProPhoto RGB, the widest gamut present; the colour-conversion case in section 7 |
-| `red_tulips_with_mountain_background_4338.jpg` | Adobe RGB |
+| `moss_with_pine_needles_5324.jpg` | ProPhoto RGB, the widest gamut present. 6000x4000, so band 2 on all four targets: nothing upscales it and its outputs keep the ProPhoto profile. It pins section 7's conversion rule to the upscale path rather than exercising it |
+| `red_tulips_with_mountain_background_4338.jpg` | Adobe RGB, and band 3 on all four targets, so it is the image that actually exercises the sRGB conversion |
 | `katana_with_tag_2369.jpg` | greyscale profile |
 | `dark_stones_7236.png`, `blade_runner_2049_concept_poseter_.webp` | no embedded profile at all |
-| `green_grass_texture_3997.png` | 9072x12096; the only sample image that trips the 300 Mpx fallback |
+| `green_grass_texture_3997.png` | 9072x12096, the largest source in the sample; band 1 on both devices, so a pure downscale that never asks the model for anything |
+| `bokeh_nature_scene_7629.jpg` | 4000x6000, a 4x frame of 384 Mpx: the only sample image that trips the 300 Mpx cap and falls back to per-plan upscaling |
 | `purple_nebula_glow_0312_x.heic` | HEIC already at 7680x4800, so band 1 and 2 with no conversion |
-| `foggy_forest_path_7098.JPG` | 620x1102; the only band 5 rejection in the sample |
+| `foggy_forest_path_7098.JPG` | 620x1102; one of two desktop band 5 rejections (620*4 = 2480, under the 5120 floor). Still passes for phone, at band 4 |
+| `galaxy_pattern_dark_tones_2480.JPG` | 1242x2688; the other desktop rejection (1242*4 = 4968, still under 5120). Passes for phone at band 3 |
 | `cityscape_illustration_4562.gif` | the one GIF; readable by `sips`, not by `upscayl-bin` |
 | `man_with_car_in_fog_1158.jpg` | 8392x4721, above the desktop ideal, so a pure downscale |
 
 Tier 2 runs these through the real `sips` with the upscaler stubbed, which is where almost
 all of the value is: it exercises format detection, colour conversion, crop geometry, naming
-and filing against genuinely messy input in seconds. Tier 3 repeats it with the real binary
+and filing against genuinely messy input. It costs about eight minutes -- real `sips`
+decoding real photographs -- which is why it gates pushes rather than commits, and why its
+tests carry the `corpus` marker that lets tier 1 run alone. Tier 3 repeats it with the real binary
 to confirm the two things a stub cannot check — that `upscayl-bin` accepts what we hand it,
 and the whole-frame equivalence this section gates section 7 on.
 
