@@ -641,3 +641,244 @@ def test_crop_intermediates_are_png_and_one_per_plan(tmp_path, monkeypatch):
     assert len(paths) == 3
     assert len(set(paths)) == 3, f"intermediates collide: {paths}"
     assert all(p.suffix == ".png" for p in paths), paths
+
+
+# ---------- the per-photo upscale ----------
+
+def context(tmp_path, fake_upscaler):
+    binary, models = fake_upscaler
+    return execute.Context(
+        processing_dir=tmp_path / "processing",
+        workroot=tmp_path / "work",
+        upscayl=binary,
+        models_dir=models,
+    )
+
+
+def spy_on(monkeypatch, name):
+    """Record the first argument of every call to imaging.<name>, and still
+    make the real call.
+
+    Recording without calling is not an option on this path: every imaging
+    operation asserts that the file it was asked for exists afterwards, so a
+    stand-in that writes nothing raises instead of returning, and the test
+    would be measuring its own stub rather than the executor.
+    """
+    calls = []
+    real = getattr(imaging, name)
+
+    def spy(*args, **kwargs):
+        calls.append(args[0])
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(imaging, name, spy)
+    return calls
+
+
+def test_one_upscale_for_three_crop_plans(tmp_path, fake_upscaler, monkeypatch):
+    """The saving this whole design rests on: three overlapping slices are cut
+    from ONE enlargement, not enlarged three times.
+
+    1440x720 on the phone path: crop into three 480x720 slices whose governing
+    dimension is 720, and 720*4 == 2880 == the phone floor, so band 4 -- the
+    cheapest fixture that actually needs the upscaler. The 4x frame is
+    5760x2880; the desktop equivalent would be 26 Mpx.
+    """
+    source = write_png(tmp_path / "sunset.png", 1440, 720)
+    work = plan.plan_photo(source, 1440, 720, "png", [sizes.PHONE], settings(tmp_path))
+    assert len(work.plans) == 3 and work.needs_upscale
+
+    calls = spy_on(monkeypatch, "upscale")
+
+    written = execute.run_photo(work, context(tmp_path, fake_upscaler))
+
+    assert len(calls) == 1, f"expected one upscale, got {len(calls)}"
+    assert written == [target.destination for target in work.plans]
+    for target in work.plans:
+        assert imaging.probe(target.destination)[:2] == (target.out_width,
+                                                         target.out_height)
+
+
+def test_no_upscale_when_nothing_needs_it(tmp_path, fake_upscaler, monkeypatch):
+    source = write_png(tmp_path / "big.png", 2000, 3000)
+    work = plan.plan_photo(source, 2000, 3000, "png", [sizes.PHONE], settings(tmp_path))
+    assert not work.needs_upscale
+
+    calls = spy_on(monkeypatch, "upscale")
+    execute.run_photo(work, context(tmp_path, fake_upscaler))
+
+    assert calls == []
+    assert imaging.probe(work.plans[0].destination)[:2] == (2000, 3000)
+
+
+def test_normalize_always_runs_on_the_upscale_path(tmp_path, fake_upscaler,
+                                                   monkeypatch):
+    """Global constraint 5: every source, not only unreadable formats. A PNG
+    source still needs its pixels forced into sRGB -- the corpus's 118
+    non-sRGB files are all JPEG or PNG, so a format-based condition would never
+    fire for any of them."""
+    source = write_png(tmp_path / "s.png", 1440, 720)
+    work = plan.plan_photo(source, 1440, 720, "png", [sizes.PHONE], settings(tmp_path))
+
+    calls = spy_on(monkeypatch, "normalize_to_srgb_png")
+    execute.run_photo(work, context(tmp_path, fake_upscaler))
+
+    assert len(calls) == 1
+    assert calls[0] == source
+
+
+def test_the_upscaler_never_reads_the_original(tmp_path, fake_upscaler, monkeypatch):
+    """Guards the guard above. Normalizing and then handing the ORIGINAL to
+    the model satisfies 'normalize was called' while wasting the call, and the
+    fake upscaler would accept a PNG source without complaint."""
+    source = write_png(tmp_path / "s.png", 1440, 720)
+    work = plan.plan_photo(source, 1440, 720, "png", [sizes.PHONE], settings(tmp_path))
+
+    calls = spy_on(monkeypatch, "upscale")
+    execute.run_photo(work, context(tmp_path, fake_upscaler))
+
+    assert calls and source not in calls, f"the model was handed {calls}"
+
+
+def test_pixel_cap_falls_back_to_per_plan(tmp_path, fake_upscaler, monkeypatch):
+    source = write_png(tmp_path / "s.png", 1440, 720)
+    work = plan.plan_photo(source, 1440, 720, "png", [sizes.PHONE], settings(tmp_path))
+    monkeypatch.setattr(execute, "UPSCALE_PIXEL_CAP", 1)   # force the fallback
+
+    calls = spy_on(monkeypatch, "upscale")
+    messages = []
+    ctx = context(tmp_path, fake_upscaler)
+    ctx.log = messages.append
+    execute.run_photo(work, ctx)
+
+    assert len(calls) == 3, "the fallback upscales each plan separately"
+    assert any("cap" in m or "per-plan" in m for m in messages), \
+        "the fallback must be reported, not silent"
+    for target in work.plans:
+        assert imaging.probe(target.destination)[:2] == (target.out_width,
+                                                         target.out_height)
+
+
+def test_the_cap_is_measured_against_the_4x_output(tmp_path, fake_upscaler,
+                                                   monkeypatch):
+    """The cap is 300 Mpx of ENLARGEMENT, not of source. Compared against the
+    source's own pixel count it would never fire at all: the largest whole-frame
+    job in the corpus is 622 Mpx of output from 39 Mpx of input.
+
+    16588801 is one pixel above this fixture's 1440*720*16, so a comparison
+    against anything smaller than the 4x output leaves the cap unfired.
+    """
+    source = write_png(tmp_path / "s.png", 1440, 720)
+    work = plan.plan_photo(source, 1440, 720, "png", [sizes.PHONE], settings(tmp_path))
+    assert work.upscale_output_pixels == 16_588_800
+
+    calls = spy_on(monkeypatch, "upscale")
+    monkeypatch.setattr(execute, "UPSCALE_PIXEL_CAP", 16_588_800)
+    execute.run_photo(work, context(tmp_path, fake_upscaler))
+    assert len(calls) == 1, "exactly at the cap is not over it"
+
+    calls.clear()
+    monkeypatch.setattr(execute, "UPSCALE_PIXEL_CAP", 16_588_799)
+    execute.run_photo(work, context(tmp_path, fake_upscaler))
+    assert len(calls) == 3, "one pixel over the cap must fall back"
+
+
+def test_run_photo_takes_bands_1_and_2_from_the_original(tmp_path, fake_upscaler,
+                                                         monkeypatch):
+    """The 4x frame for bands 3 and 4, the ORIGINAL for bands 1 and 2.
+
+    The smallest real photo that mixes the two is 1920x2880 -- desktop thirds
+    in band 3, the phone whole image in band 2 -- whose 4x frame is 88 Mpx, so
+    the mix is made by hand instead: the centre slice of the 1440x720 phone
+    fixture is demoted to a band that resamples nothing. Taken from the frame
+    at scale 4 it would come back 480x720 all the same, having been enlarged
+    and then thrown away again, and every check in render would pass.
+    """
+    source = write_png(tmp_path / "s.png", 1440, 720)
+    work = plan.plan_photo(source, 1440, 720, "png", [sizes.PHONE], settings(tmp_path))
+    work.plans[1] = replace(work.plans[1], band=bands.NATIVE,
+                            out_width=480, out_height=720)
+    assert [p.needs_upscale for p in work.plans] == [True, False, True]
+
+    seen = []
+    real = execute.render
+
+    def spy(target, source_image, scale, workdir):
+        seen.append((target.position, Path(source_image), scale))
+        return real(target, source_image, scale, workdir=workdir)
+
+    monkeypatch.setattr(execute, "render", spy)
+    execute.run_photo(work, context(tmp_path, fake_upscaler))
+
+    read_from = {position: (image, scale) for position, image, scale in seen}
+    assert read_from["center"] == (source, 1)
+    assert read_from["left"][1] == 4 and read_from["right"][1] == 4
+    assert read_from["left"][0] != source
+    assert read_from["left"][0] == read_from["right"][0], \
+        "both slices must be cut from the same frame"
+    for target in work.plans:
+        assert imaging.probe(target.destination)[:2] == (target.out_width,
+                                                         target.out_height)
+
+
+def test_enlarged_frame_is_deleted_after_the_last_plan(tmp_path, fake_upscaler):
+    source = write_png(tmp_path / "s.png", 1440, 720)
+    work = plan.plan_photo(source, 1440, 720, "png", [sizes.PHONE], settings(tmp_path))
+    ctx = context(tmp_path, fake_upscaler)
+    execute.run_photo(work, ctx)
+    leftovers = [p for p in Path(ctx.workroot).rglob("*") if p.is_file()] \
+        if Path(ctx.workroot).exists() else []
+    assert leftovers == [], f"left behind: {leftovers}"
+
+
+@pytest.mark.parametrize("strategy", ["whole frame", "per plan"])
+def test_a_failed_plan_still_takes_the_frame_with_it(tmp_path, fake_upscaler,
+                                                     monkeypatch, strategy):
+    """A photo that dies mid-render must not leave its enlargement behind.
+
+    The 4x frames are the largest intermediates the tool makes -- 114 GB across
+    a full run against 28 GB free -- and a run that fails on photo 200 of 894
+    has to survive the remaining 694. Both strategies are covered because the
+    fallback allocates its frames somewhere else entirely.
+    """
+    source = write_png(tmp_path / "s.png", 1440, 720)
+    work = plan.plan_photo(source, 1440, 720, "png", [sizes.PHONE], settings(tmp_path))
+    if strategy == "per plan":
+        monkeypatch.setattr(execute, "UPSCALE_PIXEL_CAP", 1)
+
+    def explode(*args, **kwargs):
+        raise imaging.ImagingError("sips exited 13: unrecognized format")
+
+    monkeypatch.setattr(imaging, "resize_and_encode", explode)
+    ctx = context(tmp_path, fake_upscaler)
+    ctx.log = lambda message: None
+
+    with pytest.raises(imaging.ImagingError):
+        execute.run_photo(work, ctx)
+
+    root = Path(ctx.workroot)
+    leftovers = [p for p in root.rglob("*") if p.is_file()] if root.exists() else []
+    assert leftovers == [], f"{strategy}: left behind {leftovers}"
+
+
+def test_fake_upscaler_rejects_heic(tmp_path, fake_upscaler):
+    """The stub must mirror the real binary's input restriction, or the
+    normalize step is untested."""
+    binary, models = fake_upscaler
+    png = write_png(tmp_path / "s.png", 64, 64, noise=True)
+    heic = tmp_path / "s.heic"
+    imaging.resize_and_encode(png, 64, 64, "heic", 80, heic, resize=False)
+    with pytest.raises(imaging.ImagingError):
+        imaging.upscale(heic, tmp_path / "out.png", binary, models)
+
+
+def test_fake_upscaler_actually_enlarges_by_four(tmp_path, fake_upscaler):
+    """Guards every test above it. A stand-in that wrote a copy rather than an
+    enlargement would make the crop of the 4x frame overrun, which imaging.crop
+    raises on -- but a stand-in that wrote nothing at all, or the wrong size,
+    should fail here rather than three tests away."""
+    binary, models = fake_upscaler
+    source = write_png(tmp_path / "s.png", 40, 24)
+    out = tmp_path / "out.png"
+    imaging.upscale(source, out, binary, models)
+    assert imaging.probe(out) == (160, 96, "png")

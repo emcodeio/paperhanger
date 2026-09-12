@@ -14,11 +14,18 @@ Two rules that are easy to get wrong and expensive to get wrong:
     where the sorter will see it.
 """
 
+import shutil
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from . import imaging
 
 PARTIAL_SUFFIX = ".partial"
+
+# 300 Mpx of 4x output. Above this a whole-frame enlargement strains memory, so
+# the photo falls back to per-plan upscaling. On the author's corpus 92 of 756
+# whole-frame jobs exceed it; the largest would otherwise be 622 Mpx.
+UPSCALE_PIXEL_CAP = 300_000_000
 
 
 def _refuse_to_enlarge(source, out_width: int, out_height: int) -> None:
@@ -176,3 +183,132 @@ def render(target, source_image, scale: int, workdir) -> Path:
     finally:
         for leftover in intermediates:
             leftover.unlink(missing_ok=True)
+
+
+@dataclass
+class Context:
+    processing_dir: Path
+    workroot: Path
+    upscayl: Path
+    models_dir: Path
+    log: object = print
+
+
+def _upscale_whole_frame(work, ctx, workdir) -> Path:
+    """Normalize to sRGB PNG, then enlarge the whole frame once.
+
+    The normalize is not conditional on the source format. upscayl-bin emits
+    PNG with no ICC chunk, so an unconverted wide-gamut source comes back with
+    sRGB asserted over numbers that were never in sRGB -- about 15 dB worse,
+    an order of magnitude larger than the spread the upscaler was chosen on.
+    """
+    normalized = workdir / "normalized.png"
+    imaging.normalize_to_srgb_png(work.source, normalized)
+    enlarged = workdir / "frame_4x.png"
+    imaging.upscale(normalized, enlarged, ctx.upscayl, ctx.models_dir)
+    # Dropped as soon as the model has read it: the normalized copy is as large
+    # as the original PNG, and the frame it produced is sixteen times that.
+    normalized.unlink(missing_ok=True)
+    return enlarged
+
+
+def _upscale_one_plan(target, work, ctx, workdir) -> Path:
+    """The fallback: enlarge just this plan's region.
+
+    Cropping BEFORE the model rather than after is the whole point of the
+    fallback -- it is what keeps a photo over the cap from ever holding its
+    whole 4x frame. The crop runs before the normalize because it is cheaper
+    to convert a third of an image than all of it, and sips carries the
+    source's profile into the crop untouched.
+
+    Named per plan: one photo's three slices share this workdir, and in this
+    branch two of them can be alive at once only if something goes wrong -- but
+    a collision would then have one plan overwriting another's enlargement.
+    """
+    stem = target.destination.stem
+    normalized = workdir / f"norm_{stem}.png"
+    if target.crop is not None:
+        # .png because imaging.crop always writes PNG bytes whatever the name.
+        cropped = workdir / f"pre_{stem}.png"
+        try:
+            imaging.crop(work.source, target.crop, cropped)
+            imaging.normalize_to_srgb_png(cropped, normalized)
+        finally:
+            cropped.unlink(missing_ok=True)
+    else:
+        imaging.normalize_to_srgb_png(work.source, normalized)
+
+    enlarged = workdir / f"up_{stem}.png"
+    try:
+        imaging.upscale(normalized, enlarged, ctx.upscayl, ctx.models_dir)
+    finally:
+        normalized.unlink(missing_ok=True)
+    return enlarged
+
+
+def run_photo(work, ctx) -> list:
+    """Render every plan of one photo. Returns the destinations written.
+
+    The upscaler runs ONCE for the whole frame when anything needs it, and
+    every slice is cut from that result. Enlarging each slice separately would
+    re-enlarge the same pixels two or three times, because the three slices are
+    overlapping windows on one photo -- and it would duplicate work across
+    devices, since a photo cropped for desktop usually needs its whole frame
+    for the phone pass anyway. Measured on the author's 894-image corpus: 2467
+    upscaler runs and 37.2 hours become 756 runs and 24.3 hours.
+
+    Above the pixel cap the photo falls back to enlarging each plan's region on
+    its own. That is reported rather than done quietly: it is the one thing
+    that makes a photo's timing unlike every other photo's, and a run whose
+    strategy changed without saying so is a run nobody can account for
+    afterwards.
+    """
+    workdir = Path(ctx.workroot) / work.source.stem
+    workdir.mkdir(parents=True, exist_ok=True)
+    written = []
+    frame = None
+    over_cap = work.upscale_output_pixels > UPSCALE_PIXEL_CAP
+
+    try:
+        if work.needs_upscale and not over_cap:
+            frame = _upscale_whole_frame(work, ctx, workdir)
+        elif work.needs_upscale:
+            ctx.log(
+                f"  {work.source.name}: {work.upscale_output_pixels // 1_000_000} Mpx "
+                f"exceeds the {UPSCALE_PIXEL_CAP // 1_000_000} Mpx cap; "
+                f"falling back to per-plan upscaling"
+            )
+
+        for target in work.plans:
+            if not target.needs_upscale:
+                # Bands 1 and 2 keep their real pixels: the original, never the
+                # frame. Taken from the frame a band 2 plan would be enlarged
+                # and reduced back to the same size, and would still measure
+                # correct at every check render makes.
+                written.append(render(target, work.source, scale=1, workdir=workdir))
+                continue
+            if frame is not None:
+                written.append(render(target, frame, scale=4, workdir=workdir))
+                continue
+            enlarged = _upscale_one_plan(target, work, ctx, workdir)
+            try:
+                # The region is already cropped and already 4x, so render must
+                # not crop again: pass a cropless view of the plan. render then
+                # measures that region against the planned size, which is why
+                # no enlargement guard belongs here -- the guard exists to
+                # decide exactly this, from the pixels rather than the band.
+                written.append(render(
+                    replace(target, crop=None), enlarged, scale=1, workdir=workdir))
+            finally:
+                enlarged.unlink(missing_ok=True)
+        return written
+    finally:
+        # Both, and on every path out. The frame is the largest thing the tool
+        # makes -- 5760x2880 for the cheapest photo that needs one -- and
+        # holding all 756 of a run's frames to process exit would want about
+        # 114 GB against 28 GB free. rmtree covers the frame as well, but
+        # unlinking it first keeps the one file that matters most from
+        # depending on the sweep that follows.
+        if frame is not None:
+            frame.unlink(missing_ok=True)
+        shutil.rmtree(workdir, ignore_errors=True)

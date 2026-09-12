@@ -48,3 +48,56 @@ def assert_pure_module(module, allowed):
         f"{Path(module.__file__).name} imports {sorted(forbidden)}; "
         f"only {sorted(allowed)} allowed"
     )
+
+
+FAKE_UPSCALER = r"""#!/usr/bin/env python3
+# Stands in for upscayl-bin: scales 4x with sips, in milliseconds.
+#
+# It MUST reject anything that is not jpg/png/webp, exactly as the real binary
+# does. A sips-based fake reads HEIC happily, so without this check the
+# normalize step -- and the HEIC and TIFF fixtures that exist to exercise it --
+# would pass whether normalization works, is inverted, or is deleted outright.
+#
+# It also has to WRITE the file it was asked for. imaging.upscale passes
+# `produces=`, which unlinks the destination first and raises if nothing
+# appears afterwards, so a stand-in that merely records its arguments does not
+# stand in for the real binary at all: it fails every test that reaches it.
+import subprocess, sys
+from pathlib import Path
+
+args = dict(zip(sys.argv[1::2], sys.argv[2::2]))
+source, out = Path(args["-i"]), Path(args["-o"])
+
+probe = subprocess.run(["/usr/bin/sips", "-g", "pixelWidth", "-g", "pixelHeight",
+                        "-g", "format", str(source)], capture_output=True, text=True)
+values = {}
+for line in probe.stdout.splitlines():
+    key, sep, value = line.strip().partition(":")
+    if sep:
+        values[key.strip()] = value.strip()
+
+if values.get("format") not in ("jpeg", "png", "webp"):
+    sys.stderr.write(f"fake upscayl: unsupported input format "
+                     f"{values.get('format')!r}\n")
+    sys.exit(1)
+
+width, height = int(values["pixelWidth"]), int(values["pixelHeight"])
+# -s format png AFTER the resample, which is the order imaging.resize_and_encode
+# proved sips honours; placing it first is what fact 7 forbids only for --padColor.
+subprocess.run(["/usr/bin/sips", "--resampleHeightWidth", str(height * 4),
+                str(width * 4), "-s", "format", "png", str(source),
+                "--out", str(out)], check=True, capture_output=True)
+"""
+
+
+@pytest.fixture
+def fake_upscaler(tmp_path, monkeypatch):
+    """A 4x upscaler that costs milliseconds. Uses the same env-var seam the
+    tool needs in production, so the executor is tested end to end."""
+    binary = tmp_path / "fake-upscayl-bin"
+    binary.write_text(FAKE_UPSCALER)
+    binary.chmod(0o755)
+    monkeypatch.setenv("PAPERHANGER_UPSCAYL_BIN", str(binary))
+    models = tmp_path / "models"
+    models.mkdir()
+    return binary, models

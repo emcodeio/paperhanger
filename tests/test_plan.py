@@ -179,6 +179,20 @@ def test_needs_upscale_is_a_photo_level_question(tmp_path):
     assert big.needs_upscale is False
 
 
+def test_upscale_output_pixels_counts_the_4x_frame(tmp_path):
+    """What the executor's pixel cap is compared against, pinned to a literal
+    rather than to the same expression the property uses.
+
+    4000x4000 enlarged 4x is 16000x16000, which is 256,000,000 pixels. Written
+    as `* UPSCALE_FACTOR` instead of `** 2` the property returns 64,000,000 --
+    a quarter of the truth, still a plausible-looking eight-digit number, and
+    enough to let a 1.2-billion-pixel frame through a 300 Mpx cap.
+    """
+    work = plan.plan_photo(Path("/src/square.jpg"), 4000, 4000, "jpeg",
+                           [sizes.DESKTOP], settings(tmp_path))
+    assert work.upscale_output_pixels == 256_000_000
+
+
 # ---------- collisions ----------
 
 def test_collision_between_same_stem_different_extension(tmp_path):
