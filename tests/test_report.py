@@ -61,14 +61,25 @@ def test_estimate_is_zero_without_upscaling(tmp_path):
 
 
 def test_header_counts(tmp_path):
+    """The finished photos are real works with real destinations.
+
+    Passing three source paths that were not in `works` at all used to
+    satisfy "3 already done", because the count was `len(already_done)` and
+    nothing tied it to anything the run had planned.
+    """
     opts = settings(tmp_path)
     works = [
         plan.plan_photo(Path("/s/a.jpg"), 9216, 6144, "jpeg", [sizes.DESKTOP], opts),
         plan.plan_photo(Path("/s/tiny.jpg"), 200, 300, "jpeg", list(sizes.DEVICES), opts),
     ]
-    already_done = {Path("/s/d1.jpg"), Path("/s/d2.jpg"), Path("/s/d3.jpg")}
-    text = report.render_report(works, already_done=already_done, non_images=1)
-    assert "2 images" in text
+    finished = [plan.plan_photo(Path(f"/s/d{n}.jpg"), 9216, 6144, "jpeg",
+                                [sizes.DESKTOP], opts) for n in (1, 2, 3)]
+    done = {p.destination for w in finished for p in w.plans}
+
+    text = report.render_report(works + finished, done_outputs=done, non_images=1)
+
+    assert "5 images" in text
+    assert "1 output" in text and "4 outputs" not in text
     assert "1 rejected" in text
     assert "3 already done" in text
     assert "1 non-image skipped" in text
@@ -130,8 +141,8 @@ def test_estimate_and_outputs_exclude_already_done(tmp_path):
     assert report.format_duration(pending_only) == "~13 s"
     assert report.format_duration(everything) == "~3 min"
 
-    text = report.render_report([done_work, pending_work],
-                                already_done={done_work.source})
+    done = {p.destination for p in done_work.plans}
+    text = report.render_report([done_work, pending_work], done_outputs=done)
 
     assert report.format_duration(pending_only) in text
     assert report.format_duration(everything) not in text
@@ -139,12 +150,60 @@ def test_estimate_and_outputs_exclude_already_done(tmp_path):
     assert "6 outputs" not in text
 
 
+def test_a_half_finished_photo_is_counted_by_plan_not_by_photo(tmp_path):
+    """Three of four outputs on disk means ONE output this run, not four.
+
+    The count used to be `sum(len(w.plans) for w in pending)` over the photos
+    not WHOLLY done, so a photo three-quarters finished contributed every one
+    of its plans. The old test could not see it: it used a photo with all its
+    outputs present, where the two readings agree at zero.
+
+    3000x5000 desktop gives three band-3 slices and phone-by-width gives one
+    whole-image plan -- four plans, so "three of four" is reachable, and the
+    photo is not wholly done either way.
+    """
+    work = plan.plan_photo(Path("/s/sunset.jpg"), 3000, 5000, "jpeg",
+                           list(sizes.DEVICES), settings(tmp_path))
+    assert len(work.plans) == 4
+
+    done = {p.destination for p in work.plans[:3]}
+    text = report.render_report([work], done_outputs=done)
+
+    assert "1 output," in text, "three of these four are already on disk"
+    assert "4 outputs" not in text
+    assert "0 already done" in text, "the photo itself is not finished"
+    assert "already done, skipping" not in text
+
+
+def test_the_estimate_drops_a_photo_whose_upscaling_plans_are_all_done(tmp_path):
+    """And charges for the frame exactly once while any of them remain.
+
+    `run_and_archive` hands `run_photo` only the plans that survive
+    skip-existing, so `needs_upscale` is derived from those: a photo whose
+    upscaling plans are finished starts no model run, and one with any left
+    pays for its whole frame once however many are left.
+    """
+    work = plan.plan_photo(Path("/s/sunset.jpg"), 3000, 5000, "jpeg",
+                           [sizes.DESKTOP], settings(tmp_path))
+    assert len(work.plans) == 3 and all(p.needs_upscale for p in work.plans)
+    whole_frame = 0.8 * 16 * 3000 * 5000 / 1_000_000
+    assert whole_frame == 192.0
+
+    assert report.estimate_seconds([work]) == whole_frame
+    one_left = {p.destination for p in work.plans[:2]}
+    assert report.estimate_seconds([work], one_left) == whole_frame, \
+        "the frame is enlarged once for however many plans remain"
+    all_done = {p.destination for p in work.plans}
+    assert report.estimate_seconds([work], all_done) == 0
+
+
 def test_already_done_line_reachable_through_render_report(tmp_path):
     """AC 6 requires this line to come out of render_report, not just render_photo
     called directly -- render_report must be the thing that decides per photo."""
     work = plan.plan_photo(Path("/s/done.jpg"), 9216, 6144, "jpeg", [sizes.DESKTOP],
                            settings(tmp_path))
-    text = report.render_report([work], already_done={Path("/s/done.jpg")})
+    done = {p.destination for p in work.plans}
+    text = report.render_report([work], done_outputs=done)
     assert "already done, skipping" in text
 
 

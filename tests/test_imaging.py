@@ -78,6 +78,29 @@ def test_probe_reports_actual_format_not_extension(tmp_path, corpus):
     assert local.suffix == ".jpg"
 
 
+def test_probe_names_a_format_it_cannot_read_rather_than_crashing(
+        tmp_path, monkeypatch):
+    """`values.get("format", "unknown")` -- the fallback nothing exercised.
+
+    A measurable image whose format line sips does not print is the shape
+    that reaches it, and the fallback is what keeps `probe` to its contract of
+    returning a triple or None rather than raising. Written as
+    `values["format"]` it raises KeyError, out of the one function in this
+    module documented never to raise, in the middle of a scan over 894 files.
+
+    The stdout is stubbed because sips prints a format for everything it can
+    measure at all; what is being pinned is the branch, not a file.
+    """
+    class Result:
+        returncode = 0
+        stdout = "  pixelWidth: 640\n  pixelHeight: 480\n"
+        stderr = ""
+
+    monkeypatch.setattr(imaging.subprocess, "run", lambda *a, **k: Result())
+
+    assert imaging.probe(tmp_path / "whatever.png") == (640, 480, "unknown")
+
+
 def test_probe_of_a_missing_file_is_none(tmp_path):
     assert imaging.probe(tmp_path / "nope.png") is None
 
@@ -285,6 +308,38 @@ def test_crop_always_writes_png_even_from_a_lossy_source(tmp_path):
         assert imaging.probe(out)[2] == "png", f"{tag} branch did not write PNG"
 
 
+@pytest.mark.parametrize("name", ["out.jpg", "out.heic", "out"])
+def test_crop_refuses_an_out_path_that_is_not_png(tmp_path, name):
+    """The contract was a docstring asking callers to pass `.png`.
+
+    Handed `out.jpg` this wrote PNG bytes into it: sips warns `Output file
+    suffix should be jpg` on stderr, the zero exit discards the warning, the
+    post-condition sees a file that exists, and everything downstream goes by
+    the name. The one class of sips defect this module is entirely about --
+    a plausible wrong result at exit 0 -- introduced by its own caller.
+    """
+    source = write_png(tmp_path / "s.png", 400, 300)
+
+    with pytest.raises(imaging.ImagingError, match="PNG"):
+        imaging.crop(source, Rect(x=10, y=10, width=100, height=80),
+                     tmp_path / name)
+
+    assert not (tmp_path / name).exists(), "and it refuses before writing"
+
+
+def test_crop_still_accepts_the_name_every_caller_passes(tmp_path):
+    """Guards the guard: the suffix check must not have turned into a ban on
+    every name. `.PNG` too -- the check is about what the file claims to be,
+    and a case-sensitive comparison would refuse a legitimate one."""
+    source = write_png(tmp_path / "s.png", 400, 300)
+    rect = Rect(x=10, y=10, width=100, height=80)
+
+    for name in ("crop_sunset_top_phone_2880x4320_3.6x.png", "loud.PNG"):
+        out = tmp_path / name
+        imaging.crop(source, rect, out)
+        assert imaging.probe(out)[:2] == (100, 80)
+
+
 def test_the_padded_intermediate_is_really_png(tmp_path, monkeypatch):
     """Guards the argument order directly. The intermediate is deleted in a
     finally, so catch it mid-flight: if `-s format png` ever drifts back behind
@@ -342,20 +397,61 @@ def test_fusing_crop_and_resample_is_wrong(tmp_path):
     assert imaging.probe(separate)[:2] == (960, 540)
 
 
-def test_resize_hits_both_axes_exactly_by_width(tmp_path):
-    source = write_png(tmp_path / "s.png", 2662, 1663, noise=True)
-    out = tmp_path / "out.png"
-    imaging.resize_and_encode(source, 7680, 4797, "png", None, out, resize=True)
-    assert imaging.probe(out)[:2] == (7680, 4797)
+# Global constraint 3, as a table: each row is a real plan shape whose two
+# axes sips would NOT have derived from one another, so a single-flag
+# implementation returns a different file. `dropped` names the flag the row
+# rules out.
+#
+# The rows exist because the by-height case was not discriminating.
+# `test_resize_hits_both_axes_exactly_by_height` used 3840x2160 -> 8533x4800,
+# where --resampleWidth 8533 derives 4800 on the nose, so the mutation the
+# by-width row catches walked straight through the by-height one. Measured
+# against sips rather than reasoned about: its derived axis is neither
+# floored nor rounded the way the planner's `round()` is.
+BOTH_AXES = [
+    # sips derives 4798 from the width; the plan says 4797 -- imaging fact 3.
+    (2662, 1663, 7680, 4797, "--resampleWidth"),
+    # A real desktop-by-width plan, 5119 by the planner's round(), 5118 by
+    # sips' own derivation.
+    (2048, 1365, 7680, 5119, "--resampleWidth"),
+    # The other mutation, which needs a by-HEIGHT shape to show at all:
+    # --resampleHeight 4800 derives 7673 where the plan says 7674.
+    (1920, 1201, 7674, 4800, "--resampleHeight"),
+    (2048, 1365, 7202, 4800, "--resampleHeight"),
+]
 
 
-def test_resize_hits_both_axes_exactly_by_height(tmp_path):
-    """A 3840x2160 desktop-by-height plan targets 4800 tall. A hardcoded
-    --resampleWidth 4800 would give 4800x2700 -- below the 3200 floor."""
-    source = write_png(tmp_path / "s.png", 3840, 2160, noise=True)
+@pytest.mark.parametrize("width,height,out_width,out_height,dropped", BOTH_AXES)
+def test_resize_hits_both_axes_exactly(tmp_path, width, height, out_width,
+                                       out_height, dropped):
+    """The plan DEFINES the output size; sips is told both numbers."""
+    source = write_png(tmp_path / "s.png", width, height)
     out = tmp_path / "out.png"
-    imaging.resize_and_encode(source, 8533, 4800, "png", None, out, resize=True)
-    assert imaging.probe(out)[:2] == (8533, 4800)
+    imaging.resize_and_encode(source, out_width, out_height, "png", None, out,
+                              resize=True)
+    assert imaging.probe(out)[:2] == (out_width, out_height)
+
+
+@pytest.mark.parametrize("width,height,out_width,out_height,dropped", BOTH_AXES)
+def test_one_resample_flag_alone_would_miss_each_of_those(
+        tmp_path, width, height, out_width, out_height, dropped):
+    """Guards the guard, by running the mutation rather than describing it.
+
+    Every row above has to be a shape where dropping `dropped` actually
+    changes the file, or the row costs a second and proves nothing -- which
+    is exactly what the old by-height test was doing. sips is invoked
+    directly here; this is a measurement of the tool, not of this codebase.
+    """
+    source = write_png(tmp_path / "s.png", width, height)
+    out = tmp_path / "one_flag.png"
+    axis = str(out_width) if dropped == "--resampleWidth" else str(out_height)
+    subprocess.run([imaging.SIPS, dropped, axis, "-s", "format", "png",
+                    str(source), "--out", str(out)],
+                   check=True, capture_output=True)
+
+    assert imaging.probe(out)[:2] != (out_width, out_height), \
+        f"{dropped} alone gives the right answer here, so the row above is " \
+        f"not pinning constraint 3"
 
 
 def test_encode_without_resizing_preserves_dimensions(tmp_path):

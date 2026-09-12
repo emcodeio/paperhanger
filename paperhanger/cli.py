@@ -211,24 +211,22 @@ def scan(path: Path):
     return images, non_images
 
 
-def already_done(works, overwrite: bool) -> set:
-    """The sources whose every output is already on disk.
+def finished_outputs(works, overwrite: bool) -> set:
+    """The destinations this run will skip because they are already there.
 
-    A SET of source paths, not a count: `report.render_report` needs to know
-    WHICH photos to mark, and a count could only ever inflate the header.
+    A SET of destination paths, not a count and not a set of sources.
+    `report.render_report` needs to know which PLANS are already done: a
+    photo with three of its four outputs present will produce one this run,
+    and a set of sources can only say that photo is unfinished, which the
+    header then read as four outputs coming. Which photos are wholly done is
+    derivable from these; the reverse is not.
 
-    `work.plans and ...` rather than the bare `all(...)`, because `all` over an
-    empty sequence is True and a photo rejected on every device has no plans at
-    all. Without the guard such a photo renders as "already done, skipping"
-    while the header two lines above counts it as rejected.
-
-    Skip-existing itself is `execute.is_pending`, not a fourth spelling of it:
-    this function and the executor must agree about every plan, or the
-    dry-run promises one thing and the run does another.
+    Skip-existing itself is `execute.is_pending`, not a second spelling of
+    it: what the report promises and what the executor does have to be one
+    decision, or the dry-run lies about its own run.
     """
-    return {work.source for work in works
-            if work.plans and not any(execute.is_pending(p, overwrite)
-                                      for p in work.plans)}
+    return {p.destination for work in works for p in work.plans
+            if not execute.is_pending(p, overwrite)}
 
 
 def upscaler_is_needed(works, overwrite: bool) -> bool:
@@ -608,8 +606,8 @@ def _run(argv) -> int:
         _report_collisions(collisions)
         return USAGE_ERROR
 
-    done = already_done(works, args.overwrite)
-    rendered_report = report.render_report(works, already_done=done,
+    done = finished_outputs(works, args.overwrite)
+    rendered_report = report.render_report(works, done_outputs=done,
                                            non_images=non_images)
 
     if args.dry_run:

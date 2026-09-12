@@ -216,10 +216,21 @@ def test_models_ok_is_false_for_a_present_but_truncated_model(tmp_path, monkeypa
 
 def test_status_survives_a_model_it_cannot_read(tmp_path, monkeypatch):
     """doctor has to report, not crash -- and the raise has to stay the one
-    that names the fix, not a bare PermissionError from four frames down."""
+    that names the fix, not a bare PermissionError from four frames down.
+
+    The BINARY is installed here, and that is the whole of what the third
+    assertion needed. Without it `ensure_ready` raised from `find_upscayl`
+    before `find_models` was ever called -- and since both messages end in
+    `paperhanger setup`, the assertion passed against a function that never
+    reached the condition under test. So the message is checked for the
+    MODEL's name too.
+    """
     monkeypatch.delenv("PAPERHANGER_UPSCAYL_BIN", raising=False)
     monkeypatch.setenv("PATH", "")
     monkeypatch.setattr(toolchain, "DATA_HOME", tmp_path)
+    installed = tmp_path / "bin"
+    installed.mkdir()
+    (installed / toolchain.BINARY_NAME).write_text("#!/bin/sh\nexit 0\n")
     models = tmp_path / "models"
     models.mkdir()
     for name in toolchain.MODEL_FILES:
@@ -232,8 +243,13 @@ def test_status_survives_a_model_it_cannot_read(tmp_path, monkeypatch):
 
     assert toolchain.models_ok() is False
     assert toolchain.status()["models_ok"] is False
-    with pytest.raises(toolchain.ToolchainMissing, match="paperhanger setup"):
+    assert toolchain.find_upscayl() == installed / toolchain.BINARY_NAME
+
+    with pytest.raises(toolchain.ToolchainMissing, match="paperhanger setup") as raised:
         toolchain.ensure_ready()
+
+    assert toolchain.MODEL_NAME in str(raised.value), \
+        "the raise has to come from the model half, not from a missing binary"
 
 
 def test_ensure_ready_raises_when_the_binary_is_missing(tmp_path, monkeypatch):

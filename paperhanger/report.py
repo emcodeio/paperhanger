@@ -12,11 +12,30 @@ from . import bands, sizes
 SECONDS_PER_OUTPUT_MEGAPIXEL = 0.8
 
 
-def estimate_seconds(works) -> float:
-    """Total upscaler time. Per PHOTO, because the frame is enlarged once."""
+def _remaining(work, done_outputs) -> list:
+    """The plans of one photo this run would actually render."""
+    return [p for p in work.plans if p.destination not in done_outputs]
+
+
+def estimate_seconds(works, done_outputs=()) -> float:
+    """Total upscaler time. Per PHOTO, because the frame is enlarged once.
+
+    Charged over the plans still to render rather than all of them. The
+    executor runs a cropped copy of the work -- `run_and_archive` builds
+    `runnable` from the plans that survive skip-existing, and `needs_upscale`
+    is derived from those -- so a photo whose one upscaling plan is already on
+    disk starts no model run, while a photo with three of four outputs done
+    still pays for its frame exactly once.
+
+    The scoping is HERE rather than in the caller for the same reason the
+    outputs count is. A caller that filtered whole photos and left this to sum
+    over them could only ever round a half-finished photo to nothing or to
+    everything, and there is no note in a docstring that makes that right.
+    """
+    done = set(done_outputs)
     total = 0.0
     for work in works:
-        if work.needs_upscale:
+        if any(p.needs_upscale for p in _remaining(work, done)):
             total += SECONDS_PER_OUTPUT_MEGAPIXEL * work.upscale_output_pixels / 1_000_000
     return total
 
@@ -101,32 +120,40 @@ def _count(n: int, noun: str) -> str:
     return f"{n} {noun}" if n == 1 else f"{n} {noun}s"
 
 
-def render_report(works, already_done=(), non_images: int = 0) -> str:
-    """`already_done` is the set of source Paths already produced -- not a count.
+def render_report(works, done_outputs=(), non_images: int = 0) -> str:
+    """`done_outputs` is the set of DESTINATIONS already on disk -- not a count.
 
     A count could only ever inflate the header; it could never make the
     per-photo 'already done, skipping' line reachable. Task 12's CLI already
     computes this set to decide what to skip, so passing it here costs it
     nothing.
 
-    The header answers "what will THIS RUN do?", not "how much was there
-    originally?" -- so the estimate and the outputs count are taken over the
-    photos NOT already done. A photo whose outputs already exist costs
-    nothing and produces nothing this run, however large its own upscale
-    would have been.
+    Destinations rather than sources, which is the whole of the fix here. The
+    header answers "what will THIS RUN do?", not "how much was there
+    originally?" -- and a photo with three of its four outputs already
+    present will do ONE of them. Given only the set of finished SOURCES that
+    photo is not finished, so every one of its four plans was counted, and
+    the header promised four outputs where one was coming. Which photos are
+    wholly done is derivable from the destinations; the reverse is not, so
+    this is the parameter that can answer both questions.
     """
-    done = set(already_done)
-    pending = [w for w in works if w.source not in done]
+    done = set(done_outputs)
     rejected = sum(1 for w in works if w.rejected_everywhere)
-    outputs = sum(len(w.plans) for w in pending)
+    outputs = sum(len(_remaining(w, done)) for w in works)
+    # `w.plans and ...` because `all` over an empty sequence is True and a
+    # photo rejected on every device has no plans at all: without the guard
+    # it renders as "already done, skipping" while the header two lines up
+    # counts it as rejected.
+    finished = {w.source for w in works
+                if w.plans and not _remaining(w, done)}
     parts = [
         f"{_count(len(works), 'image')}, {_count(outputs, 'output')}, {rejected} rejected, "
-        f"{len(done)} already done, {_count(non_images, 'non-image')} skipped, "
-        f"{format_duration(estimate_seconds(pending))}",
+        f"{len(finished)} already done, {_count(non_images, 'non-image')} skipped, "
+        f"{format_duration(estimate_seconds(works, done))}",
         "",
     ]
     for work in works:
-        rendered = render_photo(work, already_done=work.source in done)
+        rendered = render_photo(work, already_done=work.source in finished)
         if rendered:
             parts.append(rendered)
     return "\n".join(parts)

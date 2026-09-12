@@ -180,8 +180,20 @@ def sample_run(tmp_path_factory):
                                   "--processing-dir", str(processing),
                                   str(inbox)])
 
+    stdout = captured.getvalue()
+    # Asserted HERE, not only in the one test that reads `exit_code`. This
+    # fixture is module-scoped and a dozen tests take it, so a run that failed
+    # arrives as a dozen confusing downstream failures -- missing outputs,
+    # originals still in the inbox, a summary that does not parse -- none of
+    # which names the reason. Failing in the fixture gives one failure with
+    # the run's own output attached to it.
+    assert exit_code == cli.OK, (
+        f"the sample run exited {exit_code}; every test below is reading the "
+        f"wreckage of it rather than testing anything.\n{stdout}"
+    )
+
     return SampleRun(inbox=inbox, processing=processing, exit_code=exit_code,
-                     stdout=captured.getvalue(), works=works)
+                     stdout=stdout, works=works)
 
 
 # ---------- the gate, on a machine that has never seen the photographs ----------
@@ -331,10 +343,21 @@ def test_a_4x_token_does_not_by_itself_mean_below_target(sample_run):
     katana = [p for p in _outputs(sample_run.processing)
               if p.name.startswith(BOTH_SIDES_OF_THE_BAND_BOUNDARY)]
     assert {NAME.search(p.name)["factor"] for p in katana} == {"4x"}
+
+    # By NAME, not by count. "one below and three not" is satisfied just as
+    # well by the filing being inverted per device -- the desktop plan full
+    # size and one phone slice in below_target -- which is the exact misfiling
+    # this test exists to rule out.
+    stem = BOTH_SIDES_OF_THE_BAND_BOUNDARY
     below = sorted(p.name for p in katana if p.parent.name == "below_target")
     full_size = sorted(p.name for p in katana if p.parent.name != "below_target")
-    assert len(below) == 1, below
-    assert len(full_size) == 3, full_size
+
+    assert below == [f"{stem}_desktop_7680x4320_4x.heic"], below
+    assert full_size == [
+        f"{stem}_center_phone_2880x4320_4x.heic",
+        f"{stem}_left_phone_2880x4320_4x.heic",
+        f"{stem}_right_phone_2880x4320_4x.heic",
+    ], full_size
 
 
 def test_the_three_slices_of_one_photo_are_three_different_pictures(sample_run):

@@ -197,8 +197,9 @@ def test_a_single_file_is_accepted(inbox, tmp_path, capsys):
 
 
 def test_a_finished_photo_is_reported_already_done(inbox, tmp_path, capsys):
-    """`already_done` is a SET OF SOURCES, not a count: a count can only ever
-    inflate the header, and `set(1)` raises."""
+    """`finished_outputs` is a SET OF DESTINATIONS, not a count: a count can
+    only ever inflate the header, and it cannot tell a photo three-quarters
+    done from one not started."""
     fixture(inbox / "lichen.png", 2000, 3000)
     processing = tmp_path / "p"
     destination = (processing / "to_sort_phone" / "below_target"
@@ -213,9 +214,10 @@ def test_a_finished_photo_is_reported_already_done(inbox, tmp_path, capsys):
 
 
 def test_a_rejected_photo_is_not_reported_already_done(inbox, tmp_path, capsys):
-    """`all()` over an empty sequence is True, and a photo rejected on every
-    device has no plans at all -- so the bare `all(p.destination.exists() ...)`
-    calls it finished while the header counts it as rejected."""
+    """A photo rejected on every device has no plans at all, so "nothing of
+    it is left to render" is vacuously true -- and without the `w.plans and`
+    guard in `render_report` it is called finished while the header two lines
+    up counts it as rejected."""
     fixture(inbox / "tiny.png", 100, 100)
     code, out = run(["--dry-run", "--processing-dir", str(tmp_path / "p"),
                      str(inbox)], capsys)
@@ -641,7 +643,8 @@ def test_every_skip_existing_decision_goes_through_one_function(
     monkeypatch.setattr(execute, "is_pending",
                         lambda target, overwrite=False: verdict)
 
-    assert (works[0].source in cli.already_done(works, False)) is done
+    finished = cli.finished_outputs(works, False)
+    assert all(p.destination in finished for p in works[0].plans) is done
     assert cli.upscaler_is_needed(works, False) is needs_model
 
     binary, models = ready_toolchain, ready_toolchain

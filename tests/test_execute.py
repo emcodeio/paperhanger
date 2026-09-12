@@ -1,3 +1,4 @@
+import shutil
 from dataclasses import replace
 from pathlib import Path
 
@@ -342,6 +343,46 @@ def test_a_band_3_plan_rendered_from_its_original_is_refused(tmp_path):
     with pytest.raises(imaging.ImagingError) as caught:
         execute.render(target, source, scale=1, workdir=tmp_path / "work")
     assert "1440x2160" in str(caught.value) and "2880x4320" in str(caught.value)
+    assert not target.destination.exists()
+    assert list(target.destination.parent.glob("*.partial")) == []
+
+
+@pytest.mark.parametrize("short_by", [(1, 0), (0, 1), (1, 1)])
+def test_a_frame_that_came_back_short_of_4x_is_refused(tmp_path, monkeypatch,
+                                                       short_by):
+    """Constraint 1's runtime enforcement, on the shape that can reach it.
+
+    Its whole guard was `test_a_band_3_plan_rendered_from_its_original_is_
+    refused` -- one assertion, on a caller mistake this codebase does not
+    make, for the constraint the plan lists first. This is the case that
+    arrives from outside: an enlargement that comes back a pixel short of
+    exactly 4x. `imaging.crop`'s bounds check catches a SHORT frame when the
+    scaled rect overruns it, but a plan whose rect happens to still fit gets
+    through to the resample with an input smaller than its planned output --
+    and sips would enlarge it, at exit 0, with the right dimensions and
+    invented detail nothing downstream could question.
+
+    One pixel short on each axis in turn, because `width < out_width or
+    height < out_height` is two comparisons and an `and` there would pass
+    both single-axis cases.
+    """
+    source = write_png(tmp_path / "s.png", 1440, 720)
+    work = plan.plan_photo(source, 1440, 720, "png", [sizes.PHONE], settings(tmp_path))
+    target = work.plans[0]
+    assert (target.out_width, target.out_height) == (1920, 2880)
+
+    short_w, short_h = short_by
+
+    def crop_short(source, rect, out_path):
+        write_png(out_path, rect.width - short_w, rect.height - short_h)
+
+    monkeypatch.setattr(imaging, "crop", crop_short)
+    stub_encoder(monkeypatch)
+
+    with pytest.raises(imaging.ImagingError, match="refusing to enlarge"):
+        execute.render(target, tmp_path / "frame.png", scale=4,
+                       workdir=tmp_path / "work")
+
     assert not target.destination.exists()
     assert list(target.destination.parent.glob("*.partial")) == []
 
@@ -880,6 +921,57 @@ def test_pixel_cap_falls_back_to_per_plan(tmp_path, fake_upscaler, monkeypatch):
                                                          target.out_height)
 
 
+@pytest.mark.parametrize("strategy", ["per plan", "whole frame"])
+def test_the_over_cap_line_is_printed_before_the_model_runs(
+        tmp_path, fake_upscaler, monkeypatch, strategy):
+    """The ORDERING, which was unpinned on both branches.
+
+    Moving either log below its enlargement passed all eight of the focused
+    cap tests, and the ordering IS the justification: this is the slowest
+    photo shape the tool has -- up to 622 Mpx of output, several minutes --
+    and the line exists to explain a pause, not to record it afterwards.
+    Printed second, "deciding to keep the whole frame" and "the run has
+    stopped" look identical for the length of the pause.
+
+    Both branches, because they are two separate log statements and a fix
+    applied to one says nothing about the other. The whole-frame branch needs
+    a cropless upscaling plan to reach it: 1280x800 across both devices is
+    one cropless desktop band 4 plus three phone slices, the same fixture
+    `test_over_the_cap_a_cropless_plan_keeps_the_whole_frame` uses.
+    """
+    if strategy == "per plan":
+        shape, devices = (1440, 720), [sizes.PHONE]
+        expected = "falling back to per-plan upscaling"
+    else:
+        shape, devices = (1280, 800), list(sizes.DEVICES)
+        expected = "upscaling it anyway"
+
+    source = write_png(tmp_path / "s.png", *shape)
+    work = plan.plan_photo(source, *shape, "png", devices, settings(tmp_path))
+    assert work.needs_upscale
+    cropless = any(p.crop is None for p in work.plans if p.needs_upscale)
+    assert cropless is (strategy == "whole frame")
+    monkeypatch.setattr(execute, "UPSCALE_PIXEL_CAP", 1_000_000)
+
+    events = []
+    for name in ("upscale",):
+        real = getattr(imaging, name)
+
+        def enlarge(*args, _real=real, **kwargs):
+            events.append("model")
+            return _real(*args, **kwargs)
+
+        monkeypatch.setattr(imaging, name, enlarge)
+
+    ctx = context(tmp_path, fake_upscaler)
+    ctx.log = lambda message: events.append(message)
+    execute.run_photo(work, ctx)
+
+    assert events, "the cap fired, so something should have been said"
+    assert expected in events[0], events[0]
+    assert "model" in events[1:], "the enlargement must come after the line"
+
+
 def test_the_cap_is_measured_against_the_4x_output(tmp_path, fake_upscaler,
                                                    monkeypatch):
     """The cap is 300 Mpx of ENLARGEMENT, not of source. Compared against the
@@ -1218,7 +1310,21 @@ def import_dir(tmp_path) -> Path:
     return inbox
 
 
-def test_archive_moves_to_originals_on_success(tmp_path, fake_upscaler):
+def test_archive_moves_to_originals_on_success(tmp_path, fake_upscaler,
+                                               monkeypatch):
+    """And it RENAMES. Every other archive test forces the copy branch with
+    `refuse_to_rename`, so the same-volume fast path -- which is what every
+    real run takes, and the reason `_move` tries the rename first -- was
+    pinned by nothing. An edit making every archive a full file copy passed
+    the suite; on a 24-hour import over 894 originals that is the difference
+    between a metadata operation and rewriting the corpus.
+    """
+    copies = []
+    real_copy = shutil.copy2
+    monkeypatch.setattr(shutil, "copy2",
+                        lambda src, dst, **kw: copies.append(Path(src))
+                        or real_copy(src, dst, **kw))
+
     source = write_png(import_dir(tmp_path) / "ok.png", 2000, 3000)
     work = plan.plan_photo(source, 2000, 3000, "png", [sizes.PHONE], settings(tmp_path))
     ctx = context(tmp_path, fake_upscaler)
@@ -1226,6 +1332,7 @@ def test_archive_moves_to_originals_on_success(tmp_path, fake_upscaler):
     assert result.outcome == execute.OK
     assert not source.exists()
     assert (ctx.processing_dir / "originals" / "ok.png").exists()
+    assert copies == [], "one volume: the move is a rename, not a copy"
 
 
 def test_rejected_everywhere_goes_to_error(tmp_path, fake_upscaler):

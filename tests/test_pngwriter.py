@@ -1,5 +1,7 @@
 import subprocess
 
+import pytest
+
 from tests.pngwriter import write_png
 
 
@@ -46,3 +48,17 @@ def test_noise_differs_from_flat(tmp_path):
     write_png(flat, 64, 64)
     write_png(noisy, 64, 64, noise=True)
     assert flat.read_bytes() != noisy.read_bytes()
+
+
+@pytest.mark.parametrize("width,height", [(0, 10), (10, 0), (0, 0), (-1, 10)])
+def test_a_degenerate_size_is_refused(tmp_path, width, height):
+    """The guard nothing exercised, and the reason it is there: IHDR happily
+    encodes a zero, so without it the writer produces a file that is a valid
+    PNG by structure and that no decoder will read -- and the test asking for
+    it fails somewhere else entirely, holding a fixture instead of a size."""
+    path = tmp_path / "degenerate.png"
+
+    with pytest.raises(ValueError, match=">= 1"):
+        write_png(path, width, height)
+
+    assert not path.exists(), "and it refuses before writing"

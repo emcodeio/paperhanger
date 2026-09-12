@@ -237,13 +237,29 @@ def crop(source, rect, out_path) -> None:
 
     Rects that sips would silently mis-crop go the long way round -- fact 6.
 
-    ALWAYS writes PNG, whatever `out_path` is named. A crop is an intermediate
-    that something else will resize and encode, so spending a lossy generation
-    on it would undo exactly what band 2 exists to protect -- measured at about
-    40.5 dB with a max channel error of 78 for a JPEG source. Name `out_path`
-    with a .png suffix; sips otherwise keeps the SOURCE's format regardless of
-    the suffix, so a .png name is no guarantee of PNG bytes.
+    ALWAYS writes PNG, whatever `out_path` is named, and REFUSES a name that
+    says otherwise. A crop is an intermediate that something else will resize
+    and encode, so spending a lossy generation on it would undo exactly what
+    band 2 exists to protect -- measured at about 40.5 dB with a max channel
+    error of 78 for a JPEG source.
+
+    The suffix rule used to be a docstring asking callers to pass `.png`, and
+    a docstring is not a check: handed `out.jpg` this writes PNG bytes into
+    it, sips warns `Output file suffix should be jpg` on stderr, and the zero
+    exit discards the warning. Every downstream reader then goes by the name.
+    It is the mirror of the same trap on the way in -- without `-s format`
+    sips keeps the SOURCE's format whatever the `--out` suffix says, so a
+    `.png` name is no guarantee of PNG bytes either, which is why both
+    branches pass `-s format png` explicitly.
     """
+    out_path = Path(out_path)
+    if out_path.suffix.lower() != ".png":
+        raise ImagingError(
+            f"crop always writes PNG bytes; {out_path.name} names itself "
+            f"{out_path.suffix or 'nothing'} and every reader downstream "
+            f"would believe the name"
+        )
+
     measured = probe(source)
     if measured is None:
         raise ImagingError(f"cannot crop {source}: not a readable image")

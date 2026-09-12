@@ -1,3 +1,4 @@
+from dataclasses import fields
 from pathlib import Path
 
 import pytest
@@ -69,7 +70,39 @@ def test_desktop_downscale_plan(tmp_path):
     assert p.crop is None and p.position is None
     assert p.destination.name == "cliffs_desktop_7680x5120_native.heic"
     assert p.destination.parent == tmp_path / "processing" / "to_sort_desktop"
-    assert not p.needs_upscale
+    assert not p.needs_upscale and p.needs_resize
+    assert p.fmt == "heic" and p.quality == 80
+
+
+@pytest.mark.parametrize("fmt,quality", [("heic", 80), ("jpeg", 90),
+                                         ("avif", 85), ("png", None)])
+def test_the_settings_quality_reaches_every_plan(tmp_path, fmt, quality):
+    """`OutputPlan.quality` was asserted nowhere in this file: replacing
+    `quality=opts.quality` with a literal `None` in `_make_plan` left all
+    nineteen planner tests green, and the encode would then have run at the
+    format's own default instead of the one the user asked for.
+
+    Every format, because a single row would equally well pin a hardcoded
+    literal. A crop photo, so the three slices are checked too -- they go
+    through the same `_make_plan` but by a different branch.
+    """
+    opts = settings(tmp_path, fmt)
+    assert opts.quality == quality
+
+    work = plan.plan_photo(Path("/src/ocean.jpg"), 4000, 3000, fmt,
+                           list(sizes.DEVICES), opts)
+
+    assert len(work.plans) == 4
+    assert all(p.quality == quality for p in work.plans)
+    assert all(p.fmt == fmt for p in work.plans)
+
+
+def test_a_quality_override_reaches_every_plan(tmp_path):
+    """And it is the OVERRIDE, not the default, that arrives."""
+    opts = settings(tmp_path, "jpeg", quality=55)
+    work = plan.plan_photo(Path("/src/cliffs.jpg"), 9216, 6144, "jpeg",
+                           [sizes.DESKTOP], opts)
+    assert [p.quality for p in work.plans] == [55]
 
 
 def test_below_target_goes_to_the_subfolder(tmp_path):
@@ -80,6 +113,11 @@ def test_below_target_goes_to_the_subfolder(tmp_path):
     assert (p.out_width, p.out_height) == (6000, 3750)
     assert p.destination.parent.name == "below_target"
     assert p.destination.name == "lichen_desktop_6000x3750_native.heic"
+    # Band 2 is the one band that does neither. Asserted here because it was
+    # asserted nowhere: the other three bands each pin their pair, and NATIVE
+    # -- the band that keeps the user's real pixels untouched -- did not.
+    assert not p.needs_upscale and not p.needs_resize
+    assert p.factor_token == "native" and p.factor is None
 
 
 def test_upscale_reduce_plan_records_the_net_factor(tmp_path):
@@ -163,8 +201,16 @@ def test_plans_are_flat(tmp_path):
     work = plan.plan_photo(Path("/src/square.jpg"), 4000, 4000, "jpeg",
                            list(sizes.DEVICES), settings(tmp_path))
     assert isinstance(work.plans, list)
+    # `not hasattr(p, "children")` was the check here, and an OutputPlan is a
+    # frozen dataclass with a fixed field list: it can never have a `children`
+    # attribute, whatever the planner does. This asks the real question --
+    # that no plan HOLDS plans, under any field name.
     for p in work.plans:
-        assert not hasattr(p, "children")
+        assert isinstance(p, plan.OutputPlan)
+        nested = [f.name for f in fields(p)
+                  if isinstance(getattr(p, f.name),
+                                (plan.OutputPlan, list, tuple, dict, set))]
+        assert not nested, f"a plan holding plans is the tree section 6 removed: {nested}"
     assert len(work.plans) == 6   # three desktop slices, three phone slices
     assert [p.position for p in work.plans] == [
         "top", "middle", "bottom", "left", "center", "right"]
