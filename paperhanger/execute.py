@@ -221,9 +221,11 @@ def _upscale_one_plan(target, work, ctx, workdir) -> Path:
     to convert a third of an image than all of it, and sips carries the
     source's profile into the crop untouched.
 
-    Named per plan: one photo's three slices share this workdir, and in this
-    branch two of them can be alive at once only if something goes wrong -- but
-    a collision would then have one plan overwriting another's enlargement.
+    Every intermediate is named after the plan, because one photo's three
+    slices share this workdir. The caller drops each enlargement before it asks
+    for the next, so a shared name would work today; it would also mean that
+    the first time it stops holding, one plan silently renders another plan's
+    region at exactly the right size, and nothing would raise.
     """
     stem = target.destination.stem
     normalized = workdir / f"norm_{stem}.png"
@@ -304,11 +306,11 @@ def run_photo(work, ctx) -> list:
         return written
     finally:
         # Both, and on every path out. The frame is the largest thing the tool
-        # makes -- 5760x2880 for the cheapest photo that needs one -- and
-        # holding all 756 of a run's frames to process exit would want about
-        # 114 GB against 28 GB free. rmtree covers the frame as well, but
-        # unlinking it first keeps the one file that matters most from
-        # depending on the sweep that follows.
+        # makes -- sixteen times the pixels of the source, as PNG -- and holding
+        # all 756 of a run's frames to process exit would want about 114 GB
+        # against 28 GB free. rmtree covers the frame as well, but unlinking it
+        # first keeps the one file that matters most from depending on the
+        # sweep that follows.
         if frame is not None:
             frame.unlink(missing_ok=True)
         shutil.rmtree(workdir, ignore_errors=True)

@@ -832,6 +832,38 @@ def test_enlarged_frame_is_deleted_after_the_last_plan(tmp_path, fake_upscaler):
 
 
 @pytest.mark.parametrize("strategy", ["whole frame", "per plan"])
+def test_one_enlargement_is_alive_at_a_time(tmp_path, fake_upscaler, monkeypatch,
+                                            strategy):
+    """Peak occupancy, which is a different question from what survives.
+
+    The workdir is swept when the photo finishes whatever happens, so every
+    other test here passes with all three of the fallback's enlargements kept
+    alive until then -- and three regions held at once gives back most of what
+    the cap was imposed to save. This watches the workdir as each plan starts
+    instead: one enlargement, the one about to be read.
+    """
+    source = write_png(tmp_path / "s.png", 1440, 720)
+    work = plan.plan_photo(source, 1440, 720, "png", [sizes.PHONE], settings(tmp_path))
+    if strategy == "per plan":
+        monkeypatch.setattr(execute, "UPSCALE_PIXEL_CAP", 1)
+
+    alive = []
+    real = execute.render
+
+    def spy(target, source_image, scale, workdir):
+        alive.append(sorted(p.name for p in Path(workdir).iterdir() if p.is_file()))
+        return real(target, source_image, scale, workdir=workdir)
+
+    monkeypatch.setattr(execute, "render", spy)
+    ctx = context(tmp_path, fake_upscaler)
+    ctx.log = lambda message: None
+    execute.run_photo(work, ctx)
+
+    assert len(alive) == 3
+    assert all(len(held) == 1 for held in alive), f"{strategy}: {alive}"
+
+
+@pytest.mark.parametrize("strategy", ["whole frame", "per plan"])
 def test_a_failed_plan_still_takes_the_frame_with_it(tmp_path, fake_upscaler,
                                                      monkeypatch, strategy):
     """A photo that dies mid-render must not leave its enlargement behind.
