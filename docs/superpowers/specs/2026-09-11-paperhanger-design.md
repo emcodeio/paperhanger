@@ -379,10 +379,16 @@ down the widest-gap slice, in 128-row bands of its 1280 rows:
 | 1024-1151 | 215.9 | 222.4 | 0.586 |
 | 1152-1279 | 500.4 | 601.5 | 5.789 |
 
-The two outputs are **bit-identical over the first 60% of the slice** and diverge only as the
-cut edge approaches: the last 128 rows, 10% of the slice, carry **93.9%** of per-slice's extra
-squared error, and the last 256 rows carry 99.9%. Divergence begins 512 output rows from the
-cut — 128 rows of model input, a tile-scale distance — and is strictly zero beyond it.
+The two outputs are **bit-identical for the first 800 rows — 62.5% of the slice** — and
+diverge only as the cut edge approaches: the last 128 rows, 10% of the slice, carry **93.9%**
+of per-slice's extra squared error, and the last 256 rows carry 99.9%. Divergence begins 480
+output rows from the cut — 120 rows of model input, a tile-scale distance — and is strictly
+zero beyond it. (The band table's first row stops at 767 because that is a band boundary, not
+because row 768 differs; identity runs to row 799.)
+
+The smaller window says the same thing more sharply. On its 900-row slice the arms are
+bit-identical for 800 rows, 88.9%, and the last 128 rows carry **100.0%** of the deficit — two
+independent window sizes, both confining the whole difference to a tile's depth at the cut.
 
 That is the mechanism, and it favours the design for a reason that generalises past this
 experiment: **in production, every cut edge of a whole-frame slice has frame context behind it,
@@ -462,8 +468,10 @@ itself.** The test writes the two arms, the truth slice and a pair of auto-level
 images, which show *where* the arms disagree but not by how much, and it calculates no
 statistics. So these were measured separately, from those committed PNGs, with `magick`: the
 widest-gap image's 38.71 dB between the arms and its 4.623 and 4.800 mean absolute errors
-against truth; the whole band table and everything drawn from it — the bit-identical first 60%,
-the 93.9% and 99.9% squared-error shares, the 512-row divergence distance. Also attributed,
+against truth; the whole band table and everything drawn from it — the bit-identical first 800
+rows, the 93.9% and 99.9% squared-error shares, the 480-row divergence distance, and the second
+window's 88.9% and 100.0%. All of those were recomputed independently from the committed
+artifacts by the controller, agreeing with the implementer's arithmetic to the digit. Also attributed,
 from the earlier arms-against-each-other work and likewise not recomputed by any test: the
 per-row edge range, the interior mean, its squared-error shares, the one-pixel-offset figure,
 both trim figures, the pinned-`-t` triple, and the 0.2898 → 0.0232 noise-flattening figures.
