@@ -86,6 +86,20 @@ def test_slices_are_disjoint_for_tall_sources():
     assert top.y + top.height <= bottom.y
 
 
+def test_horizontal_thirds_refuses_a_source_it_cannot_slice():
+    """1000x500: the 16:10 slice would be 625 tall in a 500-tall source.
+    The planner only calls this when width <= height, so reaching here is a
+    caller bug — it must fail loudly rather than return a negative offset."""
+    with pytest.raises(ValueError, match="too wide"):
+        geometry.horizontal_thirds(1000, 500)
+
+
+def test_vertical_thirds_refuses_a_source_it_cannot_slice():
+    """500x1000: the 2:3 slice would be 667 wide in a 500-wide source."""
+    with pytest.raises(ValueError, match="too tall"):
+        geometry.vertical_thirds(500, 1000)
+
+
 def test_scaled_rect_multiplies_every_field():
     """Needed by the executor: a slice cut from a 4x frame sits at 4x offsets."""
     rect = geometry.Rect(x=100, y=200, width=300, height=400)
