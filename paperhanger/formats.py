@@ -22,7 +22,13 @@ def extension(fmt: str) -> str:
     try:
         return EXTENSIONS[fmt]
     except KeyError:
-        raise ValueError(f"unknown format: {fmt!r}; expected one of {', '.join(FORMATS)}")
+        # `from None` because the CLI prints this message to a user. Chained,
+        # it arrives as "During handling of the above exception..." with a
+        # bare KeyError above it -- an implementation detail of this lookup,
+        # in the place a person is looking for what to type instead.
+        raise ValueError(
+            f"unknown format: {fmt!r}; expected one of {', '.join(FORMATS)}"
+        ) from None
 
 
 def quality_for(fmt: str, override=None):

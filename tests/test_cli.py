@@ -823,9 +823,18 @@ def test_a_rejected_photo_goes_to_error_and_the_run_succeeds(
 
 def test_a_rejected_photo_whose_archive_fails_is_still_counted_rejected(
         inbox, tmp_path, capsys):
-    """Its outcome is FAILED, because the move it needed did not happen.
-    Reading rejection from the outcome would lose the one fact that explains
-    why the photo produced nothing."""
+    """Its outcome cannot be REJECTED, because the move it needed did not
+    happen. Reading rejection from the outcome would lose the one fact that
+    explains why the photo produced nothing, so the summary reads it from the
+    plan instead and reports the photo under both headings.
+
+    PARTIAL, not FAILED. Nothing about the photo failed: it was measured,
+    classified and turned down, and only the move into error/ went wrong.
+    FAILED describes a photo sips could not read, which is a different
+    problem with a different fix. The line beside it names error/ rather than
+    just "archive", which is the only thing left saying the photo was
+    rejected rather than processed.
+    """
     fixture(inbox / "tiny.png", 100, 100)
     processing = tmp_path / "processing"
     processing.mkdir()
@@ -834,6 +843,8 @@ def test_a_rejected_photo_whose_archive_fails_is_still_counted_rejected(
     assert code == 2
     assert "1 rejected" in summary_line(out)
     assert "1 failed" in summary_line(out)
+    assert "[1/1] tiny.png: partial" in out
+    assert "could not move tiny.png to error/" in out
     assert (inbox / "tiny.png").exists(), "a failed archive leaves the source alone"
 
 
@@ -943,6 +954,12 @@ def interrupt_on(monkeypatch, stem: str):
     this photo and everything behind it does not start -- without pretending
     to reproduce the executor's own interrupt safety, which `run_photo`'s
     `finally` clauses own and test_execute covers.
+
+    The named photo counts as INTERRUPTED PARTWAY rather than never started,
+    even though nothing of it ran. That is deliberate and it is what the CLI
+    can honestly say: the signal arrived while this photo was the one being
+    worked on, and where inside it the signal landed is not something any
+    caller of `run_and_archive` can know.
     """
     real = execute.run_and_archive
 
@@ -970,7 +987,10 @@ def test_ctrl_c_prints_a_summary_instead_of_a_traceback(
     assert code == 130
     assert summary_line(out).startswith(cli.SUMMARY_INTERRUPTED)
     assert "1 ok" in summary_line(out)
-    assert "2 never started" in summary_line(out)
+    # b was in flight when the signal arrived; only c was never started.
+    assert "1 interrupted partway" in summary_line(out)
+    assert "1 never started" in summary_line(out)
+    assert "partway through b.png" in out
     # What photo 1 produced is complete, and its original was archived.
     assert (processing / "to_sort_phone" / "below_target"
             / "a_phone_2000x3000_native.png").exists()
@@ -992,7 +1012,64 @@ def test_ctrl_c_names_what_finished(inbox, tmp_path, no_upscaler,
     assert "[2/3] b.png: ok" in out
     assert "[3/3] c.png" not in out
     assert "2 ok" in summary_line(out)
-    assert "1 never started" in summary_line(out)
+    assert "1 interrupted partway" in summary_line(out)
+    assert "0 never started" in summary_line(out)
+
+
+def test_a_photo_the_signal_landed_inside_is_not_called_never_started(
+        inbox, tmp_path, no_upscaler, monkeypatch, capsys):
+    """The lie this replaces, stated as its own test.
+
+    `_run_batch` lets KeyboardInterrupt propagate, so the photo it was working
+    on produces no `PhotoResult` and used to fall into `len(works) -
+    len(results)` -- "never started", about the one photo the run had
+    definitely started, in the one line someone reads to work out what they
+    just interrupted.
+
+    Two photos and the interrupt on the second, so the old reading and the
+    new one differ by the whole count: everything not finished used to be
+    "1 never started", and the truth is that nothing was never started.
+    """
+    fixture(inbox / "a.png", 2000, 3000)
+    fixture(inbox / "b.png", 2000, 3000)
+    interrupt_on(monkeypatch, "b")
+
+    code, out = run(["-p", "--format", "png", "--processing-dir",
+                     str(tmp_path / "processing"), str(inbox)], capsys)
+
+    assert code == 130
+    assert "0 never started" in summary_line(out)
+    assert "1 interrupted partway" in summary_line(out)
+    assert "partway through b.png" in out
+
+
+def test_a_finished_photo_is_never_counted_as_interrupted(tmp_path):
+    """Guards the guard, and covers the wider half of the old lie.
+
+    The record goes into `in_flight` before the photo starts and comes out
+    once its result is in `results` -- one statement apart, and an interrupt
+    landing between the two leaves the source in BOTH lists. The photo
+    finished: its outputs are on disk and its original is archived. Counted
+    from `in_flight` alone it would be reported as ok AND as interrupted,
+    which is a worse lie than the "never started" this replaces, so the
+    record is filtered against the results rather than trusted.
+
+    Driven through `_summary` directly because the window is one statement
+    wide and no fixture can land inside it on purpose.
+    """
+    from paperhanger import plan
+
+    source = Path("/src/a.png")
+    opts = plan.OutputSettings(tmp_path / "proc", "png", None)
+    works = [plan.plan_photo(source, 2000, 3000, "png", [sizes.PHONE], opts)]
+    results = [execute.PhotoResult(source=source, outcome=execute.OK)]
+
+    line = cli._summary(works, results, interrupted=True, in_flight=[source])
+
+    assert "1 ok" in line
+    assert "interrupted partway" not in line
+    assert "0 never started" in line
+    assert cli._interrupted_photos(results, [source]) == []
 
 
 def test_an_interrupted_run_does_not_count_rejections_it_never_reached(
@@ -1014,7 +1091,8 @@ def test_an_interrupted_run_does_not_count_rejections_it_never_reached(
     assert code == 130
     assert "0 ok" in summary_line(out)
     assert "0 rejected" in summary_line(out)
-    assert "2 never started" in summary_line(out)
+    assert "1 interrupted partway" in summary_line(out)
+    assert "1 never started" in summary_line(out)
     assert "1 rejected" in out, "the report header still describes the plan"
 
 
@@ -1060,6 +1138,107 @@ def test_a_second_ctrl_c_while_reporting_does_not_claim_nothing_happened(
     assert code == 130
     assert "[1/1] lichen.png: ok" in out
     assert "before any photo was touched" not in out
+
+
+def test_an_interrupt_during_the_scratch_sweep_does_not_claim_nothing_happened(
+        inbox, tmp_path, no_upscaler, monkeypatch, capsys):
+    """`workroot.rmdir()` used to sit BETWEEN the two interrupt handlers.
+
+    The batch's handler ends at the batch and the reporting handler began
+    after the sweep, so this one statement was covered by neither -- and it
+    is where a second Ctrl-C most plausibly lands, immediately after the
+    first. The interrupt reached `main`, whose message says no photo was
+    touched, over a screen of progress lines saying otherwise.
+    """
+    fixture(inbox / "a.png", 2000, 3000)
+
+    def interrupt(self):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(Path, "rmdir", interrupt)
+
+    code, out = run(["-p", "--format", "png", "--processing-dir",
+                     str(tmp_path / "processing"), str(inbox)], capsys)
+
+    assert code == 130
+    assert "[1/1] a.png: ok" in out
+    assert "before any photo was touched" not in out
+
+
+def test_scratch_left_by_a_hard_kill_is_reported_rather_than_swallowed(
+        inbox, tmp_path, no_upscaler, capsys):
+    """A SIGKILL mid-upscale strands a 4x frame of several gigabytes.
+
+    `sweep_partials` clears `*.partial` from the processing tree at startup
+    and nothing sweeps `.work` at all, so the OSError from a non-empty rmdir
+    being swallowed meant no later run would ever remove that frame OR
+    mention it. Reported rather than swept: two runs against one processing
+    directory would otherwise delete each other's live intermediates.
+    """
+    fixture(inbox / "a.png", 2000, 3000)
+    processing = tmp_path / "processing"
+    stranded = processing / cli.WORKROOT_NAME / "killed"
+    stranded.mkdir(parents=True)
+    (stranded / "frame_4x.png").write_text("several gigabytes, pretend")
+
+    code, out = run(["-p", "--format", "png", "--processing-dir",
+                     str(processing), str(inbox)], capsys)
+
+    assert code == 0, "residue from an earlier run is a note, not a failure"
+    assert cli.WORKROOT_NAME in out and "left in place" in out
+    assert "killed" in out, "name what is in there"
+    assert stranded.exists(), "and leave it where a human can find it"
+
+
+def test_a_clean_run_says_nothing_about_its_scratch(
+        inbox, tmp_path, no_upscaler, capsys):
+    """Guards the guard: the note above must be reachable only by residue."""
+    fixture(inbox / "a.png", 2000, 3000)
+    processing = tmp_path / "processing"
+
+    code, out = run(["-p", "--format", "png", "--processing-dir",
+                     str(processing), str(inbox)], capsys)
+
+    assert code == 0
+    assert "left in place" not in out
+    assert not (processing / cli.WORKROOT_NAME).exists()
+
+
+def test_an_interrupted_setup_does_not_talk_about_photos(monkeypatch, capsys):
+    """"before any photo was touched" is a non sequitur during `setup`.
+
+    No photo was ever in play, and setup is the slowest thing here to be
+    interrupted in -- it downloads about 60 MB. What the user needs to know
+    is whether anything was left half-installed, which is a different
+    sentence.
+    """
+    def interrupted(*args, **kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli.toolchain, "setup", interrupted)
+
+    code, out = run(["setup"], capsys)
+
+    assert code == 130
+    assert "photo" not in out
+    assert "paperhanger setup" in out and "run it again" in out
+
+
+def test_an_interrupted_run_still_talks_about_photos(
+        inbox, tmp_path, monkeypatch, capsys):
+    """Guards the guard: the batch's own message must not have gone with it."""
+    fixture(inbox / "a.png", 2000, 3000)
+
+    def interrupted(path):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli.imaging, "probe", interrupted)
+
+    code, out = run(["-p", "--processing-dir", str(tmp_path / "p"), str(inbox)],
+                    capsys)
+
+    assert code == 130
+    assert "before any photo was touched" in out
 
 
 def test_a_routing_bug_still_escapes_the_interrupt_handler(
@@ -1145,6 +1324,36 @@ def test_a_stranded_probe_cannot_defeat_the_writability_check(
     assert code == 1
     assert "cannot write to" in error_block(out)
     assert "[1/1]" not in out
+
+
+def test_a_stranded_probe_in_a_writable_directory_is_not_called_unwritable(
+        inbox, tmp_path, capsys):
+    """The message, not the refusal.
+
+    `touch(exist_ok=False)` raises FileExistsError, and folding that into the
+    general branch produced `cannot write to <dir>: [Errno 17] File exists` --
+    a diagnosis flatly contradicted by the error printed beside it. The
+    directory here is perfectly writable; what is taken is the probe's own
+    name, stranded by a run with this same pid that was hard-killed between
+    the touch and the unlink.
+    """
+    fixture(inbox / "lichen.png", 2000, 3000)
+    processing = tmp_path / "processing"
+    processing.mkdir()
+    probe = cli.probe_path(processing)
+    probe.touch()
+
+    code, out = run(["-p", "--format", "png", "--processing-dir",
+                     str(processing), str(inbox)], capsys)
+
+    assert code == 1
+    complaint = error_block(out)
+    assert probe.name in complaint
+    assert "cannot write to" not in complaint, \
+        "the directory is writable; saying otherwise sends the user to check " \
+        "permissions that were never the problem"
+    # Cleared, so the sentence telling them to run again is true.
+    assert not probe.exists()
 
 
 def test_the_probe_name_is_unique_to_this_process(tmp_path):

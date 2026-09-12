@@ -569,14 +569,22 @@ def cheapest_first(works):
     return sorted(works, key=lambda w: (w.needs_upscale, w.upscale_output_pixels))
 
 
-def _unfinished(result) -> str:
-    """PARTIAL if the photo produced anything, FAILED if it produced nothing.
+def _unfinished(result, rejected: bool = False) -> str:
+    """PARTIAL if the photo got where it was going, FAILED if it did not.
 
     Both leave the source in place. They are told apart because a report that
     calls them the same thing cannot distinguish one flaky slice from a photo
     sips will never read at all, and only one of those is worth a second run.
+
+    `rejected` is the third way of getting there. A photo too small for every
+    device has no outputs by definition, so `written or skipped` reads it as
+    a total failure -- but nothing about it failed. It was measured,
+    classified and turned down, and the only thing that went wrong was the
+    move into error/. Reporting that as FAILED describes a photo sips could
+    not read, which is a different problem with a different fix, and it was
+    the one outcome in which the report lost the rejection entirely.
     """
-    return PARTIAL if (result.written or result.skipped) else FAILED
+    return PARTIAL if (result.written or result.skipped or rejected) else FAILED
 
 
 def run_and_archive(work, ctx) -> PhotoResult:
@@ -686,6 +694,15 @@ def run_and_archive(work, ctx) -> PhotoResult:
         # photo's permissions should not end an import with twenty hours left
         # to go. The outcome changes with it: a caller that saw OK here would
         # believe the original had been dealt with.
-        result.failures.append(f"could not archive {work.source.name}: {error}")
-        result.outcome = _unfinished(result)
+        #
+        # The message names the DESTINATION directory, which is the only
+        # thing left saying whether this photo was rejected or produced
+        # wallpapers: the outcome below can no longer be REJECTED, since the
+        # original did not reach error/. `rejected=` is what keeps it from
+        # being called FAILED, which would describe a photo sips could not
+        # read. Passed only here -- a rejected photo has no plans, so the
+        # earlier `_unfinished` call is unreachable for one.
+        result.failures.append(
+            f"could not move {work.source.name} to {destination.name}/: {error}")
+        result.outcome = _unfinished(result, rejected=work.rejected_everywhere)
     return result

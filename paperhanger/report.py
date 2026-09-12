@@ -56,7 +56,15 @@ def render_photo(work, already_done: bool = False) -> str:
         return f" {name:<34} already done, skipping"
 
     if work.rejected_everywhere:
-        return f" {name:<34} reject (too small for both)"
+        # "both" only when both were actually asked. A `-d` run printing
+        # "too small for both" about a photograph that would make a perfectly
+        # good phone wallpaper states a conclusion the run never reached, and
+        # states it about the user's own file -- which is also how they would
+        # decide not to try it on a phone. Task 11 asked for this and the
+        # implementation flattened it.
+        where = "both" if len(work.rejected_devices) > 1 \
+            else work.rejected_devices[0]
+        return f" {name:<34} reject (too small for {where})"
 
     lines = []
     note = ""

@@ -12,6 +12,7 @@ and rename onto it only once the bytes are complete and, for downloads, hashed.
 """
 
 import hashlib
+import http.client
 import os
 import shutil
 import stat
@@ -74,24 +75,48 @@ def verify_sha256(path, expected: str) -> bool:
     return sha256(path) == expected.lower()
 
 
+# Per READ, not for the whole transfer: the binary is about 60 MB and a slow
+# connection is not a broken one. What this bounds is silence. Without it a
+# stalled connection hangs `paperhanger setup` -- the first command the README
+# tells a new user to run -- forever, after printing `downloading upscayl-bin
+# ...` and with nothing to say whether it is working.
+DOWNLOAD_TIMEOUT = 60
+
+
 def download_verified(url: str, target: Path, expected_sha256: str) -> Path:
-    """Fetch `url` to `target`, then verify. A mismatch deletes the file."""
+    """Fetch `url` to `target`, then verify. A mismatch deletes the file.
+
+    One `finally` rather than a cleanup per failure. The unzip below already
+    worked that way and this did not, so the two disagreed about exactly one
+    case -- and it is the case that matters, because it is the one a user
+    causes: a Ctrl-C during the download left the `.partial` behind, since
+    KeyboardInterrupt is not an OSError. After `replace` the partial is gone,
+    so the unlink is a no-op on the success path.
+
+    `http.client.HTTPException` alongside OSError because IncompleteRead --
+    a server closing the connection early, the realistic way a 60 MB fetch
+    dies -- is an HTTPException and a ValueError, and neither is an OSError.
+    Uncaught it escaped as a bare traceback out of the tool's first command.
+    """
     target.parent.mkdir(parents=True, exist_ok=True)
     partial = target.with_suffix(target.suffix + ".partial")
     try:
-        with urllib.request.urlopen(url) as response, open(partial, "wb") as out:
-            shutil.copyfileobj(response, out)
-    except OSError as error:
-        partial.unlink(missing_ok=True)
-        raise ToolchainError(f"could not fetch {url}: {error}") from error
+        try:
+            with urllib.request.urlopen(url, timeout=DOWNLOAD_TIMEOUT) as response, \
+                    open(partial, "wb") as out:
+                shutil.copyfileobj(response, out)
+        except (OSError, http.client.HTTPException) as error:
+            raise ToolchainError(f"could not fetch {url}: {error}") from error
 
-    if not verify_sha256(partial, expected_sha256):
-        actual = sha256(partial)
+        if not verify_sha256(partial, expected_sha256):
+            actual = sha256(partial)
+            raise ToolchainError(
+                f"sha256 mismatch for {url}\n  expected {expected_sha256}\n"
+                f"  got      {actual}"
+            )
+        partial.replace(target)
+    finally:
         partial.unlink(missing_ok=True)
-        raise ToolchainError(
-            f"sha256 mismatch for {url}\n  expected {expected_sha256}\n  got      {actual}"
-        )
-    partial.replace(target)
     return target
 
 
@@ -197,7 +222,16 @@ def setup(log=print) -> dict:
     # Outside the branch: a binary that lost its +x bit is repaired by the
     # command we tell people to run, instead of reporting "already installed"
     # and failing later with a PermissionError out of the upscaler.
-    binary.chmod(binary.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    #
+    # Conditional, because `chmod` on a file you do not own raises whether or
+    # not it would change anything -- so chmod-ing unconditionally meant that
+    # a shared or root-owned install turned the command advertised as the fix
+    # into the thing that failed. Repairing a missing bit is worth that risk;
+    # re-setting a bit that is already there is not.
+    mode = binary.stat().st_mode
+    executable = mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH
+    if executable != mode:
+        binary.chmod(executable)
 
     for name, digest in MODEL_FILES.items():
         target = models_dir() / name

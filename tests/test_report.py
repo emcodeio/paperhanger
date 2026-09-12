@@ -193,6 +193,24 @@ def test_rejected_on_both_devices(tmp_path):
     assert "reject (too small for both)" in report.render_photo(work)
 
 
+@pytest.mark.parametrize("device", list(sizes.DEVICES))
+def test_a_single_device_run_does_not_say_both(tmp_path, device):
+    """"too small for both" on a `-d` run states a conclusion the run never
+    reached, about the user's own file -- and it is how they would decide not
+    to bother trying it on a phone. 620x1102 is rejected by desktop and is a
+    perfectly good phone source; 1102x620 is the other way round.
+    """
+    shape = (620, 1102) if device == sizes.DESKTOP else (1102, 620)
+    work = plan.plan_photo(Path("/s/foggy.JPG"), *shape, "jpeg", [device],
+                           settings(tmp_path))
+    assert work.rejected_everywhere
+
+    line = report.render_photo(work)
+
+    assert f"reject (too small for {device})" in line
+    assert "both" not in line
+
+
 def test_rejected_on_one_device_only(tmp_path):
     work = plan.plan_photo(Path("/s/small.jpg"), 900, 1400, "jpeg",
                            list(sizes.DEVICES), settings(tmp_path))

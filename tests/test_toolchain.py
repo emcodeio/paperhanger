@@ -1,4 +1,5 @@
 import hashlib
+import http.client
 import os
 import shutil
 import stat
@@ -79,6 +80,98 @@ def test_download_verified_keeps_a_matching_file(tmp_path):
     target = tmp_path / "downloaded.bin"
     toolchain.download_verified(source.as_uri(), target, digest)
     assert target.read_bytes() == b"the right bytes"
+
+
+def test_a_fetch_that_fails_is_a_toolchain_error_and_leaves_nothing(tmp_path):
+    """The branch that reports "could not fetch", which nothing exercised.
+
+    A URL that does not resolve to a file is the offline case, and it is the
+    first thing a new user meets if the release ever moves. It must arrive as
+    a ToolchainError with the URL in it -- the CLI prints that and exits 1 --
+    rather than as a URLError traceback out of `paperhanger setup`.
+    """
+    target = tmp_path / "downloaded.bin"
+    missing = (tmp_path / "there-is-no-such-file.bin").as_uri()
+
+    with pytest.raises(toolchain.ToolchainError, match="could not fetch"):
+        toolchain.download_verified(missing, target, "0" * 64)
+
+    assert not target.exists()
+    assert not list(tmp_path.glob("*.partial"))
+
+
+def test_an_interrupted_download_leaves_no_partial(tmp_path, monkeypatch):
+    """A Ctrl-C during the 60 MB fetch, which `except OSError` never saw.
+
+    The unzip has always cleaned up in a `finally` and the download cleaned up
+    per-failure, so the two disagreed about exactly one case -- and it is the
+    case a user causes. KeyboardInterrupt is not an OSError, so the `.partial`
+    survived. `models_ok` hashes the real name, so it was harmless; it was
+    also never cleaned up by anything.
+    """
+    source = tmp_path / "payload.bin"
+    source.write_bytes(b"the right bytes")
+    target = tmp_path / "downloaded.bin"
+
+    def ctrl_c(*args, **kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(toolchain.shutil, "copyfileobj", ctrl_c)
+
+    with pytest.raises(KeyboardInterrupt):
+        toolchain.download_verified(source.as_uri(), target, "0" * 64)
+
+    assert not target.exists()
+    assert not list(tmp_path.glob("*.partial")), \
+        "the unzip cleans up on any exception; so must this"
+
+
+def test_an_incomplete_read_is_a_toolchain_error(tmp_path, monkeypatch):
+    """`IncompleteRead` is an HTTPException and a ValueError, never an OSError.
+
+    A server closing the connection early is how a 60 MB fetch realistically
+    dies, and uncaught it escaped `download_verified`'s own error handling to
+    land in `_setup`'s catch-all as a bare type name.
+    """
+    source = tmp_path / "payload.bin"
+    source.write_bytes(b"the right bytes")
+    target = tmp_path / "downloaded.bin"
+
+    def truncated(*args, **kwargs):
+        raise http.client.IncompleteRead(b"half of it", 4096)
+
+    monkeypatch.setattr(toolchain.shutil, "copyfileobj", truncated)
+
+    with pytest.raises(toolchain.ToolchainError, match="could not fetch"):
+        toolchain.download_verified(source.as_uri(), target, "0" * 64)
+
+    assert not list(tmp_path.glob("*.partial"))
+
+
+def test_the_download_cannot_hang_forever(monkeypatch, tmp_path):
+    """`paperhanger setup` is the first command the README tells anyone to
+    run. Without a timeout a stalled connection hangs it indefinitely after
+    printing `downloading upscayl-bin ...`, with nothing on screen to say
+    whether it is working.
+
+    Per read rather than for the whole transfer: 60 MB over a slow link is
+    not a broken download, and what this bounds is silence.
+    """
+    seen = {}
+    real_urlopen = toolchain.urllib.request.urlopen
+
+    def recording(url, *args, **kwargs):
+        seen.update(kwargs)
+        return real_urlopen(url, *args, **kwargs)
+
+    monkeypatch.setattr(toolchain.urllib.request, "urlopen", recording)
+    source = tmp_path / "payload.bin"
+    source.write_bytes(b"x")
+    toolchain.download_verified(source.as_uri(), tmp_path / "out.bin",
+                                hashlib.sha256(b"x").hexdigest())
+
+    assert seen.get("timeout") == toolchain.DOWNLOAD_TIMEOUT
+    assert toolchain.DOWNLOAD_TIMEOUT > 0
 
 
 def test_model_urls_are_built_from_the_pinned_commit():
@@ -275,3 +368,26 @@ def test_setup_restores_a_binary_that_lost_its_executable_bit(offline_upstream):
     toolchain.setup(log=lambda *_: None)
 
     assert binary.stat().st_mode & stat.S_IXUSR, "the advertised fix has to fix it"
+
+
+def test_setup_does_not_chmod_a_binary_that_is_already_executable(
+        offline_upstream, monkeypatch):
+    """`chmod` on a file you do not own raises whether or not it would change
+    anything, so chmod-ing on every run turned the command advertised as the
+    fix into the thing that failed -- on a shared or root-owned install, and
+    on the ordinary second run, where there is nothing to repair.
+
+    The repair above is worth that risk. Re-setting a bit already set is not.
+    """
+    toolchain.setup(log=lambda *_: None)
+    binary = offline_upstream / "bin" / "upscayl-bin"
+    assert binary.stat().st_mode & stat.S_IXUSR
+
+    def refuse(self, mode):
+        raise PermissionError(1, "Operation not permitted", str(self))
+
+    monkeypatch.setattr(Path, "chmod", refuse)
+
+    toolchain.setup(log=lambda *_: None)     # must not raise
+
+    assert binary.stat().st_mode & stat.S_IXUSR

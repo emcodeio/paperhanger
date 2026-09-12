@@ -1515,6 +1515,55 @@ def test_an_archive_that_cannot_move_reports_instead_of_ending_the_run(tmp_path,
     assert result.archived_to is None
     assert source.exists()
     assert work.plans[0].destination.exists(), "the outputs were fine"
+    assert "could not move stuck.png to originals/" in result.failures[0], \
+        "the destination directory is what says whether this photo was rejected"
+
+
+def test_a_rejected_photo_that_cannot_reach_error_is_partial_not_failed(
+        tmp_path, fake_upscaler):
+    """FAILED means sips will never read this photo. That is not what happened.
+
+    A photo too small for every device has no outputs by definition, so
+    `_unfinished`'s `written or skipped` test read it as a total failure --
+    and since the outcome could no longer be REJECTED either, the rejection
+    vanished from the outcome entirely. It was measured, classified and
+    turned down; the only thing that went wrong was the move into error/,
+    and a re-run retries exactly that.
+    """
+    source = write_png(import_dir(tmp_path) / "tiny.png", 100, 100)
+    work = plan.plan_photo(source, 100, 100, "png", list(sizes.DEVICES),
+                           settings(tmp_path))
+    assert work.rejected_everywhere and not work.plans
+    ctx = context(tmp_path, fake_upscaler)
+    ctx.processing_dir.mkdir(parents=True, exist_ok=True)
+    (ctx.processing_dir / "error").write_bytes(b"not a directory")
+
+    result = execute.run_and_archive(work, ctx)
+
+    assert result.outcome == execute.PARTIAL
+    assert result.archived_to is None
+    assert source.exists()
+    assert "could not move tiny.png to error/" in result.failures[0]
+
+
+def test_a_photo_that_produced_nothing_at_all_is_still_failed(tmp_path,
+                                                              fake_upscaler):
+    """Guards the guard: `rejected` must not have turned FAILED into dead code.
+
+    A photo with plans, all of which failed, produced nothing and was not
+    turned down -- and FAILED is the honest label, because it is the one that
+    says a second run is unlikely to help.
+    """
+    source = write_png(import_dir(tmp_path) / "broken.png", 2000, 3000)
+    work = plan.plan_photo(source, 2000, 3000, "png", [sizes.PHONE],
+                           settings(tmp_path))
+    assert not work.rejected_everywhere
+    source.write_bytes(b"not an image any more")
+
+    result = execute.run_and_archive(work, context(tmp_path, fake_upscaler))
+
+    assert result.outcome == execute.FAILED
+    assert result.written == [] and result.skipped == []
 
 
 def test_batch_runs_cheapest_first(tmp_path, fake_upscaler):

@@ -294,18 +294,49 @@ def check_writable(processing_dir: Path):
     real uid and ignores ACLs, so on macOS it can refuse a directory that
     would have worked -- and refusing a run that was going to succeed is worse
     than the repetition this exists to prevent.
+
+    The collision gets its own answer, and which answer depends on what can
+    be done about it. `exist_ok=False` raises FileExistsError, and folding
+    that into the general message produced `cannot write to <dir>: [Errno 17]
+    File exists` -- a diagnosis, "this directory is not writable", flatly
+    contradicted by the error quoted beside it. A taken name is not an answer
+    to the question this asks, so the stranded file is cleared and the two
+    real outcomes are reported apart: gone, and the directory was never the
+    problem; or still there, in which case the directory IS unwritable and
+    that is what to say.
     """
     probe = probe_path(processing_dir)
+    # Its own try, and not because the message differs -- it does not. A
+    # `processing_dir` that exists as a FILE raises FileExistsError even under
+    # `exist_ok=True`, and folded in with the touch below it would be answered
+    # with the stranded-probe sentence, which is the same misdiagnosis in a
+    # new place.
     try:
         processing_dir.mkdir(parents=True, exist_ok=True)
-        probe.touch(exist_ok=False)
     except OSError as error:
         return f"cannot write to {processing_dir}: {error}"
-    finally:
+
+    try:
+        probe.touch(exist_ok=False)
+    except FileExistsError:
         try:
-            probe.unlink(missing_ok=True)
-        except OSError:
-            pass
+            probe.unlink()
+        except OSError as error:
+            return (f"cannot write to {processing_dir}: its write-test file "
+                    f"{probe.name}\n"
+                    f"  was already there and cannot be removed ({error})")
+        return (f"{probe.name} was already in {processing_dir}, stranded by "
+                f"an earlier run\n"
+                f"  with this same process id that was killed outright. The "
+                f"directory itself is\n"
+                f"  fine and the file has been removed -- run again.")
+    except OSError as error:
+        return f"cannot write to {processing_dir}: {error}"
+
+    try:
+        probe.unlink(missing_ok=True)
+    except OSError:
+        pass
     return None
 
 
@@ -316,20 +347,46 @@ def _report_collisions(collisions) -> None:
     print("Rename one of them and run again.")
 
 
-def _summary(works, results, interrupted: bool = False) -> str:
+def _interrupted_photos(results, in_flight) -> list:
+    """The photos the signal landed inside. Usually one; possibly none.
+
+    `_run_batch` records a photo before it starts it and forgets it once the
+    result is in the caller's list, so a photo in `in_flight` that produced no
+    result is one this run was working on when the interrupt arrived.
+
+    Filtered against the results rather than trusted, because the two are
+    written one statement apart: an interrupt landing between
+    `results.append` and the forget leaves the source in both lists, and that
+    photo finished. Counting it twice -- once as done and once as
+    interrupted -- would be a worse lie than the one this replaces.
+    """
+    reached = {result.source for result in results}
+    return [source for source in in_flight if source not in reached]
+
+
+def _summary(works, results, interrupted: bool = False, in_flight=()) -> str:
     """One line naming where every photo ended up.
 
     Rejection is read from `work.rejected_everywhere`, not from the outcome: a
-    rejected photo whose move to error/ fails reports FAILED, and inferring
-    rejection from outcomes would drop it from the count that explains why it
-    produced nothing. It is reported under both headings, which is what
-    happened to it.
+    rejected photo whose move to error/ fails does not report REJECTED, and
+    inferring rejection from outcomes would drop it from the count that
+    explains why it produced nothing. It is reported under both headings,
+    which is what happened to it.
 
     Counted over the photos the run actually REACHED, not over every photo it
     planned. An interrupted run has photos it never looked at, and summing
     `rejected_everywhere` across all of them would report images as rejected
     that nothing ever examined -- a claim about the user's files that this run
     did not earn. For a completed run the two are the same set.
+
+    "Never started" means never started. The photo the signal actually landed
+    inside produced no `PhotoResult`, so `len(works) - len(results)` used to
+    count it among the ones this run never looked at -- a lie in the one line
+    someone reads to work out what they just interrupted, and told at the
+    moment they most need it to be true. It is now its own term. The lie was
+    also broader than it looked: a photo whose every plan finished and whose
+    original was archived microseconds before the signal arrived was equally
+    reported as never started.
     """
     counts = Counter(result.outcome for result in results)
     reached = {result.source for result in results}
@@ -339,13 +396,56 @@ def _summary(works, results, interrupted: bool = False) -> str:
     tally = (f"{counts[execute.OK]} ok, "
              f"{counts[execute.ALREADY_DONE]} already done, "
              f"{rejected} rejected, {failed} failed")
-    if interrupted:
-        return (f"{SUMMARY_INTERRUPTED} {tally}, "
-                f"{len(works) - len(results)} never started")
-    return f"{SUMMARY_DONE} {tally}"
+    if not interrupted:
+        return f"{SUMMARY_DONE} {tally}"
+
+    caught = _interrupted_photos(results, in_flight)
+    never = len(works) - len(results) - len(caught)
+    if caught:
+        tally += f", {len(caught)} interrupted partway"
+    return f"{SUMMARY_INTERRUPTED} {tally}, {never} never started"
 
 
-def _run_batch(works, ctx, results) -> None:
+def _sweep_workroot(workroot: Path) -> None:
+    """Remove our own scratch root, and SAY SO when it will not go.
+
+    Empty once every photo's workdir has been swept -- including on the
+    interrupt, because `run_photo` sweeps in a `finally` and
+    KeyboardInterrupt runs those like any other exception. rmdir rather than
+    rmtree: anything still in there is unexpected, and worth leaving where a
+    human can find it.
+
+    Saying so is the whole of the change. The OSError used to be swallowed,
+    and nothing sweeps `.work` the way `sweep_partials` sweeps `*.partial`,
+    so a SIGKILL mid-upscale stranded a 4x frame of several gigabytes that no
+    later run would ever remove OR mention. A Ctrl-C is fine; a `kill -9` is
+    what this is about. One note is cheap against a silent multi-gigabyte
+    residue on the volume the user chose for its free space.
+
+    Reported rather than swept, because two paperhanger runs against the same
+    processing directory would otherwise delete each other's live
+    intermediates -- and because the comment above is right that a human
+    should see this rather than have it tidied away.
+    """
+    try:
+        workroot.rmdir()
+        return
+    except FileNotFoundError:
+        return
+    except OSError as error:
+        reason = error
+    try:
+        names = sorted(entry.name for entry in workroot.iterdir())
+    except OSError:
+        names = []
+    detail = f" ({', '.join(names[:3])})" if names else f" ({reason})"
+    print(f"note: {workroot} is not empty{detail} and was left in place.")
+    print("  It holds intermediates from a run that was killed rather than "
+          "interrupted.")
+    print("  Nothing else removes them; a 4x frame can be several gigabytes.")
+
+
+def _run_batch(works, ctx, results, in_flight=None) -> None:
     """Every photo, cheapest first. One photo's disaster is never the run's.
 
     Results are appended to the caller's list rather than returned, so that a
@@ -376,9 +476,21 @@ def _run_batch(works, ctx, results) -> None:
     Reasons are printed where they happen, not only in the recap at the end.
     A twenty-four-hour import is read as a log, and the answer to "why did
     photo 340 fail" belongs beside photo 340.
+
+    `in_flight` is how the interrupt is told from the photos behind it. The
+    source goes in before the photo is started and comes out once its result
+    is in `results`, so at the instant a KeyboardInterrupt leaves this
+    function the list names the photo the signal landed inside -- the one
+    piece of the interrupt the summary cannot otherwise reconstruct, since a
+    photo that raises never reaches `results.append`. Appending rather than
+    assigning, and filtered against `results` by `_interrupted_photos`, so
+    the statement-wide window between the append and the discard cannot count
+    a finished photo twice.
     """
     total = len(works)
     for index, work in enumerate(execute.cheapest_first(works), start=1):
+        if in_flight is not None:
+            in_flight.append(work.source)
         try:
             result = execute.run_and_archive(work, ctx)
         except (imaging.ImagingError, OSError) as error:
@@ -387,10 +499,30 @@ def _run_batch(works, ctx, results) -> None:
                 failures=[f"{work.source.name}: {error}"],
             )
         results.append(result)
+        if in_flight is not None:
+            in_flight.clear()
         print(f"[{index}/{total}] {work.source.name}: {result.outcome}"
               f" ({len(result.written)} written)")
         for message in result.failures:
             print(f"    {message}")
+
+
+def _interrupt_message(argv) -> str:
+    """What the outer handler can honestly say, which depends on the command.
+
+    "Before any photo was touched" is true of an interrupted run and a non
+    sequitur during `paperhanger setup`, where no photo was ever in play --
+    and setup is the slowest thing here to be interrupted in, since it
+    downloads about 60 MB. What a user wants to know there is whether
+    anything was left half-installed, and the answer is no: both the download
+    and the unzip stage a `.partial` beside the destination and clear it on
+    any exception, KeyboardInterrupt included, so setup is safe to simply run
+    again.
+    """
+    if argv and argv[0] in SUBCOMMANDS:
+        return (f"`paperhanger {argv[0]}` did not finish. Nothing was left "
+                f"half-installed; run it again.")
+    return "before any photo was touched"
 
 
 def main(argv=None) -> int:
@@ -403,11 +535,12 @@ def main(argv=None) -> int:
     are the scan, which probes every file in the directory, and the
     toolchain's model hashing; neither has written anything.
     """
+    argv = list(sys.argv[1:] if argv is None else argv)
     try:
-        return _run(list(sys.argv[1:] if argv is None else argv))
+        return _run(argv)
     except KeyboardInterrupt:
         print()
-        print(f"{SUMMARY_INTERRUPTED} before any photo was touched")
+        print(f"{SUMMARY_INTERRUPTED} {_interrupt_message(argv)}")
         return INTERRUPTED
 
 
@@ -528,30 +661,32 @@ def _run(argv) -> int:
     # after twenty hours, with five hundred progress lines to scroll back
     # through to find out what they got.
     results = []
+    in_flight = []
     interrupted = False
     try:
-        _run_batch(works, ctx, results)
+        _run_batch(works, ctx, results, in_flight)
     except KeyboardInterrupt:
         interrupted = True
-
-    # Our own scratch root, empty once every photo's workdir has been swept --
-    # including on the interrupt, because `run_photo` sweeps in a `finally`
-    # and KeyboardInterrupt runs those like any other exception. rmdir rather
-    # than rmtree: anything still in there is unexpected, and worth leaving
-    # where a human can find it.
-    try:
-        workroot.rmdir()
-    except OSError:
-        pass
 
     # A second Ctrl-C can land in here, and this block catches it rather than
     # leaving it to `main` -- whose message says no photo was touched, while
     # the progress lines already on screen say otherwise. This does not make
     # the window smaller; it stops the outer handler describing it wrongly.
+    #
+    # The scratch sweep is INSIDE it. Sitting between the two handlers it was
+    # the one statement after the batch that neither covered, so an interrupt
+    # arriving during the rmdir -- which is where a second Ctrl-C most
+    # plausibly lands, right after the first -- still reached `main` and still
+    # claimed no photo had been touched.
     failed = []
     try:
+        _sweep_workroot(workroot)
         print()
-        print(_summary(works, results, interrupted=interrupted))
+        print(_summary(works, results, interrupted=interrupted,
+                       in_flight=in_flight))
+        for source in _interrupted_photos(results, in_flight):
+            print(f"  partway through {source.name} when the interrupt "
+                  f"arrived; re-run to finish it")
 
         failed = [r for r in results
                   if r.outcome in (execute.PARTIAL, execute.FAILED)]
