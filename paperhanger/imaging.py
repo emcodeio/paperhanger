@@ -1,6 +1,6 @@
 """Every subprocess call the tool makes. The only module that touches images.
 
-Six measured facts shape this file. Each fails SILENTLY if ignored:
+Seven measured facts shape this file. Each fails SILENTLY if ignored:
 
   1. sips -g pixelWidth exits 0 while printing `pixelWidth: <nil>` for text,
      empty and truncated files, and dies by signal on .DS_Store. Exit status is
@@ -44,6 +44,21 @@ Six measured facts shape this file. Each fails SILENTLY if ignored:
      of the three phone slices were silently wrong. `crop` works around it by
      padding 1px on every side and cropping at +1, which makes x non-zero and
      the bottom edge non-flush; verified region-exact for all six slices.
+  7. ARGUMENT ORDER decides whether `-s format` is honoured. Placed after
+     --padColor it is silently dropped: a 2560x1600 JPEG padded with
+     `-p H W --padColor FF00FF -s format png` comes back as JPEG, byte-identical
+     in size to the same run with no -s format at all (3580120 B both), while
+     moving -s format png in front yields PNG (11544706 B). sips warns `Output
+     file suffix should be jpg` on stderr, which a zero exit discards.
+     This is not cosmetic. A lossy padded intermediate puts the magenta pad
+     inside the same 8x8 DCT blocks as the pixels being kept, so it bleeds into
+     the crop: measured on a uniform region, column 0 shifted R +4.5, G -7.5,
+     B +15.3 -- the signature of FF00FF -- with mean absolute error 9.34 at
+     column 0 and 8.20 at column 1 against 1.43 in the interior. Invisible to
+     any dimension or file-exists check. Both crop branches therefore put
+     `-s format png` FIRST, and `crop` always emits a lossless intermediate.
+     Note also that without -s format, sips keeps the SOURCE's format whatever
+     the --out suffix says, so a .png filename proves nothing about the bytes.
 """
 
 import subprocess
@@ -162,7 +177,10 @@ def normalize_to_srgb_png(source, out_path) -> None:
           str(source), "--out", str(out_path)], produces=out_path)
 
 
-PAD_COLOUR = "FF00FF"     # never survives the crop; garish so a leak is obvious
+# The pad is always cropped away, but it is NOT harmless: on a lossy
+# intermediate its DCT blocks straddle the seam and bleed into the outermost
+# kept pixels -- see fact 7, which is why both branches force PNG.
+PAD_COLOUR = "FF00FF"
 
 
 def _offset_is_ignored(rect, source_height: int) -> bool:
@@ -191,10 +209,13 @@ def _crop_via_padding(source, rect, out_path, width: int, height: int) -> None:
     """
     padded = Path(out_path).with_suffix(".padded.png")
     try:
-        _run([SIPS, "-p", str(height + 2), str(width + 2),
-              "--padColor", PAD_COLOUR, "-s", "format", "png",
+        # -s format png FIRST: after --padColor it is silently dropped, and a
+        # lossy pad bleeds magenta into the pixels we keep. See fact 7.
+        _run([SIPS, "-s", "format", "png",
+              "-p", str(height + 2), str(width + 2), "--padColor", PAD_COLOUR,
               str(source), "--out", str(padded)], produces=padded)
-        _run([SIPS, "-c", str(rect.height), str(rect.width),
+        _run([SIPS, "-s", "format", "png",
+              "-c", str(rect.height), str(rect.width),
               "--cropOffset", str(rect.y + 1), str(rect.x + 1),
               str(padded), "--out", str(out_path)], produces=out_path)
     finally:
@@ -215,6 +236,13 @@ def crop(source, rect, out_path) -> None:
     wallpaper with nothing raising.
 
     Rects that sips would silently mis-crop go the long way round -- fact 6.
+
+    ALWAYS writes PNG, whatever `out_path` is named. A crop is an intermediate
+    that something else will resize and encode, so spending a lossy generation
+    on it would undo exactly what band 2 exists to protect -- measured at about
+    40.5 dB with a max channel error of 78 for a JPEG source. Name `out_path`
+    with a .png suffix; sips otherwise keeps the SOURCE's format regardless of
+    the suffix, so a .png name is no guarantee of PNG bytes.
     """
     measured = probe(source)
     if measured is None:
@@ -232,7 +260,8 @@ def crop(source, rect, out_path) -> None:
         _crop_via_padding(source, rect, out_path, width, height)
         return
 
-    _run([SIPS, "-c", str(rect.height), str(rect.width),
+    _run([SIPS, "-s", "format", "png",
+          "-c", str(rect.height), str(rect.width),
           "--cropOffset", str(rect.y), str(rect.x),
           str(source), "--out", str(out_path)], produces=out_path)
 

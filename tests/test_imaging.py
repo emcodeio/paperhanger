@@ -221,6 +221,96 @@ def test_crop_is_region_exact_on_and_off_the_bad_offsets(tmp_path, rect):
     assert _crop_lands_on_the_marker(tmp_path, 400, 200, rect, "b")
 
 
+def _edge_error(rows, colour, index):
+    """Mean absolute per-channel error of column `index` against `colour`."""
+    column = [row[index] for row in rows]
+    return sum(abs(p[c] - colour[c]) for p in column for c in range(3)) / (len(column) * 3)
+
+
+@pytest.mark.parametrize("rect", [
+    Rect(x=0, y=0, width=400, height=300),      # padded branch (offset 0 0)
+    Rect(x=0, y=300, width=400, height=300),    # padded branch (flush bottom)
+    Rect(x=100, y=100, width=400, height=300),  # direct branch
+])
+def test_cropping_a_lossy_source_does_not_bleed_the_pad_in(tmp_path, rect):
+    """Fact 7. Every other crop fixture here is a PNG, so the suite was blind to
+    this: the pad step's `-s format png` sat after --padColor, where sips drops
+    it, and the magenta pad shared 8x8 DCT blocks with the pixels being kept.
+
+    Measured before the fix, on the offset-0-0 rect: column 0 mean absolute
+    error 9.34 and column 1 8.20 against 1.43 in the interior, with column 0
+    shifted R +4.5, G -7.5, B +15.3 -- FF00FF's own signature. The interior
+    figure is ordinary JPEG noise and is the right thing to compare against,
+    so the edges are required to be no worse than the middle.
+    """
+    # A UNIFORM source, deliberately: a marked one has a hard colour boundary
+    # at the rect edge, and JPEG rings against that boundary in the source
+    # itself, which is real compression noise rather than anything crop did.
+    # Uniform green leaves the magenta pad as the only thing that could move
+    # an edge pixel, and it is far from FF00FF in every channel.
+    colour = (20, 90, 40)
+    source_png = write_png(tmp_path / "m.png", 800, 600, colour=colour)
+    source_jpg = tmp_path / "m.jpg"
+    imaging.resize_and_encode(source_png, 800, 600, "jpeg", 90, source_jpg,
+                              resize=False)
+
+    out = tmp_path / "crop.png"
+    imaging.crop(source_jpg, rect, out)
+    _, _, rows = read_png_rgb(out)
+
+    interior = _edge_error(rows, colour, rect.width // 2)
+    for index in (0, 1, 2):
+        assert _edge_error(rows, colour, index) <= interior + 2.0, (
+            f"column {index} is further from {colour} than the interior; "
+            "the pad is bleeding in"
+        )
+
+
+def test_crop_always_writes_png_even_from_a_lossy_source(tmp_path):
+    """Fact 7's other half. Without `-s format` sips keeps the SOURCE's format
+    whatever the --out suffix says, so before the fix crop wrote JPEG bytes into
+    a file named .png and quietly spent a lossy generation on an intermediate.
+    probe reads the content, not the name, which is the only way to see it."""
+    marked = write_marked_png(tmp_path / "m.png", 800, 600,
+                              Rect(x=0, y=0, width=400, height=300))
+    source_jpg = tmp_path / "m.jpg"
+    imaging.resize_and_encode(marked, 800, 600, "jpeg", 90, source_jpg,
+                              resize=False)
+    assert imaging.probe(source_jpg)[2] == "jpeg"
+
+    for tag, rect in [("padded", Rect(x=0, y=0, width=400, height=300)),
+                      ("direct", Rect(x=100, y=100, width=400, height=300))]:
+        out = tmp_path / f"{tag}.png"
+        imaging.crop(source_jpg, rect, out)
+        assert imaging.probe(out)[2] == "png", f"{tag} branch did not write PNG"
+
+
+def test_the_padded_intermediate_is_really_png(tmp_path, monkeypatch):
+    """Guards the argument order directly. The intermediate is deleted in a
+    finally, so catch it mid-flight: if `-s format png` ever drifts back behind
+    --padColor this fails, rather than silently degrading edge pixels."""
+    seen = {}
+    real_run = imaging._run
+
+    def spy(argv, **kwargs):
+        result = real_run(argv, **kwargs)
+        produces = kwargs.get("produces")
+        if produces is not None and str(produces).endswith(".padded.png"):
+            seen["format"] = imaging.probe(produces)[2]
+        return result
+
+    monkeypatch.setattr(imaging, "_run", spy)
+
+    marked = write_marked_png(tmp_path / "m.png", 800, 600,
+                              Rect(x=0, y=0, width=400, height=300))
+    source_jpg = tmp_path / "m.jpg"
+    imaging.resize_and_encode(marked, 800, 600, "jpeg", 90, source_jpg,
+                              resize=False)
+    imaging.crop(source_jpg, Rect(x=0, y=0, width=400, height=300),
+                 tmp_path / "out.png")
+    assert seen.get("format") == "png", f"padded intermediate was {seen}"
+
+
 def test_raw_sips_still_has_the_bug_the_workaround_exists_for(tmp_path):
     """A canary on the defect itself, calling sips directly. If Apple ever
     fixes this, this test fails and the padding pass can be deleted -- which
