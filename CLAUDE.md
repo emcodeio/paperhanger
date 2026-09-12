@@ -6,7 +6,7 @@ paperhanger turns a folder of images into desktop and phone wallpapers on macOS:
 
 ## Status
 
-Design not started. There is no application code yet.
+Implemented. `paperhanger/` holds the working tool (classification, cropping, execution, CLI, reporting) with a full test suite under `tests/`. Thirteen of the fifteen planned implementation tasks are complete; the remaining two add tier 3 (real-upscaler) tests and this project's user-facing documentation. See `README.md` for install, usage, output layout, and the testing tiers. The full 894-image corpus run (tier 4) is the author's acceptance pass and is not a gate on "implemented".
 
 ## Read first
 
