@@ -183,6 +183,18 @@ def test_encode_without_resizing_preserves_dimensions(tmp_path):
     assert imaging.probe(out)[:2] == (1234, 567)
 
 
+def test_resize_false_does_not_resample_even_when_dimensions_differ(tmp_path):
+    """resize=False must mean "do not resample", not "resample to whatever you
+    were handed". The realistic bands 2 and 4 call passes the source's own
+    dimensions, which cannot tell those two readings apart -- an always-resample
+    bug would still return 1234x567 above. Passing dimensions that differ is
+    what makes the flag observable."""
+    source = write_png(tmp_path / "s.png", 800, 600, noise=True)
+    out = tmp_path / "out.png"
+    imaging.resize_and_encode(source, 400, 300, "png", None, out, resize=False)
+    assert imaging.probe(out)[:2] == (800, 600)
+
+
 @pytest.mark.parametrize("fmt,quality,suffix", [
     ("heic", 80, ".heic"), ("jpeg", 90, ".jpg"),
     ("avif", 85, ".avif"), ("png", None, ".png"),
@@ -193,6 +205,40 @@ def test_every_output_format_writes(tmp_path, fmt, quality, suffix):
     imaging.resize_and_encode(source, 320, 240, fmt, quality, out, resize=False)
     assert out.exists() and out.stat().st_size > 0
     assert imaging.probe(out)[:2] == (320, 240)
+
+
+def _captured_argv(monkeypatch):
+    """Collect the argv of the next _run, instead of running it."""
+    calls = []
+    monkeypatch.setattr(imaging, "_run", lambda argv, **kwargs: calls.append(argv))
+    return calls
+
+
+def test_png_omits_format_options_entirely(tmp_path, monkeypatch):
+    """png takes no quality, and sips will not tell you if you send one anyway.
+
+    Measured: `sips -s format png -s formatOptions None` prints `Warning:
+    Unknown format option None`, exits 0, and writes a perfectly valid PNG. So
+    no assertion about the output file can distinguish omitting the flag from
+    passing junk in it -- the argv is the only place this is observable, which
+    is why this one test looks at the command rather than the result.
+    """
+    calls = _captured_argv(monkeypatch)
+    source = write_png(tmp_path / "s.png", 32, 24)
+    imaging.resize_and_encode(source, 32, 24, "png", None, tmp_path / "o.png",
+                              resize=True)
+    assert "formatOptions" not in calls[0]
+    assert "None" not in calls[0]
+
+
+def test_a_lossy_format_does_pass_its_quality(tmp_path, monkeypatch):
+    """The other half of the above: omission must be specific to png."""
+    calls = _captured_argv(monkeypatch)
+    source = write_png(tmp_path / "s.png", 32, 24)
+    imaging.resize_and_encode(source, 32, 24, "heic", 80, tmp_path / "o.heic",
+                              resize=False)
+    assert "formatOptions" in calls[0]
+    assert calls[0][calls[0].index("formatOptions") + 1] == "80"
 
 
 def test_normalize_converts_to_srgb_png(tmp_path, corpus):
