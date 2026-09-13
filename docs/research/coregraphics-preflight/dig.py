@@ -1,9 +1,16 @@
 """Characterise a resize divergence: where the differing pixels sit and by how much."""
 import sys
 import os
+import atexit
+import shutil
+import tempfile
 import subprocess
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+# Intermediates go to a temp directory, never beside this script: the repo is
+# public and these files are derived from corpus photographs.
+SCRATCH = tempfile.mkdtemp(prefix="cg-preflight-")
+atexit.register(shutil.rmtree, SCRATCH, ignore_errors=True)
 
 
 def raw(path, w, h):
@@ -15,8 +22,8 @@ def raw(path, w, h):
 
 
 def run(source, w, h, tag):
-    s_out = os.path.join(HERE, "dig_s_%s.png" % tag)
-    c_out = os.path.join(HERE, "dig_c_%s.png" % tag)
+    s_out = os.path.join(SCRATCH, "dig_s_%s.png" % tag)
+    c_out = os.path.join(SCRATCH, "dig_c_%s.png" % tag)
     subprocess.run(["/usr/bin/sips", "--resampleHeightWidth", str(h), str(w),
                     source, "-s", "format", "png", "--out", s_out],
                    capture_output=True)

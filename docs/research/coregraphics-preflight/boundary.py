@@ -6,10 +6,17 @@ vertical scale at which sips and CoreGraphics stop agreeing.
 """
 import sys
 import os
+import atexit
+import shutil
+import tempfile
 import subprocess
 from fractions import Fraction
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+# Intermediates go to a temp directory, never beside this script: the repo is
+# public and these files are derived from corpus photographs.
+SCRATCH = tempfile.mkdtemp(prefix="cg-preflight-")
+atexit.register(shutil.rmtree, SCRATCH, ignore_errors=True)
 
 
 def raw(path):
@@ -18,8 +25,8 @@ def raw(path):
 
 
 def compare(source, w, h):
-    s_out = os.path.join(HERE, "bd_s.png")
-    c_out = os.path.join(HERE, "bd_c.png")
+    s_out = os.path.join(SCRATCH, "bd_s.png")
+    c_out = os.path.join(SCRATCH, "bd_c.png")
     for p in (s_out, c_out):
         if os.path.exists(p):
             os.remove(p)

@@ -5,11 +5,18 @@ Reports SHA-256 of both outputs, plus the ancillary chunks each carries.
 """
 import sys
 import os
+import atexit
+import shutil
+import tempfile
 import struct
 import hashlib
 import subprocess
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+# Intermediates go to a temp directory, never beside this script: the repo is
+# public and these files are derived from corpus photographs.
+SCRATCH = tempfile.mkdtemp(prefix="cg-preflight-")
+atexit.register(shutil.rmtree, SCRATCH, ignore_errors=True)
 CRITICAL = {"IHDR", "PLTE", "IDAT", "IEND"}
 
 
@@ -59,8 +66,8 @@ def main(source, shapes):
     print("  sha256: %s" % sha(source))
     print("  source ancillary chunks: %s" % (" ".join(src_anc) or "(none)"))
     for w, h in shapes:
-        s_out = os.path.join(HERE, "fi_s.png")
-        c_out = os.path.join(HERE, "fi_c.png")
+        s_out = os.path.join(SCRATCH, "fi_s.png")
+        c_out = os.path.join(SCRATCH, "fi_c.png")
         for p in (s_out, c_out):
             if os.path.exists(p):
                 os.remove(p)

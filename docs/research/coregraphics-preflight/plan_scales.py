@@ -86,6 +86,12 @@ y_one = [(s, r) for s, r in ys if s == 1.0]
 
 print("vertical scale  < 1   : %d" % len(y_red))
 print("vertical scale == 1   : %d" % len(y_one))
+identity = [r for r in resamples if r[3] == r[1] and r[4] == r[2]]
+print("BOTH axes 1:1 (identity resample): %d" % len(identity))
+if identity:
+    big = max(identity, key=lambda r: r[1] * r[2])
+    print("  largest identity resample: %dx%d (%.0f MB as a bitmap)  %s"
+          % (big[1], big[2], big[1] * big[2] * 4 / 1e6, big[0]))
 print("vertical scale  > 1   : %d" % len(y_enl))
 print("horizontal scale > 1  : %d" % len([1 for s, _ in xs if s > 1.0]))
 

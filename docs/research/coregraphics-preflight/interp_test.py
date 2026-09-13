@@ -5,11 +5,18 @@ Prints one line per shape: pixel equality, PNG whole-file equality, AE.
 """
 import sys
 import os
+import atexit
+import shutil
+import tempfile
 import subprocess
 import hashlib
 import struct
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+# Intermediates go to a temp directory, never beside this script: the repo is
+# public and these files are derived from corpus photographs.
+SCRATCH = tempfile.mkdtemp(prefix="cg-preflight-")
+atexit.register(shutil.rmtree, SCRATCH, ignore_errors=True)
 SHAPES = [
     (1000, 700, "downscale, both axes"),
     (3000, 2100, "enlargement, both axes"),
@@ -60,8 +67,8 @@ def main(source, label):
     print("%-14s %-28s %-9s %-9s %-9s %s"
           % ("shape", "kind", "pixels", "IDAT", "wholefile", "AE"))
     for w, h, kind in SHAPES:
-        s_out = os.path.join(HERE, "it_s.png")
-        c_out = os.path.join(HERE, "it_c.png")
+        s_out = os.path.join(SCRATCH, "it_s.png")
+        c_out = os.path.join(SCRATCH, "it_c.png")
         for p in (s_out, c_out):
             if os.path.exists(p):
                 os.remove(p)

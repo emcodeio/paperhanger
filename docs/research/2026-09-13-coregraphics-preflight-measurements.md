@@ -10,7 +10,7 @@ fifth that nobody asked for and that matters more than three of the four.
 | Question | Verdict |
 |---|---|
 | 1. EXIF orientation | Clears the way. `sips` and ImageIO agree on geometry; they disagree on whether the tag survives into the output. |
-| 2. Peak memory at 300 Mpx | Clears the way. CoreGraphics peaks 17–30 MiB higher, tracking the output bitmap rather than the source. The pixel cap does not move. |
+| 2. Peak memory at 300 Mpx | Clears the way. CoreGraphics peaks 3% higher on the largest reduction and 2.1x higher on an identity resample, which is what 577 of 2734 production calls are. The pixel cap does not move. |
 | 3. HEIC input | Clears the way. Both corpus HEICs decode, dimensions agree exactly. The corpus holds two, not one. |
 | 4. Interpolation exactness | Clears the path production uses, and **changes the verification plan**. Vertical reduction is exact to 0.994792 and diverges from 0.995000. Enlargement is not reliably exact at any factor. |
 | 5. (unasked) Destination colour space | **Changes the design.** Taking the bitmap context's colour space from the source, with `kCGImageAlphaNoneSkipLast`, renders ten real corpus images entirely black, silently. |
@@ -186,24 +186,48 @@ times against two output sizes (`rss.py`, which repeats the pair and prints the 
 Within a configuration the figures barely move — the widest spread over five runs is
 1.3 MiB — so the differences below are signal.
 
-| source frame | output | `sips` peak | CoreGraphics peak | difference |
-|---|---|---|---|---|
-| 75 Mpx | 1875 x 2500 | 365,510,656 B | 383,221,760 B | **+16.9 MiB** |
-| 300 Mpx | 1875 x 2500 | 1,266,761,728 B | 1,283,964,928 B | **+16.4 MiB** |
-| 75 Mpx | 3750 x 5000 | 520,519,680 B | 552,239,104 B | **+30.2 MiB** |
-| 300 Mpx | 3750 x 5000 | 1,421,672,448 B | 1,452,982,272 B | **+29.9 MiB** |
+| source frame | output | output as a bitmap | `sips` peak | CoreGraphics peak | difference |
+|---|---|---|---|---|---|
+| 75 Mpx | 1875 x 2500 | 19 MB | 365,510,656 B | 383,221,760 B | **+16.9 MiB** |
+| 300 Mpx | 1875 x 2500 | 19 MB | 1,266,761,728 B | 1,283,964,928 B | **+16.4 MiB** |
+| 75 Mpx | 3750 x 5000 | 75 MB | 520,519,680 B | 552,239,104 B | **+30.2 MiB** |
+| 300 Mpx | 3750 x 5000 | 75 MB | 1,421,672,448 B | 1,452,982,272 B | **+29.9 MiB** |
+| 300 Mpx | 7680 x 4800 | 147 MB | 1,621,819,392 B | 1,671,299,072 B | **+47.2 MiB** |
+| 300 Mpx | 6144 x 6144 | 151 MB | 1,630,896,128 B | 1,681,276,928 B | **+48.0 MiB** |
+| 7680 x 4800 | 6144 x 6144 | 151 MB | 528,351,232 B | 604,127,232 B | **+72.3 MiB** |
+| 7680 x 4800 | 7680 x 4800 | 147 MB | 171,753,472 B | 478,658,560 B | **+292.7 MiB** |
+| 10000 x 4780 | 10000 x 4780 | 191 MB | 349,093,888 B | 743,604,224 B | **+376.2 MiB** |
 
-**The gap tracks the output bitmap, not the source frame.** Quadrupling the source moves
-it by half a mebibyte; quadrupling the output moves it by thirteen. So the CoreGraphics
-path carries roughly a fifth of the destination bitmap in extra transient allocation, on
-top of a fixed cost of about 12 MiB for the interpreter and the frameworks.
+**Read the grid; do not fit a rule to it.** An earlier version of this section said the gap
+tracks the output bitmap at about a fifth of it, which is a two-point fit that holds only
+where the source dwarfs the output. The last three rows break it. Two outputs of the same
+151 MB cost +48.0 MiB from a 300 Mpx source and +72.3 MiB from a source barely larger than
+the output. And an identity resample — same dimensions in and out — costs **+292.7 MiB**
+on a 147 MB frame and **+376.2 MiB** on a 191 MB one.
 
-**This clears the way and does not move the pixel cap.** What dominates both paths is the
-decoded source, and it is the same size for both: 300 Mpx at 4 bytes is 1.2 GB, which is
-the bulk of every figure in the table. Neither path streams. The gap is a fixed tens-of-
-megabytes tax on an output bitmap whose size the design already controls, and at the
-sizes this tool produces it never approaches the cap. The cap exists for the same reason
-after this change as before it, and at the same value.
+What the identity rows show is that `sips` is doing something CoreGraphics is not. Its peak
+of 163.8 MiB on a 147 MB frame is *below* the size of one decoded copy, so it is streaming
+rather than materialising the image. The CoreGraphics path at 456.5 MiB is holding roughly
+three copies — the decoded source, the bitmap context, and the image
+`CGBitmapContextCreateImage` hands back. Where the source is much larger than the output
+that third copy is small and the gap looks like a constant; where source and output are
+the same size it is the whole frame.
+
+**This still clears the way, and the cap does not move — but for a stated reason rather
+than a formula.** At the cap the resampler's real worst cases are:
+
+- the largest reduction: a 300 Mpx frame down to the 7680 x 4800 desktop target, where
+  CoreGraphics peaks at 1593.9 MiB against 1546.7 MiB, **3.1% more**;
+- the largest identity resample the planner actually asks for, 10000 x 4780, where it
+  peaks at 709.2 MiB against 332.9 MiB, **2.1x** — and 577 of the 2734 production
+  resampler calls are identity resamples, so this is the common case, not a corner.
+
+Both are far below what the machine has, and neither is near the ceiling the cap exists to
+defend: the cap bounds the 4x frame at 300 Mpx, and the worst measured CoreGraphics peak
+anywhere in this grid is 1.6 GiB. The cap keeps its value. But **Task 1 should not assume
+the new path's memory is within tens of megabytes of the old one** — on the identity
+resample it is double, and if a future change raises the cap or the target sizes, the
+identity case is the one to measure first.
 
 Worth stating for Task 1: if the cap ever needs to rise, `CGImageSourceCreateThumbnail-
 AtIndex` decodes to a bounded size without materialising the full frame, and has no
@@ -283,30 +307,69 @@ stream — and the whole-file difference is one 32-byte `cHRM` chunk `sips` writ
 not.** 110,911 minus 110,867 is 44 bytes, which is that chunk plus its header and CRC.
 
 **Whole-file identity is reachable, and what decides it is the source, not the shape.**
-ImageIO with a NULL destination-properties dictionary always writes the same minimal pair,
-`sRGB` and a synthesised `eXIf`. `sips` writes that pair too — and then forwards whatever
-the source carried, translated into PNG chunks. When the source carries nothing to
-forward, the two files are the same bytes. Measured with `fileid.py`, which hashes both
-outputs and lists each one's ancillary chunks:
+Two rules, both measured rather than inferred from a handful of fixtures — that mistake
+has now been made three times on this question, twice in earlier drafts of this document.
 
-| source | what the source carries | `sips` writes | whole file |
+**What ImageIO writes follows the source's colour space, and nothing else.** With a NULL
+destination-properties dictionary it emits exactly one colour chunk plus a synthesised
+`eXIf`, and which colour chunk depends on the space:
+
+| source colour space | ImageIO writes | `sips` writes | whole file |
 |---|---|---|---|
-| `tests/pixels.write_png` fixture | nothing | `sRGB eXIf` | **identical SHA-256** |
-| a stripped PNG (`magick -strip`) | `tIME orNT` | `sRGB eXIf` | **identical SHA-256** |
-| corpus JPEG | JFIF density, XMP | `sRGB eXIf pHYs iTXt` | differs |
-| stripped corpus JPEG | JFIF density | `sRGB eXIf pHYs` | differs |
-| `magick`-made PNG | `cHRM gAMA pHYs tIME tEXt` | `gAMA cHRM eXIf pHYs iTXt` | differs |
-| corpus PNG with an ICC profile | `pHYs tIME`, `iCCP` | `iCCP eXIf pHYs` | differs |
-| a PNG ImageIO itself wrote | `sRGB eXIf` | `gAMA cHRM eXIf iTXt` | differs |
+| sRGB, carried as an `iCCP` profile | `sRGB(1) eXIf(68)` | `sRGB(1) eXIf(68)` | **identical SHA-256** |
+| Adobe RGB (1998), as an `iCCP` profile | `iCCP(281) eXIf(56)` | `iCCP(281) eXIf(56)` | **identical SHA-256** |
+| untagged | `sRGB(1) eXIf(68)` | `sRGB(1) eXIf(68)` | **identical SHA-256** |
 
-Two rows are worth reading twice. The last one says the chain does not converge: handed a
-PNG tagged with an `sRGB` chunk, `sips` re-expresses that tagging as `gAMA` plus `cHRM`
-and adds an `iTXt`, so a CoreGraphics-written intermediate does not make the next stage
-agree. And the first says the tier-1 differential can hold the strict bar after all —
-`tests/pixels.write_png` emits `IHDR`, `IDAT`, `IEND` and nothing else, which is exactly
-the case where the files match.
+Measured with `chunkmap.py` on PNGs reduced to `IHDR`, `iCCP`, `IDAT`, `IEND` and nothing
+else. So it is not "always `sRGB`": an sRGB profile is collapsed to the one-byte `sRGB`
+chunk, a non-sRGB profile is carried through as `iCCP`, and even the synthesised `eXIf`
+changes size with it. **ImageIO preserves the colour space and discards everything else.**
 
-Confirmed across shapes on that fixture, a 2000 x 1400 source:
+**What `sips` adds, it synthesises — it is not forwarding chunks the source carried.** A
+JPEG has no PNG chunks to forward, and `sips` writes them anyway. Over a 46-file spread of
+corpus JPEGs (`sourcecensus.py`), pixels were identical in all 46 and the whole file
+differed in 37, always by chunks only `sips` wrote:
+
+```
+20 files: sips writes extra [pHYs],      cg writes extra [(none)], pixels identical
+15 files: sips writes extra [iTXt pHYs], cg writes extra [(none)], pixels identical
+ 2 files: sips writes extra [iTXt],      cg writes extra [(none)], pixels identical
+```
+
+Both have an exact trigger:
+
+| source carries | `sips` writes `pHYs` | `sips` writes `iTXt` |
+|---|---|---|
+| nothing | 0 of 2 | 0 of 2 |
+| JFIF only | 20 of 26 | 0 of 26 |
+| Exif (any) | 15 of 18 | 17 of 18 |
+| XMP (any) | 7 of 10 | 9 of 10 |
+| no Exif and no XMP | 20 of 28 | **0 of 28** |
+
+`iTXt` appears when and only when the source carries Exif or XMP — `sips` builds an XMP
+packet out of them. `pHYs` appears when the source declares a real physical density, and
+the 6 JFIF-carrying files that produce none are exactly the ones whose APP0 gives an
+aspect ratio rather than a density:
+
+```
+JFIF density (0, 1, 1)     -> sips writes pHYs: False  (6 files)   units 0 = aspect ratio
+JFIF density (1, 72, 72)   -> sips writes pHYs: True  (18 files)   units 1 = dpi
+JFIF density (2, 118, 118) -> sips writes pHYs: True   (2 files)   units 2 = dpcm
+JFIF density None          -> sips writes pHYs: False  (2 files)
+```
+
+**So JFIF density does not predict identity**, and an earlier draft of this document was
+wrong to say every corpus JPEG carries it: 694 of 841 do, and 6 of the 9 files in the
+spread that matched byte for byte were carrying it.
+
+The chain also does not converge. Handed a PNG carrying the `sRGB` chunk — which is exactly
+what ImageIO writes — `sips` re-expresses it as `gAMA` plus `cHRM` and adds an `iTXt`, so a
+CoreGraphics-written intermediate does not make the next stage agree.
+
+**The conditional statement.** Whole files match when the source carries no Exif, no XMP
+and no physical density — which is every fixture `tests/pixels.write_png` produces, since
+it emits `IHDR`, `IDAT`, `IEND` and nothing else. Confirmed across four shapes including an
+enlargement:
 
 ```
 $ python3 fileid.py fixture.png 1000x700 1600x1200 900x500 333x2000
@@ -316,17 +379,15 @@ $ python3 fileid.py fixture.png 1000x700 1600x1200 900x500 333x2000
   333x2000    sips 9a8c7c63...  cg 9a8c7c63...  IDENTICAL
 ```
 
-**So the right statement is conditional.** Whole files match wherever the source carries no
-metadata for `sips` to forward, which covers every generated fixture the plan's tier-1
-gate uses; they differ wherever it does, which covers real corpus input — 47 corpus PNGs
-carry ancillary chunks and every corpus JPEG carries JFIF density. A tier-1 gate on
-generated fixtures may compare file hashes. A tier-2 gate on corpus images must compare
-decoded pixels or the `IDAT` stream, or it will fail on metadata and tell us nothing.
-The results below are reported on the pixel stream so that both tiers read the same way.
+They differ for most real corpus input: 369 of 841 corpus JPEGs carry Exif, 191 carry XMP,
+694 declare a density. A tier-1 gate on generated fixtures may compare file hashes. A
+tier-2 gate on corpus images must compare decoded pixels or the `IDAT` stream, or it will
+fail on metadata and tell us nothing. The results below are reported on the pixel stream so
+that both tiers read the same way.
 
 ### The shapes
 
-Source: `photo.png`, SHA-256 `45c17afb…`, a 2000 x 1500 sRGB crop cut from
+Source: `photo.png`, SHA-256 `8d34cd43…`, a 2000 x 1500 sRGB crop cut from
 `abstract_colorful_clouds_7117.jpg` (`36a717dc…`), so the pixels are photographic rather
 than a smooth synthetic gradient that could hide a difference. Every source in this
 section is named, hashed and given its derivation command in
@@ -574,7 +635,9 @@ The design's §3 says `_cg.py` holds every line of `ctypes`. It does not say how
 destination bitmap is configured, and the construction the plan writes out is silently
 wrong.
 
-The site is **Task 4 of the implementation plan, `_resize_to_png`, lines 826-827**, which
+The site is **`_resize_to_png` in Task 4 of the implementation plan** — cited by function
+name, because this document's own commits have already shifted these line numbers twice —
+which
 takes the colour space from the source and pairs it with `kCGImageAlphaNoneSkipLast`:
 
 ```python
@@ -584,7 +647,7 @@ ctx = scope.own(_checked(
                               colorspace, kCGImageAlphaNoneSkipLast),
 ```
 
-**Scope the fix to that call.** Task 6's `normalize_to_srgb_png`, lines 1106-1107, also
+**Scope the fix to that call.** Task 6's `normalize_to_srgb_png` also
 passes `kCGImageAlphaNoneSkipLast`, and is correct as written: it builds its context in a
 colour space it creates itself with `CGColorSpaceCreateWithName("kCGColorSpaceSRGB")`,
 which is RGB by construction and can never be handed a monochrome source space. Sweeping

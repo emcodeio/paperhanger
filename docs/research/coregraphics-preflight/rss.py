@@ -4,10 +4,17 @@ Usage: python3 rss.py <source.png> <out_w> <out_h> <runs>
 """
 import sys
 import os
+import atexit
+import shutil
+import tempfile
 import re
 import subprocess
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+# Intermediates go to a temp directory, never beside this script: the repo is
+# public and these files are derived from corpus photographs.
+SCRATCH = tempfile.mkdtemp(prefix="cg-preflight-")
+atexit.register(shutil.rmtree, SCRATCH, ignore_errors=True)
 PAT = re.compile(r"(\d+)\s+maximum resident set size")
 
 
@@ -19,8 +26,8 @@ def peak(argv):
 
 src, w, h, runs = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), \
     int(sys.argv[4])
-sips_out = os.path.join(HERE, "rss_s.png")
-cg_out = os.path.join(HERE, "rss_c.png")
+sips_out = os.path.join(SCRATCH, "rss_s.png")
+cg_out = os.path.join(SCRATCH, "rss_c.png")
 
 sips_runs, cg_runs = [], []
 for _ in range(runs):
