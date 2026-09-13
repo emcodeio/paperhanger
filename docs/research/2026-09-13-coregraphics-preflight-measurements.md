@@ -10,9 +10,9 @@ fifth that nobody asked for and that matters more than three of the four.
 | Question | Verdict |
 |---|---|
 | 1. EXIF orientation | Clears the way. `sips` and ImageIO agree on geometry; they disagree on whether the tag survives into the output. |
-| 2. Peak memory at 300 Mpx | Clears the way. CoreGraphics peaks 30 MB higher, which is the Python interpreter. The pixel cap does not move. |
+| 2. Peak memory at 300 Mpx | Clears the way. CoreGraphics peaks 17–30 MiB higher, tracking the output bitmap rather than the source. The pixel cap does not move. |
 | 3. HEIC input | Clears the way. Both corpus HEICs decode, dimensions agree exactly. The corpus holds two, not one. |
-| 4. Interpolation exactness | Clears the path production uses, and **changes the verification plan**. Reduction is exact from 0.10x to 0.995x. Enlargement is not exact, and neither is a reduction within half a percent of identity. |
+| 4. Interpolation exactness | Clears the path production uses, and **changes the verification plan**. Vertical reduction is exact to 0.994792 and diverges from 0.995000. Enlargement is not reliably exact at any factor. |
 | 5. (unasked) Destination colour space | **Changes the design.** Taking the bitmap context's colour space from the source, with `kCGImageAlphaNoneSkipLast`, renders ten real corpus images entirely black, silently. |
 
 Everything below was measured on macOS 26.6.2 (build 25G83), arm64, 36 GiB. `python3` is
@@ -20,10 +20,11 @@ Everything below was measured on macOS 26.6.2 (build 25G83), arm64, 36 GiB. `pyt
 three system frameworks under it. `magick` is ImageMagick 7 from Homebrew, `exiftool`
 13.55.
 
-The instruments — `resize.py`, a shared `cgbase.py` of `ctypes` declarations, and four
-comparison scripts — were written for this measurement and deliberately not committed.
-They are measuring tools, not deliverables, and Task 1 writes the real bindings from the
-spec rather than from them.
+The instruments live in `docs/research/coregraphics-preflight/`, and its `README.md` names
+and hashes every source, with the command that derives each fixture, so every number here
+can be re-derived. They are measuring tools rather than deliverables — nothing in
+`paperhanger/` imports them, and Task 1 writes the real bindings from the spec rather than
+from these.
 
 ---
 
@@ -31,9 +32,9 @@ spec rather than from them.
 
 ### Building a fixture
 
-`sips` cannot write the tag. This is the second tool that cannot: `magick -set
-exif:Orientation` and `magick -orient RightTop` both failed during design, reading back
-empty and `Undefined`.
+`sips` cannot write the tag. That makes two tools that cannot, across three attempts:
+`magick -set exif:Orientation` and `magick -orient RightTop` both failed during design,
+reading back empty and `Undefined`.
 
 ```
 $ magick -size 1200x600 gradient:red-blue rot.jpg
@@ -178,12 +179,31 @@ $ /usr/bin/time -l python3 resize.py huge.png cg_big_fixed.png 3750 5000 3
 
 623.4 MiB against 652.1 MiB — **+28.7 MiB, +4.6%**. Pixel-identical output.
 
-**This clears the way and does not move the pixel cap.** The gap is 30 MB in both runs,
-independent of the pixel count, which is the Python interpreter and the loaded
-frameworks rather than anything about imaging. Both paths materialise the whole decoded
-source — 300 Mpx at 4 bytes is 1.2 GB, and that is the bulk of both figures — plus a
-75 MB destination bitmap. Neither streams. The cap exists for the same reason after this
-change as before it, and at the same value.
+### What the gap is, measured rather than assumed
+
+A pair of runs cannot show what the gap depends on, so both frame sizes were run five
+times against two output sizes (`rss.py`, which repeats the pair and prints the spread).
+Within a configuration the figures barely move — the widest spread over five runs is
+1.3 MiB — so the differences below are signal.
+
+| source frame | output | `sips` peak | CoreGraphics peak | difference |
+|---|---|---|---|---|
+| 75 Mpx | 1875 x 2500 | 365,510,656 B | 383,221,760 B | **+16.9 MiB** |
+| 300 Mpx | 1875 x 2500 | 1,266,761,728 B | 1,283,964,928 B | **+16.4 MiB** |
+| 75 Mpx | 3750 x 5000 | 520,519,680 B | 552,239,104 B | **+30.2 MiB** |
+| 300 Mpx | 3750 x 5000 | 1,421,672,448 B | 1,452,982,272 B | **+29.9 MiB** |
+
+**The gap tracks the output bitmap, not the source frame.** Quadrupling the source moves
+it by half a mebibyte; quadrupling the output moves it by thirteen. So the CoreGraphics
+path carries roughly a fifth of the destination bitmap in extra transient allocation, on
+top of a fixed cost of about 12 MiB for the interpreter and the frameworks.
+
+**This clears the way and does not move the pixel cap.** What dominates both paths is the
+decoded source, and it is the same size for both: 300 Mpx at 4 bytes is 1.2 GB, which is
+the bulk of every figure in the table. Neither path streams. The gap is a fixed tens-of-
+megabytes tax on an output bitmap whose size the design already controls, and at the
+sizes this tool produces it never approaches the cap. The cap exists for the same reason
+after this change as before it, and at the same value.
 
 Worth stating for Task 1: if the cap ever needs to rise, `CGImageSourceCreateThumbnail-
 AtIndex` decodes to a bounded size without materialising the full frame, and has no
@@ -238,7 +258,7 @@ not a new problem, but they are inputs the design has not considered by name.
 
 ### What "byte for byte" can mean, and why it matters here
 
-The compressed pixel stream and the file are not the same comparison, and on PNG they
+The compressed pixel stream and the file are not the same comparison, and on PNG they can
 give different answers. For a 600 x 400 source reduced to 300 x 200:
 
 ```
@@ -258,22 +278,59 @@ eXIf   same
 sRGB   same
 ```
 
-**The compressed pixel data is byte-identical — not merely the pixels, the exact
-deflate stream — and the whole-file difference is one 32-byte `cHRM` chunk `sips` writes
-and we do not.** 110,911 minus 110,867 is 44 bytes, which is that chunk plus its header
-and CRC. On a real photograph `sips` adds more: `gAMA`, `cHRM`, `pHYs`, an `iTXt` block,
-and a fuller `eXIf` than ImageIO synthesises.
+**The compressed pixel data is byte-identical — not merely the pixels, the exact deflate
+stream — and the whole-file difference is one 32-byte `cHRM` chunk `sips` writes and we do
+not.** 110,911 minus 110,867 is 44 bytes, which is that chunk plus its header and CRC.
 
-So `sips` and CoreGraphics never produce identical PNG *files*, on any shape, including
-every shape that passes below. The results are reported on the pixel stream, which is
-what §5's differential bar can actually hold. **Task 1 should read §5's "byte-identical"
-as being about pixels**, and the gate should compare decoded pixels or `IDAT`, not file
-hashes — otherwise every comparison fails on metadata and tells us nothing.
+**Whole-file identity is reachable, and what decides it is the source, not the shape.**
+ImageIO with a NULL destination-properties dictionary always writes the same minimal pair,
+`sRGB` and a synthesised `eXIf`. `sips` writes that pair too — and then forwards whatever
+the source carried, translated into PNG chunks. When the source carries nothing to
+forward, the two files are the same bytes. Measured with `fileid.py`, which hashes both
+outputs and lists each one's ancillary chunks:
+
+| source | what the source carries | `sips` writes | whole file |
+|---|---|---|---|
+| `tests/pixels.write_png` fixture | nothing | `sRGB eXIf` | **identical SHA-256** |
+| a stripped PNG (`magick -strip`) | `tIME orNT` | `sRGB eXIf` | **identical SHA-256** |
+| corpus JPEG | JFIF density, XMP | `sRGB eXIf pHYs iTXt` | differs |
+| stripped corpus JPEG | JFIF density | `sRGB eXIf pHYs` | differs |
+| `magick`-made PNG | `cHRM gAMA pHYs tIME tEXt` | `gAMA cHRM eXIf pHYs iTXt` | differs |
+| corpus PNG with an ICC profile | `pHYs tIME`, `iCCP` | `iCCP eXIf pHYs` | differs |
+| a PNG ImageIO itself wrote | `sRGB eXIf` | `gAMA cHRM eXIf iTXt` | differs |
+
+Two rows are worth reading twice. The last one says the chain does not converge: handed a
+PNG tagged with an `sRGB` chunk, `sips` re-expresses that tagging as `gAMA` plus `cHRM`
+and adds an `iTXt`, so a CoreGraphics-written intermediate does not make the next stage
+agree. And the first says the tier-1 differential can hold the strict bar after all —
+`tests/pixels.write_png` emits `IHDR`, `IDAT`, `IEND` and nothing else, which is exactly
+the case where the files match.
+
+Confirmed across shapes on that fixture, a 2000 x 1400 source:
+
+```
+$ python3 fileid.py fixture.png 1000x700 1600x1200 900x500 333x2000
+  1000x700    sips 6d6f2147...  cg 6d6f2147...  IDENTICAL
+  1600x1200   sips 0d4f29d5...  cg 0d4f29d5...  IDENTICAL
+  900x500     sips dcdc2fd1...  cg dcdc2fd1...  IDENTICAL
+  333x2000    sips 9a8c7c63...  cg 9a8c7c63...  IDENTICAL
+```
+
+**So the right statement is conditional.** Whole files match wherever the source carries no
+metadata for `sips` to forward, which covers every generated fixture the plan's tier-1
+gate uses; they differ wherever it does, which covers real corpus input — 47 corpus PNGs
+carry ancillary chunks and every corpus JPEG carries JFIF density. A tier-1 gate on
+generated fixtures may compare file hashes. A tier-2 gate on corpus images must compare
+decoded pixels or the `IDAT` stream, or it will fail on metadata and tell us nothing.
+The results below are reported on the pixel stream so that both tiers read the same way.
 
 ### The shapes
 
-Source: `photo.png`, a 2000 x 1500 sRGB crop cut from a corpus JPEG, so the pixels are
-photographic rather than a smooth synthetic gradient that could hide a difference.
+Source: `photo.png`, SHA-256 `45c17afb…`, a 2000 x 1500 sRGB crop cut from
+`abstract_colorful_clouds_7117.jpg` (`36a717dc…`), so the pixels are photographic rather
+than a smooth synthetic gradient that could hide a difference. Every source in this
+section is named, hashed and given its derivation command in
+`coregraphics-preflight/README.md`.
 
 ```
 $ /usr/bin/sips --resampleHeightWidth $h $w photo.png -s format png --out s.png
@@ -347,53 +404,155 @@ Enlargement, sweeping the vertical scale (`sweep.py`, same commands as above):
 The trigger tracks the **vertical** scale and is indifferent to the horizontal one —
 2.667 fails at x-scales of 1.0, 1.44, 2.0 and 2.667 alike. It is not monotone: 3.0 and
 3.84 pass while 2.667, 2.88 and 3.7 fail. Uniform scaling does not rescue it; 5760 x 4320
-is a clean 2.88x on both axes and still differs. No further attempt was made to
-reverse-engineer the rule.
+is a clean 2.88x on both axes and still differs.
 
-Reduction, on an 8000 x 4484 corpus photograph:
+**That table is one source's, and it does not generalise.** A 2000 x 1400 fixture diverges
+at y = 1.3664 and y = 1.3571 — below every failing factor in the table above — while
+passing at 1.50, and the 2000 x 1500 source passes at 1.40 and 1.50:
 
-| shape | scale | verdict | detail |
+```
+$ python3 sweep.py fixture.png 2000 1400 2880x1913 1000x1913 2880x1900 2880x2100
+2880x1913    1.4400  1.3664  DIFFER         3855      2
+1000x1913    0.5000  1.3664  DIFFER         1488      1
+2880x1900    1.4400  1.3571  DIFFER        58778      2
+2880x2100    1.4400  1.5000  SAME              0      0
+```
+
+So the divergent set depends on the source height as well as the scale, and the
+vertical-only rule holds here too (the same y at x = 0.5 and x = 1.44 both fail). No
+enlargement factor can be called safe on the strength of one source passing at it. No
+further attempt was made to reverse-engineer the rule; production never enlarges through
+this path.
+
+### Reduction: where the boundary actually is
+
+The first sweep varied both axes at once, which hid the boundary and put it in the wrong
+place. Holding the output width fixed and walking the output height one pixel at a time
+(`boundary.py`) puts it exactly, on a 7680 x 4800 source converted from a corpus HEIC:
+
+```
+$ python3 boundary.py nebula.png 7680 4800 3840 4770 4782
+out height   y scale      as a ratio verdict       bytes   maxd
+4770         0.993750     159/160    SAME              0      0
+4771         0.993958     4771/4800  SAME              0      0
+4772         0.994167     1193/1200  SAME              0      0
+4773         0.994375     1591/1600  SAME              0      0
+4774         0.994583     2387/2400  SAME              0      0
+4775         0.994792     191/192    SAME              0      0
+4776         0.995000     199/200    DIFFER        51321      1
+4777         0.995208     4777/4800  DIFFER         4581      4
+4778         0.995417     2389/2400  DIFFER         9646      9
+4779         0.995625     1593/1600  DIFFER        12205      3
+4780         0.995833     239/240    DIFFER        45288      1
+4781         0.996042     4781/4800  DIFFER         4901      6
+4782         0.996250     797/800    DIFFER        20321      4
+```
+
+**Exact to y = 0.994792. Divergent from y = 0.995000.** The same walk on an independent
+synthetic source of the same height puts the boundary in the identical place:
+
+```
+$ python3 boundary.py fixture4800.png 3000 4800 1500 4773 4778
+4775         0.994792     191/192    SAME              0      0
+4776         0.995000     199/200    DIFFER        51747      1
+4777         0.995208     4777/4800  DIFFER        10443     14
+4778         0.995417     2389/2400  DIFFER        29818     27
+```
+
+**The sliver is vertical-only**, the same rule the enlargement region follows. Holding the
+divergent height and sweeping the width changes nothing; putting the width deep inside the
+sliver while the height stays below the boundary changes nothing either:
+
+| shape | x scale | y scale | verdict |
 |---|---|---|---|
-| 800 x 448 | 0.10 | **SAME** | |
-| 1920 x 1080 | 0.24 | **SAME** | |
-| 2880 x 1614 | 0.36 | **SAME** | |
-| 4000 x 2242 | 0.50 | **SAME** | |
-| 5120 x 2869 | 0.64 | **SAME** | |
-| 7680 x 4304 | 0.96 | **SAME** | |
-| 7760 x 4349 | 0.97 | **SAME** | |
-| 7920 x 4439 | 0.99 | **SAME** | |
-| 7960 x 4461 | 0.995 | **SAME** | |
-| **7990 x 4478** | **0.9988** | **DIFFER** | 61,378 of 107,337,660 bytes (0.06%), max delta 7 |
-| **7999 x 4483** | **0.99988** | **DIFFER** | 37,734 of 107,578,551 bytes (0.04%), max delta 9 |
-| 8000 x 4484 | 1.0 | **SAME** | identity |
+| 1920 x 4776 | 0.2500 | 0.9950 | **DIFFER** |
+| 3840 x 4776 | 0.5000 | 0.9950 | **DIFFER** |
+| 7000 x 4776 | 0.9115 | 0.9950 | **DIFFER** |
+| 7648 x 4776 | 0.9958 | 0.9950 | **DIFFER** |
+| 7680 x 4776 | 1.0000 | 0.9950 | **DIFFER** |
+| 7648 x 4000 | 0.9958 | 0.8333 | **SAME** |
+| 7648 x 2400 | 0.9958 | 0.5000 | **SAME** |
+| 7679 x 3600 | 0.9999 | 0.7500 | **SAME** |
+| 3840 x 4800 | 0.5000 | 1.0000 | **SAME** |
+| 7000 x 4800 | 0.9115 | 1.0000 | **SAME** |
+| 7679 x 4800 | 0.9999 | 1.0000 | **SAME** |
 
-**Reduction is exact everywhere except a sliver immediately below identity**, between
-0.995x and 1.0x, where the disagreement is real but tiny.
+Reporting one horizontal scale per row is what hid this. The earlier reduction sweep read
+"7960 x 4461, 0.995, SAME" — that row's vertical scale is 4461/4484 = 0.994871, below the
+boundary, and the two shapes it called divergent, 7990 x 4478 and 7999 x 4483, have
+vertical scales of 0.998662 and 0.999777. Nothing in that sweep was wrong; it was too
+coarse to see where the edge sat.
+
+The last three rows matter for a different reason: a vertical scale of exactly 1.0 is
+exact at every horizontal scale. 577 real plans resample with the height unchanged, and
+they are all safe.
+
+**So: vertical reduction is exact from 0.10x through 0.994792 and at identity, and
+diverges between 0.995000 and 1.0.** The disagreement there is small — under 0.15% of
+bytes in every shape measured, with a maximum channel delta of 27 — but it is real and
+deterministic, not noise.
 
 ### What this means for the design
 
-**The path production actually uses is exact.** `execute._refuse_to_enlarge` raises
-before every resampling render unless the source is at least as large as the target on
-both axes — global constraint 1, that nothing but the ML model enlarges. So
-`resize_and_encode` is only ever asked to reduce or to hold, and every reduction from
-0.10x to 0.995x measured exact on photographic pixels. The equivalence bar is reachable.
+**The path production actually uses is exact.** `execute._refuse_to_enlarge` raises before
+every resampling render unless the source is at least as large as the target on both axes
+— global constraint 1, that nothing but the ML model enlarges. So `resize_and_encode` is
+only ever asked to reduce or to hold.
 
-Three things change.
+**Production does not reach the divergent sliver either.** That is measured rather than
+argued: `plan_scales.py` runs the real planner, `plan.plan_photo`, over the measured
+dimensions of all 894 corpus images and reconstructs the input to each resize the way
+`execute.render` does, following the crop and the 4x upscale where they apply.
 
-**The gate must compare pixels, not files.** Whole-file PNG equality never holds; see
-above.
+```
+$ python3 docs/research/coregraphics-preflight/plan_scales.py ~/Pictures/wallpaper
+photos planned        : 894
+output plans          : 3441
+plans that resample   : 2734
+vertical scale  < 1   : 2157
+vertical scale == 1   : 577
+vertical scale  > 1   : 0
+horizontal scale > 1  : 0
+
+closest vertical reductions to identity:
+  0.984627   7800x5204 -> 7680x5124   rock_arch_sunset_8323.jpg
+  0.984615   7800x5200 -> 7680x5120   red_sand_dunes_waterfall_5253.jpg
+  0.984615   7800x5200 -> 7680x5120   waterfall_reflection_forest_scene_1431.jpg
+  0.984051   7804x5204 -> 7680x5121   misty_lake_scene_8929.jpg
+  0.980467   7833x5222 -> 7680x5120   abstract_black_and_white_swirls_...jpg
+
+boundary (largest exact vertical reduction measured): 0.994792
+plans landing at or above the boundary: 0
+```
+
+No plan enlarges, on either axis — the guard is doing what it says. The closest any real
+plan comes to identity is **0.984627**, a full percentage point below the 0.994792
+boundary, and it resamples exactly:
+
+```
+$ python3 sweep.py frame4x.png 7800 5204 7680x5124
+7680x5124    0.9846  0.9846  SAME              0      0
+```
+
+So the sliver is a **latent boundary, not a live risk**. It is worth a pinned test to
+catch drift — a target table edited, or an upscale factor changed, could walk a plan into
+it — but nothing in the corpus reaches it today, and the equivalence bar is reachable as
+written.
+
+Two things change.
+
+**How the gate compares depends on the tier.** Tier 1, on `tests/pixels.write_png`
+fixtures, may compare whole files: those sources carry no metadata and the two tools
+produce identical SHA-256. Tier 2, on corpus images, must compare decoded pixels or the
+`IDAT` stream, because `sips` forwards source metadata that ImageIO drops. See the top of
+this section.
 
 **The gate must not assert exactness on enlargement.** A fixture that enlarges will pass
-or fail depending on where its scale factor lands, with no rule to predict it. The
-brief's own acceptance criterion asks for "one enlargement", and that shape tests a path
-`_refuse_to_enlarge` forbids. It is worth one pinned, documented test that records the
-divergence exists — not a gate that has to stay green.
-
-**Near-identity reductions need a decision.** A source 0.1% larger than its target is
-not hypothetical: band 1 is "measures at or above the ideal", and a 7690-wide slice
-resized to 7680 sits squarely in the failing sliver. Either pin it as a named exception
-with these numbers, or have the differential sample deliberately include such a shape so
-the exception is visible rather than discovered later.
+or fail depending on where its vertical scale lands, and the safe factors differ from one
+source height to the next, so no fixture can be called safe by picking a factor that
+worked elsewhere. The brief's own acceptance criterion asks for "one enlargement", and
+that shape tests a path `_refuse_to_enlarge` forbids. It is worth one pinned, documented
+test that records the divergence exists — not a gate that has to stay green.
 
 ### Grayscale sources resize exactly
 
@@ -411,13 +570,28 @@ Once the bitmap context is built correctly — which is the next section.
 
 ## 5. The question nobody asked: the destination colour space
 
-The design's §3 says `_cg.py` holds every line of `ctypes`. It does not yet say how the
-destination bitmap is configured, and the obvious construction is silently wrong.
+The design's §3 says `_cg.py` holds every line of `ctypes`. It does not say how the
+destination bitmap is configured, and the construction the plan writes out is silently
+wrong.
 
-Taking the colour space from `CGImageGetColorSpace` on the source and pairing it with
-`kCGImageAlphaNoneSkipLast` — the combination the brief specifies — **succeeds on a
-grayscale source and renders it entirely black.** No NULL, no error, no exception, a
-plausible file of exactly the right size:
+The site is **Task 4 of the implementation plan, `_resize_to_png`, lines 826-827**, which
+takes the colour space from the source and pairs it with `kCGImageAlphaNoneSkipLast`:
+
+```python
+colorspace = _cg.CGImageGetColorSpace(image)     # a Get: not ours to release
+ctx = scope.own(_checked(
+    _cg.CGBitmapContextCreate(None, out_width, out_height, 8, 0,
+                              colorspace, kCGImageAlphaNoneSkipLast),
+```
+
+**Scope the fix to that call.** Task 6's `normalize_to_srgb_png`, lines 1106-1107, also
+passes `kCGImageAlphaNoneSkipLast`, and is correct as written: it builds its context in a
+colour space it creates itself with `CGColorSpaceCreateWithName("kCGColorSpaceSRGB")`,
+which is RGB by construction and can never be handed a monochrome source space. Sweeping
+it into the fix would be a change with no defect behind it.
+
+That construction **succeeds on a grayscale source and renders it entirely black.** No
+NULL, no error, no exception, a plausible file of exactly the right size:
 
 ```
 $ magick -size 150x200 gradient:black-white tiny_gray.png
@@ -472,11 +646,53 @@ decoded colour space models: {'RGB/32bpp': 51, 'Monochrome/8bpp': 1}
 — but generated fixtures do, as §2 above found the hard way, so `_cg.py` should fail with
 an `ImagingError` naming the colour space rather than a NULL dereference.
 
-**This changes the design.** §3.2 should carry a rule: the destination bitmap's alpha
-info is derived from the source colour space model, monochrome and RGB are both
-supported, and anything else is refused by name. §5's mutation discipline should add the
-question it would have caught — would a test notice if every grayscale wallpaper came
-out black? — alongside the ones about `CFRelease` and NULL.
+### Why the planned gate would not have caught it
+
+The differential in Task 4 is `test_resize_matches_sips_exactly`, parametrised over four
+shapes:
+
+```python
+SHAPES = [
+    (2000, 1400, 1000, 700),
+    (800,  600,  1600, 1200),
+    (2000, 1400, 900,  500),
+    (1400, 2000, 500,  900),
+]
+```
+
+Its sources come from a `photo_fixture` the plan does not define — no `photo_fixture`,
+`png_fixture` or `gradient_fixture` exists in `tests/conftest.py` today, so whoever writes
+Task 4 will build them on `tests/pixels.write_png`, which is the suite's only PNG writer.
+That writer emits `IHDR` with colour type 2:
+
+```python
++ _chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+```
+
+**8-bit RGB, always.** There is no way to ask it for a grayscale image. So every source the
+gate ever compares decodes to an RGB colour space, `kCGImageAlphaNoneSkipLast` is the right
+pairing for all of them, and the four shapes pass byte for byte while the ten grayscale
+wallpapers come out black.
+
+The four scale factors miss the divergent regions too — 0.5, 2.0, 0.45 and 0.357 are all
+clear of both the reduction sliver and the enlargement factors measured above — so the
+gate is green on every axis it looks at. That is precisely why this has to be fixed in
+`_cg.py` rather than caught by the differential: **a gate whose fixtures cannot express
+the failing input cannot fail.**
+
+### What changes
+
+**§3.2 should carry a rule**: the destination bitmap's alpha info is derived from the
+source colour space model, monochrome and RGB are both supported, and anything else is
+refused by name with an `ImagingError` rather than a NULL dereference.
+
+**Task 4 needs a grayscale fixture.** Either `tests/pixels` grows a colour-type-0 writer,
+or the tier-2 differential includes one of the ten named files above. Without one, the
+same defect can return under a later edit and the suite will stay green.
+
+**§5's mutation discipline should add the question it would have caught** — would a test
+notice if every grayscale wallpaper came out black? — alongside the ones about `CFRelease`
+and NULL.
 
 ---
 
@@ -491,3 +707,13 @@ See §1.
 **The corpus census in full**, for whatever later work wants it: 841 JPEG, 47 PNG, 3
 WebP, 1 GIF, 2 HEIC; 884 RGB and 10 grayscale; all 8-bit; no orientation tag other than
 identity; all 894 open through ImageIO.
+
+**The planner never enlarges and never resamples a photo more than once.** 894 photos
+produce 3441 output plans, of which 2734 resample: 2157 reduce vertically, 577 hold the
+height exactly, and none enlarges on either axis. Numbers from `plan_scales.py`, which is
+also the cheapest way to re-check any claim of the form "production never asks for X".
+
+**Three fixtures the plan names do not exist.** `photo_fixture`, `png_fixture` and
+`gradient_fixture` appear throughout Tasks 1 through 4; `tests/conftest.py` defines none
+of them. The suite's only image writer is `tests/pixels.write_png`, which is RGB-only and
+deterministic.
