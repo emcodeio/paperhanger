@@ -24,12 +24,30 @@ dependencies: `sips` ships with macOS and `upscayl-bin` is invoked as a subproce
 paperhanger/
   sizes.py       thresholds and the ideal/floor table         pure
   classify.py    (w, h) -> device, axis, ideal, floor         pure
+  bands.py       the five bands and the output dimensions     pure
+  geometry.py    the crop rectangles for both crop paths      pure
+  formats.py     extensions and the quality defaults          pure
   plan.py        OutputPlan dataclass and the planner         pure
+  report.py      renders plans as the dry-run report          pure
   imaging.py     sips and upscayl-bin subprocess wrappers     effects
   toolchain.py   locate / verify / download binary and model  effects
   execute.py     runs plans, calls imaging, files results     effects
-  cli.py         argument parsing, dry-run report, progress
+  cli.py         argument parsing, the run loop, progress     effects
 ```
+
+Seven pure modules, not three. `bands`, `geometry` and `formats` were folded into
+`plan.py`'s row in the first draft of this table and are separate files; `report.py` was
+listed on the effects side and never had any — it imports `bands` and `sizes`, takes the
+set of finished destinations as a parameter, and touches nothing, which is what lets the
+CLI render it before the toolchain check and before anything is written.
+
+`plan.py` stays pure while holding the `Path` arithmetic that builds every destination,
+which is a narrower claim than it looks: `/`, `.parent`, `.stem`, `.suffix` and
+`.with_name` compute a path without asking a disk anything. The one filesystem-dependent
+choice section 3 places at plan time — skipping a plan whose output already exists — is
+therefore NOT here. It is `execute.is_pending`, called by the report, by the toolchain
+pre-flight and by the executor, so that the dry-run and the run cannot disagree.
+`tests/conftest.assert_pure_module` enforces all seven rows by parsing imports and calls.
 
 Installed with `uv tool install .`; developed with `uv run paperhanger`.
 
@@ -42,14 +60,21 @@ Every decision is made before anything is written.
 input path
   -> scan       candidate files, filtered by probing with sips (not by extension)
   -> measure    imaging.probe() -> (w, h, source_format)   one sips call per file
+                The format decides nothing past this point and the planner does
+                not take it: normalizing unconditionally on the upscale path
+                (constraint 5) left it with no consumer. It is what tells an
+                image from a .DS_Store, and it stops at the scan.
   -> classify   pure: device(s), axis, ideal, floor
   -> plan       pure: a flat list of OutputPlans, grouped by source photo. Crop
                 slices are planned, not written, because
                 slice dimensions follow arithmetically from source dimensions.
                 Both output axes, the format, and the destination path are fixed
-                here; so is the decision to skip a plan whose output already
-                exists, which is the last filesystem-dependent choice and belongs
-                on this side of the line.
+                here. Skipping a plan whose output already exists is the one
+                filesystem-dependent choice, so it does NOT live here -- it is
+                `execute.is_pending`, defined once and called by the report, the
+                pre-flight and the executor alike, so the dry-run and the run
+                cannot disagree. Keeping it out of `plan.py` is what lets the
+                purity assertion cover this module at all.
   ---- every decision is now made; nothing has been written ----
   -> --dry-run? render the report and exit
   -> execute    per photo: normalize -> upscale the whole frame once
@@ -230,10 +255,13 @@ once per source photo, only if some plan of its needs the upscaler:
                 upscayl-bin -i in.png -o 4x.png -m <models> -n upscayl-standard-4x -s 4
 
 then once per output plan:
-  |> crop       slice plans only, and always its own invocation:
-                sips -c H W --cropOffset Y X
+  |> crop       slice plans only, always its own invocation, and always PNG:
+                sips -s format png -c H W --cropOffset Y X
                 cut from the 4x frame for bands 3 and 4, from the source for bands
-                1 and 2 — so the rectangle is scaled by 4 on the upscaled path
+                1 and 2 — so the rectangle is scaled by 4 on the upscaled path.
+                Two --cropOffset shapes are silently ignored (below), and those
+                go the long way round: pad one pixel on every side, then crop at
+                +1, with -s format png BEFORE --padColor.
   |> resize     bands 1 and 3 only
   +  encode     resize and encode are one invocation, with BOTH axes explicit:
                 sips --resampleHeightWidth <H> <W> \
@@ -246,7 +274,8 @@ no temp file; `sips` reads HEIC natively, so no conversion is needed there. Slic
 always need at least two invocations, and 672 of the corpus's 974 band-1 and band-2 plans
 are slices.
 
-Three measured constraints produced that block. Each fails silently if ignored:
+Seven measured constraints produced that block: five found before implementation and
+two found during it. Each fails silently if ignored:
 
 - **Crop must never be fused with a resample.** `sips -c 1080 1920 --cropOffset 0 500
   --resampleWidth 960` on a 3840-wide source returns 480x270, not 960x540: the resample is
@@ -267,6 +296,55 @@ Three measured constraints produced that block. Each fails silently if ignored:
   order of magnitude larger than the 33.6-to-36.0 dB spread the upscaler itself was chosen
   on. Normalizing only unreadable formats would never fire for any of them, since all are
   JPEG or PNG.
+- **A write `sips` skips still exits 0.** Given a path it cannot read — one that does not
+  exist, or a directory — `sips` prints `Warning: <path> not a valid file - skipping` to
+  stderr, exits 0, and writes no output file at all. A corrupt file, an unwritable
+  destination and an unknown format all exit 13 and are caught by the status check, but
+  these are not, so the executor would carry on to the next stage against a file that was
+  never written. Every operation therefore asserts its post-condition — that the file it
+  asked for exists afterwards — and clears the destination first, so a stale file from an
+  earlier run cannot stand in for output this run never produced.
+- **Two `--cropOffset` shapes are silently ignored, and the geometry produces both.** Both
+  need `x == 0`. `--cropOffset 0 0` drops the offset and `sips` falls back to its default
+  *centered* crop; `--cropOffset <y> 0` with `y + height == source height` drops the crop
+  entirely and returns the whole source. Measured on 1600x1200: `horizontal_thirds`' top
+  slice, asked for 1600x1000 at (0,0), comes back as the rows at y=100 — the middle slice;
+  its bottom slice, asked for 1600x1000 at (0,200), comes back as the full 1600x1200 image;
+  and `vertical_thirds`' left slice, asked for 800x1200 at (0,0), comes back as the band at
+  x=400. Two of the three desktop slices and one of the three phone slices, wrong, at
+  exactly the requested size — so no dimension check can see it, and only comparing the
+  returned pixels against the region asked for will. An `x` of 1 or more is correct at every
+  `y`, and `x == 0` is correct for every `y` strictly between those two. `crop` works around
+  it by padding one pixel on every side and cropping at +1, which costs one extra full-image
+  pass on the affected slices; the executor could pad each 4x frame once instead.
+- **Argument order decides whether `-s format` is honoured.** Found during
+  implementation, and the reason the pad command above puts it first. Placed *after*
+  `--padColor` it is silently dropped: a 2560x1600 JPEG padded with `-p H W --padColor
+  FF00FF -s format png` comes back as JPEG, byte-identical in size to the same run with no
+  `-s format` at all (3580120 B both), while moving `-s format png` in front yields PNG
+  (11544706 B). `sips` warns `Output file suffix should be jpg` on stderr, which a zero
+  exit discards. Not cosmetic: a lossy padded intermediate puts the magenta pad inside the
+  same 8x8 DCT blocks as the pixels being kept, so it bleeds into the crop. On a uniform
+  (20, 90, 40) region cut from a q90 JPEG, mean absolute per-channel error is 63.14 at
+  column 0 and 21.87 at column 1 against 0.33 in the interior, with column 0 shifted
+  R +73.2, G -49.1, B +67.1 — `FF00FF`'s own signature, a quarter of the way to magenta on
+  the outermost column. Forced to PNG the same columns measure 0.00. Note also that without
+  `-s format`, `sips` keeps the *source's* format whatever the `--out` suffix says, so a
+  `.png` filename proves nothing about the bytes — which is why `crop` both forces PNG and
+  refuses an `out_path` named anything else.
+
+The seventh bounds what `crop` may be asked for: **an out-of-bounds crop pads with
+black** rather than clamping or failing. A 400x200 source cropped at x=900,y=900 returns a
+120x80 image that is entirely black, at exit 0, as a valid file. `crop` therefore probes its
+source and refuses a rect that does not fit — the post-condition cannot help, because the
+file exists and is exactly the size asked for. This matters most on the upscale path, where
+slices are cut with `rect.scaled(4)`: an enlargement even a pixel short of exactly 4x would
+otherwise produce a black-edged wallpaper with nothing raising.
+
+`paperhanger/imaging.py` opens with the same seven, numbered in the order it applies them,
+with one substitution: colour normalization is a rule about which path runs rather than a
+`sips` defect, so the module's slot for it is `sips -g pixelWidth` exiting 0 while printing
+`pixelWidth: <nil>` — section 12's non-image detection, not this section's business.
 
 There is no copy-instead-of-encode shortcut for band 2. It would fire on 1 of 3441 corpus
 plans, and for a slice triple it would bypass `crop` and emit three identical full frames.
@@ -288,10 +366,183 @@ at sorting time are not strictly comparable. Cut from one enlargement, the overl
 identical.
 
 **Two qualifications.** Above a 300 Mpx cap on the enlarged frame, the photo falls back to
-per-slice upscaling; 92 of the 756 whole-frame jobs exceed it. And this rests on the
-assumption that enlarging then cutting equals cutting then enlarging — true if the model has
-no whole-image context, which is how this architecture works, but **not measured**, because
-`upscayl-bin` is not installed on the author's machine. Section 13 gates it on a test.
+per-slice upscaling — but only when every plan that needs the upscaler is a *slice*. 92 of
+the 756 whole-frame jobs exceed the cap.
+
+The cap alone is not the condition, because falling back bounds nothing unless there is a
+crop rect to be bounded by. A plan with no crop covers the whole photo, so enlarging "just
+its region" enlarges the whole frame: the fallback's peak is then identical to the
+whole-frame path's, for one model run per plan instead of one per photo. Measured on
+1280x800 — a desktop whole-image plan plus three phone slices — both strategies peak at
+16,384,000 px of 4x output, the fallback taking four runs to get there and the whole frame
+one. Sweeping 400-20000 on both axes, 2878 of 7413 over-cap shapes have a cropless upscaling
+plan. Those photos stay on the whole-frame path: there is no cheaper decomposition, and
+attempting the frame is the only thing that can produce that output at all.
+
+The second qualification: this rests on enlarging then cutting being as good as cutting then
+enlarging. **Measured against ground truth, it is — by a margin too small to matter, in the
+design's favour.** Section 13 records both measurements.
+
+Scored against original photograph pixels (`tests/test_real_upscaler.py`). A ground-truth
+window is taken at native resolution, downscaled 4x by `sips` to make the model's input, and
+both arms enlarge it back; each is then scored against the truth slice cut from the untouched
+window — the protocol section 6 of the research document used to choose this upscaler. Two
+window sizes and both slice positions, **56 measurements in all**:
+
+| window | images | slice | PSNR: whole-frame closer | median Δ | DSSIM: whole-frame closer |
+|---|---|---|---|---|---|
+| 2048x2988 | 12 | middle | 11 of 12 | +0.023 dB | 9 of 12 |
+| 2048x2988 | 12 | top | 11 of 12 | +0.021 dB | 10 of 12 |
+| 1440x2160 | 16 | middle | 13 of 16 | +0.037 dB | 14 of 16 |
+| 1440x2160 | 16 | top | 15 of 16 | +0.020 dB | 14 of 16 |
+| **overall** | | | **50 of 56** | | **47 of 56** |
+
+Extremes across all 56: the largest margin for whole-frame is +0.54 dB, the largest against it
+−0.24 dB. Medians are given per window rather than pooled, because per window is what the test
+prints and a pooled figure would be a number nothing regenerates.
+
+The margin is the point, and it is nearly zero. On the first window's widest-gap image —
+`snowy_forest_6657.jpg`, top slice, the one the saved artifacts show — the two arms differ from
+*each other* by 38.71 dB, while each differs from the *truth* by about 29 dB: a mean absolute
+error of 4.623 levels for whole-frame against 4.800 for per-slice. The arms agree with one
+another about seven times more closely than either agrees with the truth. Whatever this
+upscaler gets wrong at 4x, it gets wrong almost identically whether it saw the whole frame or
+one slice of it. **Choosing the whole frame costs no quality, and section 7's saving is
+accepted on that evidence rather than on the architecture argument it started with.**
+
+The 1440x2160 window admits four more photographs, **including both of the two that disagreed
+most between the arms** — `mountain_lake_reflection_4788.jpg`, where whole-frame wins by +0.18
+and +0.20 dB, and `snowy_forest_landscape_9522.jpg`, the one image where per-slice wins by a
+visible margin at −0.10 dB on the middle slice and −0.01 on the top. Neither moves the
+aggregate. A 360x540 model input is also a smaller regime than 512x747, and it widens the
+spread a little (−0.24 to +0.42 against −0.05 to +0.54) without shifting its centre.
+
+**Where the two arms differ is the cut edge, and only the cut edge.** Measured band by band
+down the widest-gap slice, in 128-row bands of its 1280 rows:
+
+| rows | whole-frame MSE vs truth | per-slice MSE vs truth | the two arms, mean abs difference |
+|---|---|---|---|
+| 0-767 | 3.6 to 9.1 | identical | **0.000 — bit-identical** |
+| 768-895 | 11.77 | 11.77 | 0.053 |
+| 896-1023 | 41.39 | 41.46 | 0.089 |
+| 1024-1151 | 215.9 | 222.4 | 0.586 |
+| 1152-1279 | 500.4 | 601.5 | 5.789 |
+
+The two outputs are **bit-identical for the first 800 rows — 62.5% of the slice** — and
+diverge only as the cut edge approaches: the last 128 rows, 10% of the slice, carry **93.9%**
+of per-slice's extra squared error, and the last 256 rows carry 99.9%. Divergence begins 480
+output rows from the cut — 120 rows of model input, a tile-scale distance — and is strictly
+zero beyond it. (The band table's first row stops at 767 because that is a band boundary, not
+because row 768 differs; identity runs to row 799.)
+
+The smaller window says the same thing more sharply. On its 900-row slice the arms are
+bit-identical for 800 rows, 88.9%, and the last 128 rows carry **100.0%** of the deficit — two
+independent window sizes, both confining the whole difference to a tile's depth at the cut.
+
+That is the mechanism, and it favours the design for a reason that generalises past this
+experiment: **in production, every cut edge of a whole-frame slice has frame context behind it,
+and every cut edge of a per-slice enlargement has none.** The effect is real, local and
+one-sided.
+
+**It is also worth about two hundredths of a decibel, and the corrected mechanism must not be
+read as a stronger claim than the numbers support.** A margin that small is invisible; the
+finding remains that the two are **interchangeable**, not that whole-frame is better. What the
+mechanism buys is confidence that the sign is not an accident — the effect has a cause, the
+cause is one-sided, and it will keep pointing the same way — which is why section 7 can take
+the cheaper path without a caveat, rather than a reason to claim a quality gain.
+
+Two cautions on the measurement itself. The `0,0` origin of the top slice is a real image
+boundary in *both* arms, since whole-frame cuts it from the very top of its own 4x frame, so
+nothing measured at that edge can distinguish them — an earlier draft looked there, found the
+arms equally distant from truth, and wrongly concluded the edge was not involved. And absolute
+reconstruction quality is unremarkable — 18.4 to 40.1 dB against truth across the 56 — which is
+4x enlargement being hard, not a fact about which arm was used.
+
+The earlier measurement, kept because it is what the gate originally asked and because it
+explains why the question had to be re-asked. It scores the two arms **against each other**,
+which is a measure of how far the model's answer moves when its input is cropped, not of
+whether either answer is good — arm B is a second guess from the same model, not a truth.
+Measured over the 18 images of the 27-image sample whose native pixels can host a 700x1800
+window — the window centred, normalized to sRGB PNG, both arms cutting the same middle slice
+through `imaging.crop`:
+
+| | PSNR, whole-then-cut vs cut-then-upscale |
+|---|---|
+| minimum | **33.43 dB** (`snowy_forest_landscape_9522.jpg`) |
+| median | **42.86 dB** |
+| maximum | **52.61 dB** (`mountain_landscape_sunset_5677.jpg`) |
+
+The spread is why this could not be the gate. Under the single 40 dB threshold this design
+originally proposed, 12 of the 18 clear the bar, 4 land in the 35-40 dB band that was defined
+as a human judgment call, and 2 fall below the 35 dB floor that was defined as an automatic
+revert — so which of the three answers you get depends on which photograph you happen to
+measure. **That threshold has been withdrawn, and not replaced by another one.** The
+ground-truth measurement above answers the question it was standing in for, and answers it in
+a way a threshold on this number never could: the spread here is the model's answer moving
+under a crop, and the ground-truth scores show that movement is not a loss.
+
+An earlier draft reported **44.83 dB** and called the question closed. That figure was taken
+on a generated-noise fixture, which this model flattens almost to uniform — pixel standard
+deviation 0.2898 collapsing to 0.0232 — and the research document had already quantified the
+same inflation from the other direction, at 53 dB on a synthetic image against 40 dB on a real
+photograph. It measured the fixture, not the model.
+
+Three explanations were tested, and none of them accounts for the spread. It is **not** an
+artifact of how the slices are cut: the top slice, whose `0,0` origin sends both arms through
+the pad-and-shift workaround, scores 35.98 dB against the same window's 35.19 dB on the
+direct path — where a one-pixel misregistration reads 24.81 dB. It is **not** confined to the
+slice edges: the 16 outermost rows do diverge most, at 8.6-18.1 levels against an interior
+mean of 2.449, but they are 0.91% of the rows carrying 11.8% of the squared error, and
+trimming 128 rows from each end buys 0.75 dB on the centred window and 1.78 dB on the worst
+image — lifting that image only from 33.43 to 35.23. And it is **not tile size alone**:
+pinning `-t` to 128, 256 and 512 gives 32.99, 35.55 and 37.59 dB, a 4.6 dB span that makes
+tiling a real contributor, just not the whole story, since the spread survives at every
+pinned size. What is left is the model itself responding to how much context surrounds a
+pixel, which is what a convolutional receptive field does.
+
+That also bounds what the extra context buys arm A. The advantage is a boundary effect, and
+the boundary is under 1% of the picture; across the other 88% of the squared error neither
+arm is privileged, so "arm A sees more, therefore arm A is better" never followed from these
+numbers. The ground-truth measurement above is what settles it, and it bears the bound out:
+arm A does come out ahead, on 11 of 12 images, by a median of two hundredths of a decibel.
+
+(Provenance, for every number in this section. The full protocol, both per-image
+tables, the band analysis and the two superseded measurements are written up in
+`docs/research/2026-09-13-whole-frame-equivalence-gate.md`, with the difference maps
+for the widest-gap case under `docs/research/equivalence-difference-maps/`.
+
+**Regenerated by `tests/test_real_upscaler.py` on every run:** the 18-image
+arms-against-each-other distribution; the top-slice 35.98 against the middle slice's 35.19;
+all 56 ground-truth scores, the per-window win counts and medians, and the extremes.
+
+**Attributed — measured against the artifacts the test saves, but not computed by the test
+itself.** The test writes the two arms, the truth slice and a pair of auto-levelled difference
+images, which show *where* the arms disagree but not by how much, and it calculates no
+statistics. So these were measured separately, with `magick`, from the PNGs a tier-3 run
+saves: the
+widest-gap image's 38.71 dB between the arms and its 4.623 and 4.800 mean absolute errors
+against truth; the whole band table and everything drawn from it — the bit-identical first 800
+rows, the 93.9% and 99.9% squared-error shares, the 480-row divergence distance, and the second
+window's 88.9% and 100.0%. All of those were recomputed independently from those same
+artifacts by the controller, agreeing with the implementer's arithmetic to the digit. Also attributed,
+from the earlier arms-against-each-other work and likewise not recomputed by any test: the
+per-row edge range, the interior mean, its squared-error shares, the one-pixel-offset figure,
+both trim figures, the pinned-`-t` triple, and the 0.2898 → 0.0232 noise-flattening figures.
+
+**Nothing is committed, and these artifacts are not sitting in the repository.** An earlier
+draft of this paragraph said "those committed PNGs", which would send a reader looking for
+files that were never there: `CLAUDE.md` forbids wallpaper images in the repo, and the
+artifacts are git-ignored. `test_real_upscaler.py` writes them under the pytest `tmp_path`
+tree by default, where they vanish with it. To keep them, set
+`PAPERHANGER_EQUIVALENCE_ARTIFACTS` and `PAPERHANGER_GROUND_TRUTH_ARTIFACTS` to
+directories before the tier-3 run; then, and only then, can any of these numbers be
+reproduced. None of them will fail a test if the code changes underneath them.)
+
+Note also what the top-slice measurement does not establish, since the earlier draft claimed
+it did. It cannot catch an arm cutting the wrong region: under that bug both arms receive
+`sips`' centred crop, and those centres are exactly a factor of four apart (2724 = 4 x 681),
+so the two slide onto the middle slice together and still agree. It catches a
+misregistration, which is all it is now claimed to catch.
 
 **One process per upscale.** Directory mode would work, since the scale is always 4, but it
 buys only process startup against a 10-30 second run and costs per-photo progress and failure
@@ -301,7 +552,8 @@ isolation.
 Staging beside the destination rather than in the temp tree makes the rename atomic whatever
 volume `TMPDIR` lives on, and an interrupted run never leaves a truncated file where the
 sorter will see it. Stray `.partial` files are swept at startup. A plan whose output already
-exists is marked done at plan time and skipped; `--overwrite` forces regeneration. This
+exists is skipped, decided in one place by `execute.is_pending`; `--overwrite` forces
+regeneration. This
 makes re-running on the same folder both safe and resumable, which matters when a bulk
 import is measured in hours.
 
@@ -329,8 +581,10 @@ moth_desktop_6400x4800_4x.heic           band 4, in below_target/
 ```
 
 `<factor>` is the **net** enlargement in the finished file, to one decimal: `native` for
-bands 1 and 2, where the model never ran, and `I/d` for bands 3 and 4 — which is `4x` exactly
-in band 4 and between `1.5x` and `4x` in band 3. Net rather than the model's own factor,
+bands 1 and 2, where the model never ran; `I/d` in band 3, which falls between `1.5x` and
+`4x` because the 4x frame is reduced to the ideal; and a flat `4x` in band 4, where nothing
+is reduced and the 4x frame *is* the output. It is not `I/d` in band 4: that band is defined
+by `d*4 < I`, so `I/d` there exceeds 4 and describes an enlargement that never happened. Net rather than the model's own factor,
 because a photo enlarged 4x and then reduced carries less invented detail into the result
 than one left at 4x.
 
@@ -498,7 +752,7 @@ the author's acceptance pass, deliberately outside the definition of done:
 | Tier | What | Cost | When |
 |---|---|---|---|
 | 1 | generated fixtures, pure functions, stubbed upscaler | milliseconds | every commit |
-| 2 | 27 real corpus images, stubbed upscaler | seconds | every commit |
+| 2 | 27 real corpus images, stubbed upscaler | ~8 min | before every push |
 | 3 | the same 27 images, real upscaler | ~25 min | once, before calling it done |
 | 4 | all 894 images | ~24 h | the author, when he chooses |
 
@@ -522,12 +776,38 @@ the author's acceptance pass, deliberately outside the definition of done:
 - One test asserts that the dimensions in every output filename equal the dimensions `sips`
   reports for that file. This is the check that keeps section 3's no-drift claim honest.
 - One real-binary end-to-end test, marked and skipped by default.
-- **The whole-frame upscale is gated on an equivalence test**, also marked and run once
-  against the real binary: upscale a photo whole and cut a slice from the result; separately
-  cut the same slice from the source and upscale that; the two must match within a small
-  tolerance. Section 7's largest saving depends on this holding, and it is currently argued
-  from the model's architecture rather than measured. If it fails, section 7 reverts to
-  per-plan upscaling and the estimate returns to 37 hours.
+- **The whole-frame upscale is settled against ground truth**, marked and deselected by
+  default. Take a window of original pixels, downscale it 4x with `sips` to make the model's
+  input, enlarge it back both ways, and score each arm against the truth slice cut from the
+  untouched window. Run at two window sizes and both slice positions: **56 measurements**, of
+  which whole-frame is closer on **50 by PSNR** and **47 by DSSIM**, at per-window medians of
+  +0.020 to +0.037 dB. The gap is negligible beside the model's own reconstruction error — on
+  the widest-gap image the arms sit 38.71 dB from each other where each sits about 29 dB from
+  the truth. Both metrics are reported because the research document warns that PSNR inverts
+  the visual ranking for this upscaler; answering a perceptual question with PSNR alone is the
+  mistake that cost this task two review rounds. Section 7's saving is accepted on this.
+- **Two windows and two slice positions, each for a reason.** The 2048x2988 window is the
+  largest twelve sample photographs can supply; the 1440x2160 window admits sixteen, including
+  the two that disagreed most between the arms and that the larger window cannot fit. The
+  middle slice's cut edges are both interior to the 4x frame; the top slice has one edge at
+  `0,0` — a real image boundary in *both* arms, and so useless for telling them apart — and its
+  other edge against the cut, which is where section 7's band table locates the entire
+  difference. Neither addition moves the conclusion.
+- **The older arms-against-each-other measurement is kept, and asserts no threshold.** It
+  spans **33.43 to 52.61 dB, median 42.86** over 18 real photographs — 12 above the
+  once-proposed 40 dB bar, 4 in the 35-40 dB band, 2 below the 35 dB floor. That spread is
+  what disqualified a single-threshold gate: the verdict depended on which photograph you
+  measured. The test pins the two invariants that are not judgment calls — both arms agree on
+  dimensions, every selected image yields a measurement — and prints the rest. Both selections
+  are rules rather than hand-picked sets: every image in `tests/corpus_sample.txt` whose native
+  pixels can host the window, at 700x1800 here and 2048x2988 or 1440x2160 for the ground-truth
+  passes. The two images that score lowest here are the two the larger ground-truth window
+  cannot fit, which is why the smaller one exists; both are covered there.
+- The retired rule's three bands survive only as `old_rule_band`, a pure classifier used for
+  reporting. Its 35-40 dB branch — the one that was supposed to stop and ask a human — was
+  never once executed while the rule was live, because the only measurement that ever reached
+  it was the synthetic 44.83 dB. It now carries an unmarked tier-1 test that drives all three
+  bands and both boundaries by injection.
 ### 13.2 The 27-image sample
 
 The corpus at `~/Pictures/wallpaper` is a **read-only** asset. Every tier that uses it copies
@@ -541,27 +821,32 @@ machine that has never seen these photos.
 
 The 27 were chosen to cover every coverage tag the corpus contains — 36 of them: each of the
 six routing branches paired with each band it actually reaches, each input format, and each
-colour-profile class. They produce 102 outputs and 19 upscaler runs. Specific reasons some
+colour-profile class. They produce 102 outputs and 19 photos that need the model. That is 21 model calls in
+tier 3, not 19: the one over-cap image is upscaled per plan, so it calls three times. Specific reasons some
 are in the list:
 
 | Image | Why |
 |---|---|
 | `snowy_forest_landscape_9522.jpg` | **is actually a WebP.** A real file whose extension lies — the case section 12's probe rule exists for |
-| `moss_with_pine_needles_5324.jpg` | ProPhoto RGB, the widest gamut present; the colour-conversion case in section 7 |
-| `red_tulips_with_mountain_background_4338.jpg` | Adobe RGB |
+| `moss_with_pine_needles_5324.jpg` | ProPhoto RGB, the widest gamut present. 6000x4000, so band 2 on all four targets: nothing upscales it and its outputs keep the ProPhoto profile. It pins section 7's conversion rule to the upscale path rather than exercising it |
+| `red_tulips_with_mountain_background_4338.jpg` | Adobe RGB, and band 3 on all four targets, so it is the image that actually exercises the sRGB conversion |
 | `katana_with_tag_2369.jpg` | greyscale profile |
 | `dark_stones_7236.png`, `blade_runner_2049_concept_poseter_.webp` | no embedded profile at all |
-| `green_grass_texture_3997.png` | 9072x12096; the only sample image that trips the 300 Mpx fallback |
+| `green_grass_texture_3997.png` | 9072x12096, the largest source in the sample; band 1 on both devices, so a pure downscale that never asks the model for anything |
+| `bokeh_nature_scene_7629.jpg` | 4000x6000, a 4x frame of 384 Mpx: the only sample image that trips the 300 Mpx cap and falls back to per-plan upscaling |
 | `purple_nebula_glow_0312_x.heic` | HEIC already at 7680x4800, so band 1 and 2 with no conversion |
-| `foggy_forest_path_7098.JPG` | 620x1102; the only band 5 rejection in the sample |
+| `foggy_forest_path_7098.JPG` | 620x1102; one of two desktop band 5 rejections (620*4 = 2480, under the 5120 floor). Still passes for phone, at band 4 |
+| `galaxy_pattern_dark_tones_2480.JPG` | 1242x2688; the other desktop rejection (1242*4 = 4968, still under 5120). Passes for phone at band 3 |
 | `cityscape_illustration_4562.gif` | the one GIF; readable by `sips`, not by `upscayl-bin` |
 | `man_with_car_in_fog_1158.jpg` | 8392x4721, above the desktop ideal, so a pure downscale |
 
 Tier 2 runs these through the real `sips` with the upscaler stubbed, which is where almost
 all of the value is: it exercises format detection, colour conversion, crop geometry, naming
-and filing against genuinely messy input in seconds. Tier 3 repeats it with the real binary
+and filing against genuinely messy input. It costs about eight minutes -- real `sips`
+decoding real photographs -- which is why it gates pushes rather than commits, and why its
+tests carry the `corpus` marker that lets tier 1 run alone. Tier 3 repeats it with the real binary
 to confirm the two things a stub cannot check — that `upscayl-bin` accepts what we hand it,
-and the whole-frame equivalence this section gates section 7 on.
+and how far apart whole-frame and per-slice upscaling actually land on real photographs.
 
 ### 13.3 What the full corpus run is for
 
