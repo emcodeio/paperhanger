@@ -152,9 +152,11 @@ git commit -m "docs: preflight measurements for the CoreGraphics replacement"
 **Acceptance Criteria:**
 - [ ] `load(path)` returns an opaque image handle inside a scope, or raises `ImagingError` for a non-image
 - [ ] `_checked(ptr, what, path)` raises `ImagingError` naming both when handed NULL, and returns the pointer otherwise
-- [ ] `_Scope` releases every handle added to it, on exception as well as on success
+- [ ] `Scope` releases every handle added to it, on exception as well as on success
 - [ ] A test loads and releases 300 images and asserts RSS growth stays under 50 MB
 - [ ] `ctypes` is imported in `_cg.py` and nowhere else in `paperhanger/`
+- [ ] the seven fixtures named in Step 3a all exist in `tests/conftest.py` and are each used by at least one test
+- [ ] `pixels.write_grey_png` emits IHDR colour type 0 and `pixels.write_png16` emits bit depth 16, each asserted from the IHDR bytes
 
 **Verify:** `uv run pytest tests/test_cg.py -v` → all pass
 
@@ -230,12 +232,32 @@ def test_repeated_loads_do_not_leak(tmp_path, png_fixture):
     assert growth_mb < 50, f"RSS grew {growth_mb:.0f} MB over 300 loads"
 ```
 
-`png_fixture` is an existing conftest fixture that writes a PNG at exact dimensions using `tests/pngwriter.py`. Check its exact name in `tests/conftest.py` before writing; if it differs, use the real one rather than adding a duplicate.
+**`png_fixture` does not exist, and neither do the others this plan names.** `tests/conftest.py` defines only `processing_dir`, `corpus`, `corpus_sample`, `fake_upscaler` and `ready_toolchain`. Building the fixture set is part of this task -- see Step 3a. Six later tasks depend on them, so they are built once, here.
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
 Run: `uv run pytest tests/test_cg.py -v`
 Expected: FAIL, `ModuleNotFoundError: No module named 'paperhanger._cg'`
+
+- [ ] **Step 3a: Build the fixture set the rest of the plan assumes**
+
+`tests/pixels.py` writes RGB 8-bit PNGs only: `write_png(path, width, height, colour=(120,140,110), noise=False)`, `write_marked_png`, `read_png_rgb`. Every other shape this plan's tests need has to be built.
+
+Extend `tests/pixels.py` with two stdlib writers, matching its existing style. `write_grey_png(path, width, height, top=0, bottom=255)` emits colour type 0 at 8 bits — the shape that renders BLACK through a naively-built bitmap context, which ten corpus images are and which Task 0 measured coming back with all 4,665,600 pixels zero at exit 0. Nothing else in `tests/` can produce that input. `write_png16(path, width, height)` emits colour type 2 at bit depth 16 — the shape the old `sips` pad path silently downconverted, and the one pinned exception in Task 3's gate.
+
+Then add seven fixtures to `tests/conftest.py`, each a factory taking `(path, width, height)`:
+
+- `png_fixture` — `pixels.write_png`, a plain RGB PNG at exact dimensions.
+- `photo_fixture` — `pixels.write_png(..., noise=True)`. Detailed content, so a resample has something to get wrong; a flat colour resamples identically under any algorithm and would pass a broken implementation.
+- `gradient_fixture` — `pixels.write_grey_png`. The top-left pixel identifies which SOURCE ROW came back, which is the only way to tell a correct crop from `sips`' centred one, because both have the right dimensions.
+- `grayscale_fixture` — `pixels.write_grey_png` with a flat value. Tasks 4 and 6 must not blacken it.
+- `png16_fixture` — `pixels.write_png16`.
+- `profiled_fixture` — takes `(path, width, height, profile)` and shells out to `sips --matchTo /System/Library/ColorSync/Profiles/<profile>`; `profile=None` returns the untagged base.
+- `webp_fixture` — writes a WebP and names it `.jpg`, because the corpus really contains one (`snowy_forest_landscape_9522.jpg`) and `probe` must report the real format rather than the name. Shells out to `magick`.
+
+The last two shell out deliberately: both need a real encoder, both are test-only, and Global Constraint 1 governs `paperhanger/`, not `tests/`. When Task 8 removes `sips` from the project, `profiled_fixture` is the one test-side use that may remain — note it there rather than deleting it.
+
+Write a test per new writer in `tests/test_pixels.py` asserting the IHDR colour type and bit depth from the bytes, not merely that a file appeared.
 
 - [ ] **Step 3: Write `_cg.py`**
 
