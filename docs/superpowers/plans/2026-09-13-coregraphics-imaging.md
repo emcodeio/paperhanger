@@ -21,9 +21,12 @@
 7. **`crop` always writes PNG and refuses a non-`.png` name.** Unchanged contract.
 8. **`crop` keeps its bounds check.** `execute.py` crops the 4x frame with `rect.scaled(4)`; an enlargement a pixel short must raise, not produce a black edge.
 9. **`upscale` stays a subprocess.** `upscayl-bin` is untouched.
-10. **The differential bar is byte-identical PIXELS**, compared as decoded pixel data or the `IDAT` stream. This is not a perceptual threshold — identical pixels is stricter than any PSNR bound.
+10. **The differential bar is byte-identical PIXELS**, compared as decoded pixel data or the `IDAT` stream. Identical pixels is stricter than any perceptual threshold; this is not a relaxation.
 
-    File-level identity additionally holds for most sources and was measured on real corpus JPEGs, a grayscale corpus JPEG, and a 300 Mpx frame, all matching by SHA-256. Where whole files differ, the cause is characterized rather than mysterious: ancillary PNG chunks (`cHRM`, `pHYs`, `iTXt`) present in the SOURCE, which `sips` forwards and ImageIO drops. 47 corpus PNGs carry such chunks. A file-level difference is therefore explained by naming the chunks, never waved through as noise. A pixel difference either fails the build or is pinned as a named exception with its justification in the test itself.
+    **Whole-file comparison is deliberately NOT part of the gate.** `sips` translates a source's EXIF and XMP into PNG ancillary chunks that ImageIO does not emit, so two files with identical pixels routinely differ in bytes: measured at 36 of 46 corpus JPEGs. Whole-file identity does happen, and where it does it is worth noting in a report, but it is not a pass condition and a file-level difference is not a finding.
+
+    This constraint has been wrong twice. It first read "never identical", refuted by corpus JPEGs matching by SHA-256; then "identity holds for most sources, and differences are ancillary PNG chunks in the source", refuted by the 36-of-46 spread and by the cause being `sips` *synthesising* chunks rather than forwarding them. Both errors came from generalising a handful of fixtures. Compare pixels.
+
 11. **The corpus at `~/Pictures/wallpaper` is READ-ONLY.** Tests copy out and pass `--processing-dir`. No wallpaper image is ever committed.
 12. **No non-AI enlargement.** Unchanged: nothing is enlarged except by the model.
 
