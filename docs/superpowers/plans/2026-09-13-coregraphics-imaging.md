@@ -21,7 +21,7 @@
 7. **`crop` always writes PNG and refuses a non-`.png` name.** Unchanged contract.
 8. **`crop` keeps its bounds check.** `execute.py` crops the 4x frame with `rect.scaled(4)`; an enlargement a pixel short must raise, not produce a black edge.
 9. **`upscale` stays a subprocess.** `upscayl-bin` is untouched.
-10. **The differential bar is byte-identical.** A difference either fails the build or is pinned as a named exception with its justification in the test itself.
+10. **The differential bar is byte-identical PIXELS.** Compare decoded pixel data (or the `IDAT` stream), never the whole file, for PNG intermediates: `sips` and ImageIO emit identical deflate streams inside different container metadata (`cHRM`, `gAMA`, `pHYs`, `iTXt`), measured in Task 0, so file-level identity is unreachable there. Final encoded outputs (heic, jpeg, avif) DO match at file level and keep that bar. This is not a perceptual threshold — identical pixels is stricter than any PSNR bound. A difference either fails the build or is pinned as a named exception with its justification in the test itself.
 11. **The corpus at `~/Pictures/wallpaper` is READ-ONLY.** Tests copy out and pass `--processing-dir`. No wallpaper image is ever committed.
 12. **No non-AI enlargement.** Unchanged: nothing is enlarged except by the model.
 
@@ -430,7 +430,7 @@ git commit -m "feat: the CoreGraphics binding layer, scoped and null-checked"
 - Modify: `tests/conftest.py`
 
 **Acceptance Criteria:**
-- [ ] `compare(old_fn, new_fn, source, tmp_path)` returns `None` when the outputs are byte-identical and a described difference otherwise
+- [ ] `compare(old_fn, new_fn, source, tmp_path)` returns `None` when the outputs match and a described difference otherwise, comparing decoded pixels for PNG and whole files for lossy formats (see Global Constraint 10)
 - [ ] A deliberately different pair of functions makes it report a difference, proving the harness can fail
 - [ ] Identical functions make it report none
 - [ ] The helper reports which bytes differ and at what offset, not just that they do
