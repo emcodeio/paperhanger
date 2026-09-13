@@ -6,7 +6,11 @@ paperhanger turns a folder of images into desktop and phone wallpapers on macOS:
 
 ## Status
 
-Implemented and reviewed. `paperhanger/` holds the working tool (classification, cropping, execution, CLI, reporting) with a full test suite under `tests/`. Of the sixteen planned tasks (Task 0 through Task 15), all are complete except Tier 3 — the real-upscaler gate that confirms the whole-frame upscale equivalence against the real binary. See `README.md` for install, usage, output layout, and the testing tiers. The full 894-image corpus run (tier 4) is the author's acceptance pass and is not a gate on "implemented".
+Implemented and reviewed. `paperhanger/` holds the working tool (classification, cropping, execution, CLI, reporting) with a full test suite under `tests/`. All sixteen planned tasks (Task 0 through Task 15) are complete, Tier 3 included: 551 tests pass across all three tiers — 526 in tier 1, 19 against the real corpus, 6 against the real upscaler.
+
+Tier 3's open question is settled. Whether enlarging a whole frame and then cutting it differs from cutting first was measured against ground-truth original pixels, not by comparing the two methods to each other — 56 comparisons over two window sizes and both slice positions. They are interchangeable, so section 7 keeps the whole-frame path and a full run stays near 24 hours rather than 37. Section 7 carries the numbers.
+
+See `README.md` for install, usage, output layout, and the testing tiers. The full 894-image corpus run (tier 4) is the author's acceptance pass and is not a gate on "implemented".
 
 ## Read first
 
