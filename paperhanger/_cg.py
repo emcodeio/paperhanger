@@ -362,6 +362,18 @@ class Scope:
         self._release = release
 
     def own(self, ptr, kind="cf"):
+        # NULL is dropped rather than stored. `CFRelease(NULL)` kills the
+        # process -- measured, exit 133, with no stdout, no stderr and no
+        # traceback, which makes it the least diagnosable failure in this
+        # file. `CGImageRelease(NULL)` and `CGContextRelease(NULL)` are
+        # no-ops, so the CF family is the sole outlier, and every acquisition
+        # site here is `_checked` today. That is discipline, re-audited by
+        # hand on every change; this line is the structure. A call site that
+        # forgets `_checked` now gets whatever CoreGraphics does with NULL --
+        # usually a NULL return the next `_checked` names -- instead of a
+        # silent death.
+        if not ptr:
+            return ptr
         self._handles.append((ptr, kind))
         return ptr
 

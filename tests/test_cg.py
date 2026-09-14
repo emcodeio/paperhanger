@@ -756,7 +756,17 @@ def test_repeated_crops_do_not_leak(tmp_path, photo_fixture):
 def test_ctypes_is_confined_to_this_one_module():
     """Parsed, not grepped: `from ctypes import CDLL` contains no "import
     ctypes", so a substring search misses exactly the spelling that would
-    slip past review."""
+    slip past review.
+
+    An `import` statement is not the only way in, so the dynamic spellings
+    are refused too. `__import__("ctypes")` and
+    `importlib.import_module("ctypes")` are import statements the parser
+    sees as ordinary calls, and the argument can be computed, so neither can
+    be resolved here at all -- they are refused outright rather than
+    inspected. `conftest.IMPURE_BUILTINS` names `__import__` for exactly
+    this reason in the purity check, where `__import__('os').listdir(p)` is
+    what passed an earlier version of that helper unremarked.
+    """
     offenders = []
     for path in sorted(PACKAGE.rglob("*.py")):
         tree = ast.parse(path.read_text())
@@ -766,9 +776,17 @@ def test_ctypes_is_confined_to_this_one_module():
                 names = [alias.name for alias in node.names]
             elif isinstance(node, ast.ImportFrom) and node.module:
                 names = [node.module]
-            if any(name.split(".")[0] == "ctypes" for name in names):
+            elif (isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Name)
+                    and node.func.id == "__import__"):
                 offenders.append(path.name)
-    assert sorted(set(offenders)) == ["_cg.py"]
+            if any(name.split(".")[0] in {"ctypes", "importlib"}
+                   for name in names):
+                offenders.append(path.name)
+    assert sorted(set(offenders)) == ["_cg.py"], (
+        "ctypes must reach the package through `_cg.py` alone, and no module "
+        "may import it by a route this check cannot follow (`__import__`, "
+        "`importlib`)")
 
 
 def test_the_binding_layer_raises_only_imaging_error(tmp_path):
@@ -993,13 +1011,26 @@ def test_every_framework_function_called_is_declared():
     nothing checked until now. Two probes written against this module died
     exactly this way, on `CGImageGetBitsPerPixel` and `CGImageGetBitmapInfo`.
 
+    BOTH HALVES ARE REQUIRED, and they are tracked as two sets because an
+    earlier version of this test accepted EITHER one. `argtypes` is the half
+    the two crashes above were about -- a handle passed in, truncated to C
+    int. `restype` truncates a pointer coming BACK the same way, and a
+    truncated handle is indistinguishable from a real one until something
+    dereferences it. Measured on this file: with
+    `_CG_LIB.CGImageGetWidth.argtypes` deleted and the either-or check in
+    place, this test passed in 0.06 s and
+    `test_load_returns_dimensions` then took pytest down with
+    SIGSEGV at exit 139 -- no test report, no traceback. Turning that into
+    one named failure is the whole of what this test is for, so accepting
+    half a declaration disabled half of it.
+
     Reads the source rather than the running module, because a missing
     declaration is invisible at runtime until the call that crashes.
     """
     tree = ast.parse((PACKAGE / "_cg.py").read_text())
     libraries = {"_CF", "_CG_LIB", "_IO_LIB"}
 
-    declared, used = set(), set()
+    restypes, argtypes, used = set(), set(), set()
     for node in ast.walk(tree):
         # A declaration reads `_LIB.symbol.restype = ...`, so the library
         # attribute is itself the value of another attribute access.
@@ -1008,17 +1039,24 @@ def test_every_framework_function_called_is_declared():
                 and isinstance(node.value.value, ast.Name)
                 and node.value.value.id in libraries
                 and node.attr in {"restype", "argtypes"}):
-            declared.add(f"{node.value.value.id}.{node.value.attr}")
+            target = restypes if node.attr == "restype" else argtypes
+            target.add(f"{node.value.value.id}.{node.value.attr}")
         elif (isinstance(node, ast.Attribute)
                 and isinstance(node.value, ast.Name)
                 and node.value.id in libraries):
             used.add(f"{node.value.id}.{node.attr}")
 
-    assert declared, "found no declarations at all; this test is not reading _cg"
-    undeclared = used - declared
+    assert restypes and argtypes, \
+        "found no declarations at all; this test is not reading _cg"
+    undeclared = sorted(
+        "{} (missing {})".format(symbol, " and ".join(
+            half for half, names in (("restype", restypes),
+                                     ("argtypes", argtypes))
+            if symbol not in names))
+        for symbol in used - (restypes & argtypes))
     assert not undeclared, (
-        f"called but never given a restype/argtypes in _declare(): "
-        f"{sorted(undeclared)} -- an undeclared call segfaults")
+        f"called without BOTH a restype and an argtypes in _declare(): "
+        f"{undeclared} -- either half missing segfaults")
 
 
 # --------------------------------------------------------------------------
