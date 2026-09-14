@@ -1,5 +1,6 @@
 import ast
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -9,15 +10,150 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from paperhanger import toolchain                    # noqa: E402 - after sys.path
+from tests import pixels                             # noqa: E402 - after sys.path
 
 CORPUS = Path.home() / "Pictures" / "wallpaper"
 SAMPLE_MANIFEST = Path(__file__).parent / "corpus_sample.txt"
+COLORSYNC_PROFILES = Path("/System/Library/ColorSync/Profiles")
 
 
 @pytest.fixture
 def processing_dir(tmp_path):
     """A throwaway processing tree. Never the real one."""
     return tmp_path / "processing"
+
+
+# ---------------------------------------------------------------------------
+# Image fixtures.
+#
+# Seven factories, each `(path, width, height) -> path`, so a test says the
+# SHAPE of input it needs rather than the writer call that produces it. They
+# live here rather than in the one test file that first wanted them because
+# six tasks of the CoreGraphics migration use them and a second copy would
+# drift.
+#
+# Two of the seven are not conveniences. `grayscale_fixture` is the only way
+# in this suite to construct the input that renders entirely black through a
+# naively-built bitmap context, and `gradient_fixture` is the only way to
+# tell a correct crop from a centred one, since both come back at the right
+# dimensions and only the pixels disagree.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def png_fixture():
+    """A plain 8-bit RGB PNG at exactly the dimensions asked for."""
+    def make(path, width, height):
+        return pixels.write_png(path, width, height)
+    return make
+
+
+@pytest.fixture
+def photo_fixture():
+    """An RGB PNG with high-frequency detail in it.
+
+    Noisy rather than flat because a flat colour resamples to the same
+    answer under every algorithm, including a broken one: an implementation
+    that dropped interpolation entirely, or scaled by the wrong factor and
+    padded, would pass a comparison of flat images. Detail is what makes a
+    resample comparison mean anything.
+    """
+    def make(path, width, height):
+        return pixels.write_png(path, width, height, noise=True)
+    return make
+
+
+@pytest.fixture
+def gradient_fixture():
+    """A greyscale PNG whose value identifies the source ROW it came from.
+
+    For crop, which is the operation where dimensions cannot settle it: the
+    `sips` centred-crop defect returns a region of exactly the requested
+    size from the wrong place, so only the contents say which one it is.
+    """
+    def make(path, width, height):
+        return pixels.write_grey_png(path, width, height)
+    return make
+
+
+@pytest.fixture
+def grayscale_fixture():
+    """A FLAT greyscale PNG: IHDR colour type 0, one value everywhere.
+
+    The input that comes back black. Flat on purpose -- a gradient that
+    returned black and a gradient that returned the wrong rows are two
+    different failures, and this fixture is for the first.
+    """
+    def make(path, width, height, value=128):
+        return pixels.write_grey_png(path, width, height,
+                                     top=value, bottom=value)
+    return make
+
+
+@pytest.fixture
+def png16_fixture():
+    """A 16-bit RGB PNG, the depth the `sips` path silently drops."""
+    def make(path, width, height):
+        return pixels.write_png16(path, width, height)
+    return make
+
+
+@pytest.fixture
+def profiled_fixture(tmp_path):
+    """An RGB PNG tagged with a named ColorSync profile, or untagged.
+
+    Takes `(path, width, height, profile)`, where `profile` is a filename
+    under /System/Library/ColorSync/Profiles and None returns the untagged
+    base image for comparison.
+
+    Shells out to `sips --matchTo` deliberately. Tagging a file with a real
+    ICC profile needs a real colour-management implementation, this is
+    test-only, and Global Constraint 1 governs `paperhanger/`, not `tests/`.
+    When Task 8 removes `sips` from the project, this is the one test-side
+    use that may remain -- it is noted here rather than deleted.
+    """
+    def make(path, width, height, profile):
+        path = Path(path)
+        if profile is None:
+            return pixels.write_png(path, width, height, noise=True)
+        icc = COLORSYNC_PROFILES / profile
+        if not icc.is_file():
+            pytest.skip(f"colour profile not installed: {icc}")
+        base = pixels.write_png(tmp_path / f"untagged-{path.name}",
+                                width, height, noise=True)
+        subprocess.run(
+            ["/usr/bin/sips", "--matchTo", str(icc), "-s", "format", "png",
+             str(base), "--out", str(path)],
+            check=True, capture_output=True,
+        )
+        return path
+    return make
+
+
+@pytest.fixture
+def webp_fixture(tmp_path):
+    """A real WebP written under whatever name the caller gives it.
+
+    Usually a `.jpg` one, because the corpus really contains such a file --
+    `snowy_forest_landscape_9522.jpg` is a WebP -- and `probe` has to report
+    the format that is in the bytes rather than the one in the name. The
+    `webp:` prefix is what forces the encoder regardless of the suffix;
+    without it `magick` picks the format from the extension and the fixture
+    would quietly produce exactly the file it exists to rule out.
+
+    Shells out to `magick` for the same reason `profiled_fixture` shells out
+    to `sips`: it needs a real encoder, and nothing in the standard library
+    writes WebP.
+    """
+    def make(path, width, height):
+        if shutil.which("magick") is None:
+            pytest.skip("ImageMagick (`magick`) is not installed")
+        source = pixels.write_png(tmp_path / f"webp-source-{Path(path).name}.png",
+                                  width, height, noise=True)
+        subprocess.run(["magick", str(source), f"webp:{path}"],
+                       check=True, capture_output=True)
+        return Path(path)
+    return make
 
 
 def corpus_or_skip() -> Path:
