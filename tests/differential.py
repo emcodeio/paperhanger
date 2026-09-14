@@ -35,9 +35,9 @@ the picture. 21 of the 27 coverage images differ for heic and avif on that
 alone, with the coded picture identical underneath; four progressive JPEG
 sources differ because `sips` inherits the progressive scan and ImageIO
 writes baseline. So a caller comparing lossy output over the corpus has to
-account for the container, which `tests/test_encode_differential.py` does
-per file; this harness stays the whole-file bar it was, and every fixture
-that reaches it meets that bar.
+account for the container, which the retired encode differential did per
+file; this harness stays the whole-file bar it was, and every fixture that
+reaches it meets that bar.
 
 Two things the harness deliberately does NOT treat as differences, because
 the measurement says the pixels are what matter: interlacing, and anything
@@ -69,8 +69,11 @@ from typing import NamedTuple
 from tests import pixels
 
 # What the two sides are called in every message. The harness is symmetric;
-# the names are not, because every caller passes the retained `sips`
-# implementation first and the replacement second.
+# the names are not, because a caller passes the implementation being
+# replaced first and the replacement second. They still read `sips` and
+# `CoreGraphics` because that is the migration these words were measured
+# against and the only caller left is this harness's own tests; the next
+# migration to use it should rename them for its own pair.
 OLD = "sips"
 NEW = "CoreGraphics"
 

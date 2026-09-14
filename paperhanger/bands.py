@@ -7,9 +7,13 @@ Two rules shape this module, both from spec section 5:
     ideal/floor is exactly 1.5 on all four targets. Band NATIVE is that case,
     and it resamples not at all.
 
-Both output axes are computed here rather than derived by sips, because
---resampleWidth/--resampleHeight round the derived axis inconsistently and the
-filename records the size. The plan defines the file; sips is told both numbers.
+Both output axes are computed here rather than left to the imaging layer to
+derive, because the filename records the size: the plan DEFINES the file, and
+whatever resamples it is told both numbers. That began as a defence against
+`sips --resampleWidth`/`--resampleHeight`, which derived the second axis and
+rounded it inconsistently -- research fact 3 -- and it outlived the tool,
+because a plan whose two axes are computed anywhere but here is a plan whose
+filename can disagree with its contents.
 """
 
 from . import sizes

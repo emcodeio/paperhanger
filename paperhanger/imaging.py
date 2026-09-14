@@ -1,169 +1,46 @@
-"""The only module that touches images. Subprocesses, and now `_cg`.
+"""The only module that touches images. `_cg` for pixels, a subprocess for one
+external binary, and nothing else.
 
-`crop` no longer calls `sips`; it is a CoreGraphics call through `_cg`, and
-facts 6 and 7 below have stopped describing it. They are kept because they
-remain true statements ABOUT `sips`, they are the reason this migration
-exists, and `tests/test_crop_differential.py` still runs the old pad-and-shift
-body as its differential reference, which depends on every one of them.
+Five operations, all of them thin: `probe` measures, `crop` cuts a rect,
+`resize_and_encode` resamples and writes the output file in one pass,
+`normalize_to_srgb_png` converts a source into the sRGB PNG the upscaler
+needs, and `upscale` runs `upscayl-bin`. The first four are CoreGraphics
+calls through `_cg`, in this process; only `upscale` spawns anything.
 
-`resize_and_encode` went the same way, both halves of it. No
-`--resampleWidth`, no `--resampleHeight` and no `-s format` is passed by
-anything here any more, so facts 3 and 7 have stopped describing calls in
-this file; the rule fact 3 justifies -- that the caller's two numbers are
-both used and neither is derived -- is now enforced inside
-`_cg.resize_and_encode_to_file`.
+WHY THE SIGNATURES ARE UNREMARKABLE AND THE DOCSTRINGS ARE NOT. This module
+replaced a set of `/usr/bin/sips` invocations, one operation at a time, each
+behind an unchanged signature and each gated by a differential test that ran
+the old implementation beside the new one over generated fixtures and over
+the corpus. Those gates are gone -- they were retired once the last of them
+had served its purpose, green, at 116 tier-1 comparisons and 8 over the
+corpus sample. What the per-function docstrings below keep is the
+MEASUREMENT each replacement was accepted on: which outputs were
+byte-identical, which diverged and by how much, and which construction a
+divergence forced. That is evidence, not history, and the design spec asks
+for it to be preserved rather than deleted.
 
-`normalize_to_srgb_png` went too, and with it the last `sips` invocation
-that WRITES anything: no `--matchTo`, and nothing here passes an ICC
-profile to a subprocess. Fact 4 no longer describes a `sips` call at all.
-Fact 4's post-condition is not retired with it -- `upscale` still passes
-`produces=`, and it is the whole of what stands between an upscayl-bin run
-that exits 0 having written nothing and a caller that believes it.
+THE SEVEN FACTS THAT USED TO LIVE HERE, AND THE EIGHTH, ARE IN
+`docs/research/2026-09-11-replacing-pixelmator-and-imagemagick.md`, under
+"The seven measured `sips` defects, and the eighth we added". They are
+statements about a tool this project no longer runs, so they are findings
+rather than constraints on this code -- but the NUMBERING is unchanged and
+still referenced by name from `execute.py`, from `bands.py` and from several
+test docstrings, so "fact 6" resolves there and nowhere else.
 
-And now `probe` has gone the same way, which was the last `sips` call of
-any kind here, reading or writing. NOTHING IN THIS MODULE RUNS `sips` ANY
-MORE. The `SIPS` constant below survives only because the differential
-harnesses under `tests/` still run the old tool as their reference; no
-code path a user reaches goes near it. So fact 1 is now a statement about
-a tool this module does not invoke, like facts 2, 3, 5, 6 and 7 before it,
-and the failure it describes is not reachable from here.
+Two of the eight are not retired by the move, because what they produced
+outlives the tool that motivated them:
 
-Seven measured facts shape this file. Each fails SILENTLY if ignored:
-
-  1. sips -g pixelWidth exits 0 while printing `pixelWidth: <nil>` for text,
-     empty and truncated files, and dies by signal on .DS_Store. Exit status is
-     not a usable signal; stdout is.
-     Measured again while replacing it, on the real corpus `.DS_Store`: SIGABRT
-     (returncode -6), on an uncaught NSInvalidArgumentException complaining
-     that `typeIdentifier` cannot be nil. ImageIO in the same position builds
-     a CGImageSource for the file quite happily and then reports a count of 0,
-     no type, and no image at index 0 -- so the replacement declines it by
-     answering the question rather than by surviving the answer.
-  2. Crop must never be fused with a resample. `sips -c 1080 1920 --cropOffset
-     0 500 --resampleWidth 960` on a 3840-wide source returns 480x270, not
-     960x540 -- the resample is applied against the PRE-CROP width.
-  3. Both output axes must be passed. --resampleWidth/--resampleHeight derive
-     the other axis and round it inconsistently (2662x1663 at --resampleWidth
-     7680 gives 7680x4798 where floor gives 4797), and a single hardcoded flag
-     is simply wrong for the by-height plans.
-  4. A write that sips SKIPS still exits 0. Given a path it cannot read -- one
-     that does not exist, or a directory -- sips prints `Warning: <path> not a
-     valid file - skipping` to stderr, exits 0, and writes no output file at
-     all. That is fact 1 again on the write path: the exit status is not the
-     signal. Every operation here therefore asserts its post-condition, that
-     the file it was asked for actually exists afterwards. Checking the
-     artifact rather than parsing the warning text also catches any other
-     exit-0 no-op, whatever its wording. A corrupt file, an unwritable
-     destination and an unknown format all exit 13 and are caught by the
-     status check; this is only for the ones that do not.
-     No `sips` call here writes anything any more, so the fact is now a
-     statement about a tool this file only reads with. The POST-CONDITION it
-     produced outlives it: `upscale` runs a binary nobody here controls, and
-     an exit-0 no-op from that one would be believed exactly the same way.
-  5. An out-of-bounds crop PADS WITH BLACK. sips neither clamps nor errors:
-     a 400x200 source cropped at x=900,y=900 returns a 120x80 image that is
-     entirely black, at exit 0, with the requested dimensions and a valid
-     file. Neither the status check nor fact 4's post-condition can see it --
-     the file exists and is exactly the size asked for. Only comparing the
-     rect against the measured source catches it, which is why `crop` probes.
-  6. sips SILENTLY IGNORES two --cropOffset shapes, both of which need X == 0,
-     and the pure geometry layer produces both of them for real wallpapers:
-       * `--cropOffset 0 0` -- the offset is dropped and sips does its DEFAULT
-         CENTERED crop. Measured on 1600x1200: horizontal_thirds' TOP slice,
-         asked for 1600x1000 at (0,0), comes back as the rows at y=100, which
-         is the MIDDLE slice. vertical_thirds' LEFT slice, asked for 800x1200
-         at (0,0), comes back as the band at x=400 -- the middle one again.
-       * `--cropOffset <y> 0` with y + height == source height (flush with the
-         bottom edge) -- the crop is dropped entirely and the FULL SOURCE
-         comes back. Measured: horizontal_thirds' BOTTOM slice, asked for
-         1600x1000 at (0,200), returns the whole 1600x1200 image.
-     An x of 1 or more is correct at every y, and x == 0 is correct for every
-     y strictly between those two. So two of the three desktop slices and one
-     of the three phone slices were silently wrong. `crop` used to work
-     around it by padding 1px on every side and cropping at +1, which made x
-     non-zero and the bottom edge non-flush. NO LONGER: it is a
-     CGImageCreateWithImageInRect call, which honours any origin, and the pad
-     -- a full extra rewrite of an image that on the upscale path has already
-     been quadrupled -- is gone with it.
-  7. ARGUMENT ORDER decides whether `-s format` is honoured. Placed after
-     --padColor it is silently dropped: a 2560x1600 JPEG padded with
-     `-p H W --padColor FF00FF -s format png` comes back as JPEG, byte-identical
-     in size to the same run with no -s format at all (3580120 B both), while
-     moving -s format png in front yields PNG (11544706 B). sips warns `Output
-     file suffix should be jpg` on stderr, which a zero exit discards.
-     This is not cosmetic. A lossy padded intermediate puts the magenta pad
-     inside the same 8x8 DCT blocks as the pixels being kept, so it bleeds into
-     the crop. Measured on a uniform (20, 90, 40) region cropped out of a
-     q90 JPEG: mean absolute per-channel error 63.14 at column 0 and 21.87 at
-     column 1, against 0.33 in the interior, with column 0 shifted R +73.2,
-     G -49.1, B +67.1 -- FF00FF's own signature, a quarter of the way to
-     magenta on the outermost column. Forced to PNG the same columns measure
-     0.00: a uniform region survives the round trip exactly, so the whole of
-     that error is the pad. Invisible to any dimension or file-exists check.
-     The pad that provoked this is gone from `crop`, so nothing here passes
-     --padColor any more; the measurement stays because the reference in
-     tests/test_crop_differential.py still runs that pass.
-     Note also that without -s format, sips keeps the SOURCE's format whatever
-     the --out suffix says, so a .png filename proves nothing about the bytes.
-     Nothing here relies on that any more -- `resize_and_encode` names its
-     format to ImageIO as a uniform type identifier -- but it is why `crop`
-     REFUSES an out_path that names anything but .png: the name is what a
-     reader downstream goes by. Not `normalize_to_srgb_png` any more, which
-     reads a crop through ImageIO and goes by the bytes; `upscale` is the
-     one that still goes by the name, because upscayl-bin takes jpg, png and
-     webp and nothing here can make it look inside first.
-
-An eighth fact, which is about `sips` and is NOT one of the seven above
-because nothing in this module depends on it any more:
-
-  8. A REGION DECODE OF A BASELINE JPEG IS NOT THE WHOLE-FRAME DECODE, once
-     the file passes 1,000,000 pixels. This is ImageIO, not `sips`: `sips
-     --cropOffset` and a plain `sips -s format png` disagree about the same
-     file, and so do `_cg.crop_to_file` and `_cg.load` -- both, by comparable
-     margins, and not in the same direction.
-     THE THRESHOLD IS A ROUND DECIMAL NUMBER, NOT A POWER OF TWO, which is
-     not the guess anyone makes. Measured over a 200x150 region of synthetic
-     noise JPEGs, as (sips, CoreGraphics) samples differing of 90,000:
-
-       1000x1000  1,000,000 px   (0, 0)          1000x999    999,000 px  (0, 0)
-       1250x800   1,000,000 px   (0, 0)          1024x976    999,424 px  (0, 0)
-       1250x801   1,001,250 px   (39868, 86423)  1152x864    995,328 px  (0, 0)
-       1000x1002  1,002,000 px   (70166, 86252)
-       1024x1024  1,048,576 px   (70202, 86167)
-
-     Exactly a million agrees; a million and change does not. Noise is the
-     worst case by a wide margin. On four corpus photographs at a 400x300
-     region the mean absolute error against each tool's own frame decode is
-     1.038 / 0.314 / 1.383 / 0.351 out of 255 for `sips` and 0.934 / 0.332 /
-     1.256 / 0.417 for CoreGraphics. Progressive JPEGs show none of it.
-     CHROMA SUBSAMPLING AMPLIFIES THIS; IT IS NOT WHERE IT LIVES. Identical
-     pixels at 1250x801, encoded three ways, samples differing of 90,000
-     over the 200x150 region as (sips, CoreGraphics) with the largest
-     delta:
-
-       4:2:0      (39723, 86387)   max 1 / 88
-       4:4:4      (23297, 27042)   max 2 /  4
-       greyscale  (    0,  2190)   max 0 /  1
-
-     So it survives with no subsampling at all and survives with no chroma
-     at all; 4:2:0 multiplies the count about threefold and the amplitude
-     about twentyfold. Four of the eight greyscale baseline corpus JPEGs
-     over the threshold differ at their own gate rect, every sample by 1.
-     ON GREYSCALE THE RESIDUAL IS OURS ALONE: measured at an interior rect
-     on all four, `sips` matches the frame decode exactly and CoreGraphics
-     is the side that is off by one.
-     A crop that removes NOTHING is not enough to provoke it: a full-frame
-     `--cropOffset 0 0` is byte-identical to a plain decode. The rect has to
-     be strictly smaller. Measured on acrylic_7049.JPG (1284x2778), 400x300
-     at (40, 30): 212,413 of 360,000 samples differ, mean absolute error
-     1.0592.
-     So the old and new crops differ on most real JPEG sources, and neither
-     is the better decode. Byte-identity was never reachable here, because
-     the `sips` reference is itself a region decode -- matching the frame
-     decode would move us FURTHER from it. It cost the crop differential its
-     clean run over the corpus sample; test_crop_differential.py accounts for
-     it per file -- given the same DECODED pixels the two implementations
-     agree exactly -- rather than assuming it.
+  * Fact 4's POST-CONDITION. `_run(produces=...)` still asserts that the
+    file a command was asked for actually exists afterwards, and still
+    clears the destination first so a stale file cannot answer for a write
+    that never happened. `upscale` is its only caller now, and `upscayl-bin`
+    is a binary nobody here controls: an exit-0 no-op from that one would be
+    believed exactly the way `sips`' was.
+  * Fact 8, the region decode, which was never a `sips` defect at all. It is
+    ImageIO's, so it is still ours: a region decode of a baseline JPEG over
+    1,000,000 pixels is not the whole-frame decode, and `crop` therefore
+    produces pixels that a decode of the same file does not reproduce
+    exactly. `tests/test_imaging.py` holds the threshold and the numbers.
 """
 
 import subprocess
@@ -175,13 +52,6 @@ from . import _cg
 # `imaging.ImagingError` the name every existing caller already catches, and
 # the same class object as `_cg.ImagingError`.
 from ._cg import ImagingError                              # noqa: F401
-
-# FOR THE TESTS ALONE. No function in this module, and no code path a user
-# reaches, invokes `sips` any more -- `probe` was the last one. It stays
-# because five differential test modules run the old tool as their reference
-# and spell its path `imaging.SIPS`, so deleting it here would delete the
-# comparison that proves the replacements right. It goes when they do.
-SIPS = "/usr/bin/sips"
 
 
 def _tail(stream) -> str:
@@ -197,7 +67,8 @@ def _run(argv, timeout=1800, produces=None):
     """Run a command, raising ImagingError unless it succeeded.
 
     `produces` is the file the command was asked to write. Passing it turns a
-    silent skip into an error -- see fact 4; a zero exit alone does not mean
+    silent skip into an error -- see research fact 4; a zero exit alone does
+    not mean
     anything was written. The destination is deleted first, so that a stale
     file from an earlier run cannot stand in for output this run never
     produced. It must therefore name a file the command CREATES, never one of
@@ -289,10 +160,12 @@ def probe(path):
     What is preserved, deliberately and exactly, is the answer. Over all 894
     corpus photographs this returns the same dimensions as the `sips -g`
     parse it replaces -- zero disagreements -- and the same format string for
-    every format the corpus holds: 841 jpeg, 47 png, 3 webp, 2 heic, 1 gif,
-    including `snowy_forest_landscape_9522.jpg`, which is a WebP under a
-    `.jpg` name and was reported `webp` by both. `_cg.SOURCE_FORMATS` is
-    where those strings are pinned and where the measurement is recorded.
+    every format the corpus holds, including `snowy_forest_landscape_9522.jpg`,
+    which is a WebP under a `.jpg` name and was reported `webp` by both. The
+    counts are not restated here: `CORPUS_FORMATS` in `tests/test_imaging.py`
+    is the one place that census is ENFORCED rather than described, and a
+    fifth copy of five numbers is a fifth thing to fall out of date.
+    `_cg.SOURCE_FORMATS` is where the format strings themselves are pinned.
 
     Fact 1 above is retired as a description of THIS function and kept as a
     statement about `sips`. Its successor is narrower and stronger: there is
@@ -317,7 +190,10 @@ def normalize_to_srgb_png(source, out_path) -> None:
     the destination lives and what the divergences below are measured from.
 
     Four behaviours changed, all measured against the `--matchTo` reference
-    in `tests/test_normalize_differential.py`:
+    while it was still retained beside this one. That comparison is retired;
+    the absolute half of each row -- what THIS function produces -- is pinned
+    in `tests/test_imaging.py`, and the draw it depends on in
+    `tests/test_cg.py`:
 
       * A 16-BIT SOURCE COMES BACK 8-BIT, which is what `sips` did here too.
         This is the one place in the pipeline that narrows depth -- `crop`
@@ -470,7 +346,7 @@ def resize_and_encode(source, out_width: int, out_height: int, fmt: str,
         and only `sips` fills it from the source, so an Orientation of 6 --
         the one tag a viewer would see -- is carried by `sips` and dropped
         here. Nothing in the corpus carries a rotating orientation; the
-        census is in `tests/test_encode_differential.py`, with the rest.
+        census and the dropped tag are in `tests/test_imaging.py`.
         The ICC profile is NOT affected: an ICC-tagged source with no EXIF
         encodes byte-identically to `sips` at heic 80, jpeg 90 and avif 85.
       * A PROGRESSIVE JPEG SOURCE COMES BACK BASELINE, which is the same
@@ -479,7 +355,7 @@ def resize_and_encode(source, out_width: int, out_height: int, fmt: str,
         progressive images in the sample. Asked for progressive it produces
         `sips`' own entropy-coded scan byte for byte, so the picture is not
         merely equivalent and the choice is ours.
-        `tests/test_encode_differential.py` pins all of it.
+        `tests/test_imaging.py` pins the baseline output.
     """
     out_path = Path(out_path)
     left_behind = _cleared(out_path)

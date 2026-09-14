@@ -17,15 +17,13 @@ without having compared anything is the failure mode with the track record.
 """
 
 import struct
-import subprocess
 import zlib
 
 import pytest
 
+from paperhanger import imaging
 from tests import pixels
 from tests.differential import compare
-
-SIPS = "/usr/bin/sips"
 
 
 def _writes(content):
@@ -80,9 +78,8 @@ def test_a_lossy_output_is_compared_whole(tmp_path, photo_fixture):
 
     def encode(quality):
         def fn(source, out_path):
-            subprocess.run([SIPS, "-s", "format", "jpeg", "-s", "formatOptions",
-                            str(quality), str(source), "--out", str(out_path)],
-                           check=True, capture_output=True)
+            imaging.resize_and_encode(source, 120, 90, "jpeg", quality,
+                                      out_path, resize=False)
         return fn
 
     assert compare(encode(90), encode(90), src, tmp_path, suffix=".jpg") is None
@@ -303,19 +300,24 @@ def test_an_interlaced_png_shorter_than_its_header_claims_is_reported(tmp_path):
     assert "Adam7" in result and "needs" in result
 
 
-def test_a_real_sips_png_is_compared_through_its_pixels(tmp_path,
-                                                        photo_fixture):
-    """Against output from the tool itself, not only against generated files.
+def test_a_real_encoder_png_is_compared_through_its_pixels(tmp_path,
+                                                           photo_fixture):
+    """Against a real encoder's output, not only against generated files.
 
-    `sips` picks its filters per scanline and writes chunks of its own, so
-    this is the shape the corpus gate meets. Refiltering its output to a
-    single filter type leaves a file that differs in most of its bytes and in
-    none of its pixels.
+    ImageIO picks its filters per scanline -- all five types appear in a
+    48x32 noise frame -- and writes ancillary chunks of its own (`sRGB` and
+    `eXIf`), so this is the shape any gate built on this harness will meet.
+    Refiltering its output to a single filter type leaves a file that differs
+    in most of its bytes and in none of its pixels.
+
+    This used to run `sips` for the same reason. `sips` was only ever a
+    stand-in for "some encoder that is not `tests/pixels.py`", and the
+    encoder the pipeline actually uses is the better stand-in now that the
+    old tool is gone from the project.
     """
     src = photo_fixture(tmp_path / "s.png", 48, 32)
-    written = tmp_path / "sips.png"
-    subprocess.run([SIPS, "-s", "format", "png", str(src), "--out", str(written)],
-                   check=True, capture_output=True)
+    written = tmp_path / "imageio.png"
+    imaging.resize_and_encode(src, 48, 32, "png", None, written, resize=False)
     original = written.read_bytes()
     flattened = _refilter(written, 0)
     assert original != flattened

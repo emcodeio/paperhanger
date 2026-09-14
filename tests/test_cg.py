@@ -26,7 +26,7 @@ from pathlib import Path
 
 import pytest
 
-from paperhanger import _cg
+from paperhanger import _cg, imaging
 from paperhanger.imaging import ImagingError
 from tests import pixels
 
@@ -1019,3 +1019,328 @@ def test_every_framework_function_called_is_declared():
     assert not undeclared, (
         f"called but never given a restype/argtypes in _declare(): "
         f"{sorted(undeclared)} -- an undeclared call segfaults")
+
+
+# --------------------------------------------------------------------------
+# The draw: what it is set to, when it is skipped, and what skipping avoids.
+#
+# These came out of `tests/test_resize_differential.py` and
+# `tests/test_normalize_differential.py` when the retained `sips` references
+# were retired. Everything those modules asserted ABOUT `sips`, or about the
+# two implementations agreeing, went with them. What is here is what they
+# asserted about this layer's own construction, and the subject is the
+# context and the draw rather than the public function that drives them.
+# --------------------------------------------------------------------------
+
+
+def test_interpolation_is_high_not_default(tmp_path, photo_fixture,
+                                           monkeypatch):
+    """Remove the SetInterpolationQuality call and this must fail.
+
+    Default measured identical to High on every shape tried, so a comparison
+    of outputs cannot distinguish them -- and Default is Apple's to redefine
+    while High is a name. Assert the call.
+    """
+    seen = []
+    real = _cg._CG_LIB.CGContextSetInterpolationQuality
+    monkeypatch.setattr(_cg._CG_LIB, "CGContextSetInterpolationQuality",
+                        lambda ctx, q: seen.append(q) or real(ctx, q))
+    source = photo_fixture(tmp_path / "s.png", 400, 300)
+    imaging.resize_and_encode(source, 200, 150, "png", None, tmp_path / "o.png",
+                              resize=True)
+    assert seen == [_cg.kCGInterpolationHigh]
+
+
+def _count_draws(monkeypatch):
+    calls = []
+    real = _cg._CG_LIB.CGContextDrawImage
+    monkeypatch.setattr(_cg._CG_LIB, "CGContextDrawImage",
+                        lambda ctx, rect, image: calls.append(rect)
+                        or real(ctx, rect, image))
+    return calls
+
+
+def test_an_identity_resample_does_not_draw(tmp_path, photo_fixture,
+                                            monkeypatch):
+    """The skip, observed where it happens rather than inferred from output.
+
+    `render` asks for the source's own dimensions 577 times in a
+    2734-resample corpus run, because band 4 renders the 4x frame at scale 4
+    and `resize = needs_resize or scale != 1` computes True for a resample
+    that changes nothing. A 1:1 draw and a skip produce the same PIXELS for a
+    source with no alpha, so for most inputs no comparison of files can see
+    which one ran. This watches the call.
+    """
+    calls = _count_draws(monkeypatch)
+    source = photo_fixture(tmp_path / "s.png", 400, 300)
+    imaging.resize_and_encode(source, 400, 300, "png", None, tmp_path / "o.png",
+                              resize=True)
+    assert calls == [], "the source was already 400x300 and it was drawn anyway"
+    assert imaging.probe(tmp_path / "o.png")[:2] == (400, 300)
+
+
+def test_a_resample_that_changes_a_single_axis_still_draws(tmp_path,
+                                                           photo_fixture,
+                                                           monkeypatch):
+    """The other half, and the reason the condition is `and`, not `or`.
+
+    Without this, an identity test written as "either axis already matches"
+    passes every test above and hands 2000x1400 back for a 1000x1400 plan.
+    """
+    calls = _count_draws(monkeypatch)
+    source = photo_fixture(tmp_path / "s.png", 400, 300)
+    imaging.resize_and_encode(source, 400, 150, "png", None, tmp_path / "o.png",
+                              resize=True)
+    assert len(calls) == 1, "one axis changed and nothing was drawn"
+
+
+def _sample_difference(one, two):
+    """(samples differing, largest difference) between two PNG files.
+
+    Computed from the decoded samples, and raising if the two files are not
+    the same shape, because a count over mismatched layouts would be a number
+    that means nothing.
+    """
+    width, height, depth, colour, first = pixels.read_png_samples(one)
+    other_shape = pixels.read_png_samples(two)
+    if (width, height, depth, colour) != other_shape[:4]:
+        raise AssertionError(
+            f"{one.name} is {width}x{height} depth {depth} type {colour}, "
+            f"{two.name} is {other_shape[0]}x{other_shape[1]} depth "
+            f"{other_shape[2]} type {other_shape[3]}")
+    second = other_shape[4]
+    deltas = [abs(a - b) for a, b in zip(first, second) if a != b]
+    return len(deltas), (max(deltas) if deltas else 0)
+
+
+# What a 1:1 draw costs, per source, as (samples differing, largest
+# difference) out of the whole frame. Measured on this machine against the
+# skip's own output, which is the same file `sips --resampleHeightWidth`
+# produced for every one of these fixtures -- the retired differential
+# measured these three rows against `sips` and got these same numbers.
+DRAW_DAMAGE = [
+    # The premultiply round trip: alpha 128 in, one unit out.
+    ("rgba", pixels.write_rgba_png, 120000, 480000, 1),
+    ("grey+alpha", pixels.write_grey_alpha_png, 60400, 240000, 1),
+    # And the one that is not a rounding error. A `tRNS` colour key is
+    # expanded to alpha on decode, the draw composites the keyed pixels onto
+    # the context's black ground, and magenta comes back black at the same
+    # colour type and dimensions as a correct answer.
+    ("colour-key", pixels.write_colour_key_png, 120000, 480000, 255),
+]
+
+
+@pytest.mark.parametrize("name,writer,differing,total,largest", DRAW_DAMAGE)
+def test_forcing_the_draw_at_identity_is_what_the_skip_avoids(
+        tmp_path, monkeypatch, name, writer, differing, total, largest):
+    """The measurement the skip rests on, run as a test.
+
+    The skip is not an optimisation, it is a CORRECTION, and this is what
+    says so: force the draw by lying to the identity check -- the target
+    dimensions are unchanged, so this is the same 1:1 draw the
+    implementation used to perform -- and require that it DIVERGE from the
+    skip by the measured amount. If a future CoreGraphics makes the 1:1 draw
+    exact, this fails and the skip becomes an optimisation after all; that is
+    worth being told about, because the docstrings claim otherwise.
+
+    Alpha-bearing sources only, in all three senses the format has: a real
+    alpha channel, a greyscale one, and a colour key. The draw's damage is to
+    the alpha handling, and an opaque source has none.
+    """
+    source = writer(tmp_path / f"{name}.png", 400, 300)
+    skipped = tmp_path / "skipped.png"
+    imaging.resize_and_encode(source, 400, 300, "png", None, skipped,
+                              resize=True)
+
+    monkeypatch.setattr(_cg, "dimensions", lambda image: (-1, -1))
+    drawn = tmp_path / "drawn.png"
+    imaging.resize_and_encode(source, 400, 300, "png", None, drawn,
+                              resize=True)
+
+    assert _sample_difference(skipped, drawn) == (differing, largest), (
+        f"a 1:1 draw of a {name} source no longer diverges from the skip the "
+        f"way every docstring about the skip says it does")
+    assert differing < total, "the row claims the whole frame differs"
+
+
+def test_the_colour_key_survives_the_identity_pass(tmp_path):
+    """The other side of the row above, and the one that matters.
+
+    The keyed pixels must still be magenta at the end of a real call. The
+    forced draw above says what the skip is avoiding; this says what the
+    skip preserves, in absolute values rather than as a difference.
+    """
+    source = pixels.write_colour_key_png(tmp_path / "keyed.png", 400, 300)
+    out = tmp_path / "o.png"
+    imaging.resize_and_encode(source, 400, 300, "png", None, out, resize=True)
+    _, _, _, colour, samples = pixels.read_png_samples(out)
+    assert colour == 6, "ImageIO expands a colour key to an alpha channel"
+    assert samples[:4] == [255, 0, 255, 0], (
+        f"the keyed pixel came back {samples[:4]} rather than magenta at "
+        f"alpha 0 -- it was composited")
+
+
+# The two members of "what `bitmap_format` refuses" a fixture can build, as
+# (name, how to build one, what the refusal must say). Lab and >16bpc are the
+# other members; nothing here can write either.
+REFUSED_SOURCES = [
+    ("indexed",
+     lambda room, cmyk: pixels.write_indexed_png(room / "idx.png", 400, 300),
+     "indexed"),
+    ("CMYK", lambda room, cmyk: cmyk(room / "cmyk.jpg", 400, 300), "CMYK"),
+]
+
+
+@pytest.mark.parametrize("name,build,refused", REFUSED_SOURCES)
+def test_a_source_no_context_accepts_is_refused_when_it_must_be_drawn(
+        tmp_path, cmyk_fixture, name, build, refused):
+    """The asymmetry the skip introduces, as a class rather than one case.
+
+    `bitmap_format` refuses indexed, CMYK, Lab and anything above 16 bits
+    per component, and the identity path never asks it -- so those sources
+    resize at 1:1 and raise at every other shape. CMYK is the member that
+    could turn up in a real folder: four-channel JPEGs come out of print
+    workflows, and the tool this replaced resampled one without complaint.
+
+    Both halves are pinned, here and in the identity test below, so that
+    neither reads as an accident.
+    """
+    source = build(tmp_path, cmyk_fixture)
+    with pytest.raises(ImagingError) as caught:
+        imaging.resize_and_encode(source, 200, 150, "png", None,
+                                  tmp_path / "o.png", resize=True)
+    assert refused in str(caught.value)
+
+
+@pytest.mark.parametrize("name,build,refused", REFUSED_SOURCES)
+def test_the_same_source_resizes_at_identity(tmp_path, cmyk_fixture, name,
+                                             build, refused):
+    """And comes back as a readable PNG at the source's own dimensions, which
+    is why the refusal above is an asymmetry rather than a second wrong
+    answer. The identity branch never builds a destination bitmap, so the
+    colour model it would refuse is not consulted."""
+    source = build(tmp_path, cmyk_fixture)
+    out = tmp_path / "o.png"
+    imaging.resize_and_encode(source, 400, 300, "png", None, out, resize=True)
+    assert imaging.probe(out)[:2] == (400, 300)
+
+
+def test_a_sixteen_bit_source_keeps_its_depth_through_the_resample(
+        tmp_path, png16_fixture):
+    """Deliberate, and the same choice `crop` makes.
+
+    The tool this replaced dropped a 16-bit source to 8 on every path that
+    touched pixels; CoreGraphics keeps the depth. No corpus file is 16-bit,
+    so this is latent -- which is why it is asserted on a fixture rather
+    than left to a corpus run to notice.
+    """
+    source = png16_fixture(tmp_path / "deep.png", 400, 300)
+    out = tmp_path / "o.png"
+    imaging.resize_and_encode(source, 200, 150, "png", None, out, resize=True)
+    assert pixels.read_ihdr(out)[2] == 16
+
+
+# --------------------------------------------------------------------------
+# The encode's options dictionary, and the one destination per call.
+# --------------------------------------------------------------------------
+
+
+def _captured_options(monkeypatch):
+    """The options argument of every CGImageDestinationAddImage call."""
+    seen = []
+    real = _cg._IO_LIB.CGImageDestinationAddImage
+
+    def record(dest, image, options):
+        seen.append(options)
+        return real(dest, image, options)
+
+    monkeypatch.setattr(_cg._IO_LIB, "CGImageDestinationAddImage", record)
+    return seen
+
+
+def test_no_options_dictionary_is_built_for_a_lossless_write(tmp_path,
+                                                             photo_fixture,
+                                                             monkeypatch):
+    """Lossless means no quality key, not quality 100.
+
+    The argv test this replaced could see `-s formatOptions` was absent.
+    Here the equivalent is observable only at the call: ImageIO ignores a
+    quality key for PNG, so no output can tell "no dictionary" from "a
+    dictionary holding 1.0". Watch the argument.
+    """
+    seen = _captured_options(monkeypatch)
+    src = photo_fixture(tmp_path / "s.png", 64, 48)
+    imaging.resize_and_encode(src, 64, 48, "png", None, tmp_path / "o.png",
+                              resize=False)
+    assert seen == [None], seen
+
+
+def test_a_lossy_format_does_build_one(tmp_path, photo_fixture, monkeypatch):
+    """The other half: omission must be specific to a quality of None."""
+    seen = _captured_options(monkeypatch)
+    src = photo_fixture(tmp_path / "s.png", 64, 48)
+    imaging.resize_and_encode(src, 64, 48, "heic", 80, tmp_path / "o.heic",
+                              resize=False)
+    assert len(seen) == 1 and seen[0], seen
+
+
+def test_nothing_intermediate_is_written_at_all(tmp_path, photo_fixture,
+                                                monkeypatch):
+    """Exactly ONE destination is created for a resizing encode, which is the
+    statement a `finally` that tidied up could not fake.
+
+    The shape before the resample and the encode shared a pass was two -- a
+    PNG for the resample and the real output -- and a cleanup that unlinked
+    the first would leave this test green if it only counted files at the end.
+    """
+    created = []
+    real = _cg._IO_LIB.CGImageDestinationCreateWithURL
+
+    def record(url, uti, count, options):
+        created.append(uti)
+        return real(url, uti, count, options)
+
+    monkeypatch.setattr(_cg._IO_LIB, "CGImageDestinationCreateWithURL", record)
+    src = photo_fixture(tmp_path / "s.png", 400, 300)
+    imaging.resize_and_encode(src, 200, 150, "heic", 80, tmp_path / "o.heic",
+                              resize=True)
+    assert len(created) == 1, f"{len(created)} destinations for one encode"
+
+
+# --------------------------------------------------------------------------
+# Normalization's draw, which is never skipped.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("profile", ["AdobeRGB1998.icc", "ROMM RGB.icc",
+                                     "Display P3.icc"])
+def test_normalize_never_skips_the_draw(tmp_path, profiled_fixture,
+                                        monkeypatch, profile):
+    """`_resample` skips its draw when the dimensions already match, and that
+    is correct there because `bitmap_context` builds the destination from the
+    SOURCE's own colour space -- the draw converts nothing, so skipping
+    deletes no work. Here the destination is a colour space of OUR choosing,
+    so the draw IS the work.
+
+    Normalization never resizes, which means every call is the
+    equal-dimensions case -- the one `_resample` skips. A skip here would
+    fire on every source in the corpus and silently stop converting, and it
+    would produce a plausible PNG at the right dimensions while doing it.
+    Measured on a 600x400 noise PNG at these three profiles, what such a skip
+    costs: 661,630 / 713,202 / 675,884 of 720,000 samples differing, largest
+    difference 144 / 167 / 116.
+
+    The draw is watched here because a 1:1 draw and a skip produce the same
+    file for a source already in sRGB. What the draw ACHIEVES is
+    `test_imaging.test_normalize_moves_the_numbers`, which reads the pixels.
+    """
+    source = profiled_fixture(tmp_path / "s.png", 600, 400, profile)
+    calls = _count_draws(monkeypatch)
+    out = tmp_path / "n.png"
+    imaging.normalize_to_srgb_png(source, out)
+
+    assert imaging.probe(source)[:2] == imaging.probe(out)[:2] == (600, 400), (
+        "the premise of this test is that the dimensions match on both sides")
+    assert len(calls) == 1, (
+        "the source was already 600x400 and the draw was skipped; the draw "
+        "IS the conversion here, so there is nothing left doing it")

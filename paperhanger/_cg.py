@@ -9,6 +9,16 @@ some return path.
 CoreFoundation ownership rule: anything from a function with Create or
 Copy in its name is ours to release. Anything from a Get is not.
 
+WHY `sips` IS STILL ALL OVER THIS FILE. Nothing here runs it, and nothing
+in this project does. Every mention below is a MEASUREMENT: each function
+was accepted on a comparison against the `/usr/bin/sips` invocation it
+replaced, and the numbers -- which outputs were byte-identical, which
+diverged and by how much -- are why a construction is the one it is rather
+than the obvious one. Deleting them would leave the code looking arbitrary
+and the next reader re-deriving them. The tool is history; the numbers are
+evidence. The defects it was replaced FOR are in
+`docs/research/2026-09-11-replacing-pixelmator-and-imagemagick.md`.
+
 The three library handles are `_CF`, `_CG_LIB` and `_IO_LIB` rather than
 the `_cf`/`_cg`/`_io` the plan wrote. This module is itself called `_cg`,
 so a module-level `_cg` reads as `_cg._cg` from the outside and as a
@@ -57,10 +67,12 @@ The grayscale failure only fires when the draw SCALES. At 1:1 the same
 bad pairing round-trips correctly, which is why it survived measurement
 twice before Task 0 caught it. `_resample` does not draw at 1:1 at all
 -- see the identity case there -- so the pairing is now only reached
-where it is visible, and `tests/test_resize_differential.py` compares a
-REDUCING resample against `sips` for each of the four rows a fixture can
-produce: monochrome and RGB, each with and without alpha. The Indexed
-row is a refusal rather than a picture and has its own test; nothing in
+where it is visible. A reducing resample was compared against `sips` for
+each of the four rows a fixture can produce -- monochrome and RGB, each
+with and without alpha -- and agreed on all four; that comparison is
+retired and `tests/test_cg.py` holds what it established about this
+layer. The Indexed row is a refusal rather than a picture and has its own
+test; nothing in
 `tests/pixels.py` writes a 32-bit float PNG, so that row is measured in
 the preflight instruments and nowhere else.
 
@@ -198,10 +210,24 @@ UTI = {"heic": "public.heic", "jpeg": "public.jpeg",
 # extrapolating either rule to a format nobody measured would be guessing.
 #
 # Hence the fallback for an unlisted UTI is "unknown" rather than a derived
-# name: camera raw and the other formats no fixture here can produce would
-# each be a guess, and the old `probe`'s own fallback was "unknown" too. It
-# costs nothing today -- no caller in this codebase reads the format string,
-# only tests do -- and a wrong name would cost more than an honest one.
+# name, and the old `probe`'s own fallback was "unknown" too.
+#
+# THE FALLBACK IS REACHABLE, and it was once described here as covering only
+# formats nothing on hand could produce. It is not: `magick`, which the
+# format tests already use, writes both of the two measured cases below, and
+# on each of them the old probe named the format and this one does not.
+#
+#   written as     old `sips -g format`     this table
+#   pict           pict                     unknown
+#   .heif          heif                     unknown
+#
+# Both probe to the right DIMENSIONS, so the accept/reject decision -- the
+# only thing any caller uses `probe` for -- is unaffected; it is the format
+# string alone, which no caller in this codebase reads and only tests do. A
+# `heic` under a `.heic` name is still `heic`; the row above is the same
+# bytes under a `.heif` name, where the UTI is not `public.heic` any more.
+# Extending the table to cover either would mean measuring it, not guessing
+# it -- a wrong name would cost more than an honest one.
 SOURCE_FORMATS = {
     "public.jpeg": "jpeg",                    # 841 corpus files
     "public.png": "png",                      # 47 corpus files
@@ -761,8 +787,8 @@ def _write(scope, image, out_path, uti: str, what: str, options=None):
     included, and an Orientation of 6 -- the one tag a viewer would see --
     is carried by `sips` and dropped by us.
 
-    Both halves of all of that are pinned in
-    `tests/test_encode_differential.py`.
+    The half of that which is about OUR output -- that the source's
+    Orientation does not survive -- is pinned in `tests/test_imaging.py`.
     """
     dest = _destination(scope, out_path, uti, what)
     _IO_LIB.CGImageDestinationAddImage(dest, image, options)
@@ -846,8 +872,8 @@ def normalize_to_srgb_png_file(source, out_path) -> None:
     size coming back. Measured against `sips --matchTo`, what that would
     cost on a 600x400 noise PNG: Adobe RGB 661,630 of 720,000 samples,
     largest difference 144; ROMM RGB 713,202 and 167; Display P3 675,884 and
-    116. `tests/test_normalize_differential.py` watches the call and the
-    pixels both.
+    116. `tests/test_cg.py` watches the call and `tests/test_imaging.py`
+    the pixels.
 
     A skip on the SOURCE's colour space is refused for the same reason and
     would be more tempting -- 714 of the 895 corpus entries are tagged sRGB.
