@@ -6,7 +6,7 @@ Research handoff, 2026-09-11. Everything below was established by direct testing
 
 This document records what is known so that the design session does not have to rediscover it. It is **not a spec**. It states facts, measured results, and the questions that remain open. Design decisions belong in `docs/superpowers/specs/`.
 
-Sections 2-11 are the original handoff of 2026-09-11 and are left as written. **Section 12 was added on 2026-09-14**, when `sips` was replaced by CoreGraphics and its eight measured defects came out of the code and into the record.
+Sections 2-11 are the original handoff of 2026-09-11 and are left as written. **Section 12 was added on 2026-09-14**, when `sips` was replaced by CoreGraphics and the measured defects came out of the code and into the record. Seven of them are `sips`' and are what motivated the move. The eighth was found during it, and is ImageIO's rather than `sips`' -- which means it is still ours, because ImageIO is what the tool calls now. Section 12 separates them.
 
 ## 2. What the legacy pipeline does
 

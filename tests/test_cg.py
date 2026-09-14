@@ -1079,7 +1079,9 @@ def test_every_framework_function_called_is_declared():
         for symbol in used - (restypes & argtypes))
     assert not undeclared, (
         f"called without BOTH a restype and an argtypes in _declare(): "
-        f"{undeclared} -- either half missing segfaults")
+        f"{undeclared} -- a missing argtypes segfaults; a missing restype "
+        f"truncates the returned pointer to 32 bits, which crashes or "
+        f"raises depending on where the allocation landed")
 
 
 # --------------------------------------------------------------------------
