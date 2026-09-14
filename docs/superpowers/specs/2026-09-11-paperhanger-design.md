@@ -248,103 +248,53 @@ Per-image sequence, with the steps each band skips:
 
 ```
 once per source photo, only if some plan of its needs the upscaler:
-  |> normalize  convert to PNG and force the pixels into sRGB:
-                sips --matchTo '/System/Library/ColorSync/Profiles/sRGB Profile.icc' \
-                     -s format png
-  |> upscale    the WHOLE frame, once:
+  |> normalize  imaging.normalize_to_srgb_png: convert to PNG and force the
+                pixels into sRGB, by drawing into an sRGB bitmap context
+  |> upscale    the WHOLE frame, once, and the only subprocess left:
                 upscayl-bin -i in.png -o 4x.png -m <models> -n upscayl-standard-4x -s 4
 
 then once per output plan:
-  |> crop       slice plans only, always its own invocation, and always PNG:
-                sips -s format png -c H W --cropOffset Y X
+  |> crop       imaging.crop, slice plans only, always its own call, always PNG:
+                CGImageCreateWithImageInRect at the rect as given
                 cut from the 4x frame for bands 3 and 4, from the source for bands
                 1 and 2 — so the rectangle is scaled by 4 on the upscaled path.
-                Two --cropOffset shapes are silently ignored (below), and those
-                go the long way round: pad one pixel on every side, then crop at
-                +1, with -s format png BEFORE --padColor.
   |> resize     bands 1 and 3 only
-  +  encode     resize and encode are one invocation, with BOTH axes explicit:
-                sips --resampleHeightWidth <H> <W> \
-                     -s format heic -s formatOptions 80 in --out out.heic
+  +  encode     imaging.resize_and_encode: resize and encode are one call, with
+                BOTH axes explicit, into one CGImageDestination
   |> file       to_sort_<device>/ or to_sort_<device>/below_target/
 ```
 
-A **whole-image** plan in band 1 or 2 touches `sips` exactly once, source to output, with
-no temp file; `sips` reads HEIC natively, so no conversion is needed there. Slice plans
-always need at least two invocations, and 672 of the corpus's 974 band-1 and band-2 plans
-are slices.
+A **whole-image** plan in band 1 or 2 touches the imaging layer exactly once, source to
+output, with no temp file; ImageIO reads HEIC natively, so no conversion is needed there.
+Slice plans always need at least two calls, and 672 of the corpus's 974 band-1 and band-2
+plans are slices.
 
-Seven measured constraints produced that block: five found before implementation and
-two found during it. Each fails silently if ignored:
+**This block was `sips`, and it is CoreGraphics now.** Seven measured constraints on the
+tool produced the sequence above — five found before implementation and two during it — and
+each of them failed *silently*: a zero exit, a valid file, the requested dimensions, and the
+wrong picture. Two shaped the code above rather than merely guarding it: the pad-one-pixel
+workaround in `crop` existed only because `sips` ignored two `--cropOffset` shapes that the
+geometry produces for two of three desktop slices, and argument order decided whether
+`-s format` was honoured at all.
 
-- **Crop must never be fused with a resample.** `sips -c 1080 1920 --cropOffset 0 500
-  --resampleWidth 960` on a 3840-wide source returns 480x270, not 960x540: the resample is
-  applied against the pre-crop width. No error, no warning.
-- **Both output axes must be given explicitly.** `--resampleWidth` and `--resampleHeight`
-  each derive the other axis, so a single hardcoded flag is wrong for half the plans:
-  `--resampleWidth 4800` on a 3840x2160 desktop-by-height source yields 4800x2700, whose
-  governing dimension of 2700 is below the 3200 floor the band just certified. The derived
-  axis is also neither consistently rounded nor floored — 2662x1663 at `--resampleWidth
-  7680` gives 7680x4798 where floor gives 4797 — so a filename computed in advance would
-  disagree with the bytes. Computing both axes in `sizes.py` and passing
-  `--resampleHeightWidth` makes the plan *define* the output rather than predict it, which
-  is what section 3's no-drift claim requires.
-- **The upscale path must normalize color.** `upscayl-bin` emits 8-bit PNG with no ICC
-  chunk, so encoding its output tags sRGB over unconverted numbers. The corpus holds 19
-  Adobe RGB, 3 ProPhoto RGB, and 96 further non-sRGB profiles among 894 files, and a
-  wide-gamut round trip without `--matchTo` measures about 15 dB worse than with it — an
-  order of magnitude larger than the 33.6-to-36.0 dB spread the upscaler itself was chosen
-  on. Normalizing only unreadable formats would never fire for any of them, since all are
-  JPEG or PNG.
-- **A write `sips` skips still exits 0.** Given a path it cannot read — one that does not
-  exist, or a directory — `sips` prints `Warning: <path> not a valid file - skipping` to
-  stderr, exits 0, and writes no output file at all. A corrupt file, an unwritable
-  destination and an unknown format all exit 13 and are caught by the status check, but
-  these are not, so the executor would carry on to the next stage against a file that was
-  never written. Every operation therefore asserts its post-condition — that the file it
-  asked for exists afterwards — and clears the destination first, so a stale file from an
-  earlier run cannot stand in for output this run never produced.
-- **Two `--cropOffset` shapes are silently ignored, and the geometry produces both.** Both
-  need `x == 0`. `--cropOffset 0 0` drops the offset and `sips` falls back to its default
-  *centered* crop; `--cropOffset <y> 0` with `y + height == source height` drops the crop
-  entirely and returns the whole source. Measured on 1600x1200: `horizontal_thirds`' top
-  slice, asked for 1600x1000 at (0,0), comes back as the rows at y=100 — the middle slice;
-  its bottom slice, asked for 1600x1000 at (0,200), comes back as the full 1600x1200 image;
-  and `vertical_thirds`' left slice, asked for 800x1200 at (0,0), comes back as the band at
-  x=400. Two of the three desktop slices and one of the three phone slices, wrong, at
-  exactly the requested size — so no dimension check can see it, and only comparing the
-  returned pixels against the region asked for will. An `x` of 1 or more is correct at every
-  `y`, and `x == 0` is correct for every `y` strictly between those two. `crop` works around
-  it by padding one pixel on every side and cropping at +1, which costs one extra full-image
-  pass on the affected slices; the executor could pad each 4x frame once instead.
-- **Argument order decides whether `-s format` is honoured.** Found during
-  implementation, and the reason the pad command above puts it first. Placed *after*
-  `--padColor` it is silently dropped: a 2560x1600 JPEG padded with `-p H W --padColor
-  FF00FF -s format png` comes back as JPEG, byte-identical in size to the same run with no
-  `-s format` at all (3580120 B both), while moving `-s format png` in front yields PNG
-  (11544706 B). `sips` warns `Output file suffix should be jpg` on stderr, which a zero
-  exit discards. Not cosmetic: a lossy padded intermediate puts the magenta pad inside the
-  same 8x8 DCT blocks as the pixels being kept, so it bleeds into the crop. On a uniform
-  (20, 90, 40) region cut from a q90 JPEG, mean absolute per-channel error is 63.14 at
-  column 0 and 21.87 at column 1 against 0.33 in the interior, with column 0 shifted
-  R +73.2, G -49.1, B +67.1 — `FF00FF`'s own signature, a quarter of the way to magenta on
-  the outermost column. Forced to PNG the same columns measure 0.00. Note also that without
-  `-s format`, `sips` keeps the *source's* format whatever the `--out` suffix says, so a
-  `.png` filename proves nothing about the bytes — which is why `crop` both forces PNG and
-  refuses an `out_path` named anything else.
+The imaging layer was moved to CoreGraphics and ImageIO, called in-process through ctypes,
+one operation at a time, each behind an unchanged `imaging.py` signature and each gated by a
+differential test that ran the old implementation beside the new one over fixtures and over
+the corpus sample. **No code in the project runs `sips` any more.** The reasons were the
+seven: a crop that honours the origin it is given deletes the pad and the extra full-image
+pass with it, an explicit `CGImageDestination` has no argument order to get wrong, and a
+failure raises rather than exiting 0. Two further reasons showed up in the measurement — the
+1:1 draw the resampler now skips, and the colour conversion it must never skip — and both are
+in the CoreGraphics design spec. `docs/superpowers/specs/2026-09-13-coregraphics-imaging-design.md`
+is that work; this section describes the pipeline's shape, which did not change.
 
-The seventh bounds what `crop` may be asked for: **an out-of-bounds crop pads with
-black** rather than clamping or failing. A 400x200 source cropped at x=900,y=900 returns a
-120x80 image that is entirely black, at exit 0, as a valid file. `crop` therefore probes its
-source and refuses a rect that does not fit — the post-condition cannot help, because the
-file exists and is exactly the size asked for. This matters most on the upscale path, where
-slices are cut with `rect.scaled(4)`: an enlargement even a pixel short of exactly 4x would
-otherwise produce a black-edged wallpaper with nothing raising.
-
-`paperhanger/imaging.py` opens with the same seven, numbered in the order it applies them,
-with one substitution: colour normalization is a rule about which path runs rather than a
-`sips` defect, so the module's slot for it is `sips -g pixelWidth` exiting 0 while printing
-`pixelWidth: <nil>` — section 12's non-image detection, not this section's business.
+**The seven constraints, with their measurements, are now
+`docs/research/2026-09-11-replacing-pixelmator-and-imagemagick.md` section 12**, stated as
+findings about `sips` rather than as constraints on this code, and with the eighth beside
+them: the region decode of a baseline JPEG over 1,000,000 pixels, which was never a `sips`
+defect but ImageIO's, and is therefore still ours. The numbering there is unchanged and is
+still referenced by name from the code. Two of the eight are not retired: fact 4's
+post-condition still guards `upscayl-bin`, the one external binary left, and fact 8 is live.
 
 There is no copy-instead-of-encode shortcut for band 2. It would fire on 1 of 3441 corpus
 plans, and for a slice triple it would bypass `crop` and emit three identical full frames.

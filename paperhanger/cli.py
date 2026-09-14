@@ -163,33 +163,29 @@ def resolve_devices(chosen) -> list:
     return list(dict.fromkeys(chosen if chosen else list(sizes.DEVICES)))
 
 
-def sips_is_present() -> bool:
-    """Is the imaging tool actually there? `doctor` and `_run` ask this one."""
-    return Path(imaging.SIPS).exists()
-
-
-def check_sips():
-    """Fail loudly on a missing sips rather than quietly on every photo.
-
-    `probe` returns None for anything it cannot measure and never raises --
-    correctly, because that is how a .DS_Store is told from a photograph. The
-    cost is that a `sips` which is missing, quarantined or not executable is
-    indistinguishable from a directory of 894 files that are none of them
-    images: `scan` counts every one as a non-image and the run prints
-    `0 images, 0 outputs, 0 rejected, 0 already done, 894 non-images skipped`,
-    writes nothing, and exits 0. The user is told their entire library is
-    unreadable when what is missing is one tool.
-
-    `doctor` has reported this since it was written; `_run` did not, and `_run`
-    is the command anyone points at their photographs. Returns a complaint, or
-    None.
-    """
-    if sips_is_present():
-        return None
-    return (f"{imaging.SIPS} is missing, so every image would be measured as a "
-            f"non-image\n"
-            f"  and the run would do nothing at all. sips ships with macOS.\n"
-            f"  Run `paperhanger doctor` to see the rest of the toolchain.")
+# There was a `sips` pre-flight here, and a `sips_is_present` that `doctor`
+# shared with it. Both are gone, and the reason is worth keeping.
+#
+# They existed for one failure: `probe` returns None for anything it cannot
+# measure and never raises -- correctly, since that is how a .DS_Store is told
+# from a photograph -- so a `sips` that was missing, quarantined or not
+# executable looked exactly like a directory of 894 files that were none of
+# them images. The run printed `0 images, 0 outputs, 0 rejected, 0 already
+# done, 894 non-images skipped`, wrote nothing, exited 0, and told the user
+# their whole library was unreadable when what was missing was one tool.
+#
+# `probe` measures through ImageIO in this process now. There is no binary on
+# the imaging path to be missing, so the failure class is not one we guard
+# against any more -- it is one that no longer exists. A check for it would be
+# a check that can never fire, and a `doctor` line reporting a tool the tool
+# does not use.
+#
+# `upscayl-bin` is a different matter and keeps every check it had: it really
+# is an external binary, `doctor` still reports it and the model, and `_run`
+# still demands both through `toolchain.ensure_ready` before any render that
+# needs them. `test_cli.py` pins the run that proves the replaced failure is
+# gone -- a scan that measures a photograph correctly with every subprocess
+# on the machine made to fail.
 
 
 def scan(path: Path):
@@ -577,13 +573,6 @@ def _run(argv) -> int:
         print(f"error: {complaint}")
         return USAGE_ERROR
 
-    # Before the scan, because the scan is what a missing sips turns into a
-    # lie: it would report every photograph in the directory as a non-image.
-    complaint = check_sips()
-    if complaint:
-        print(f"error: {complaint}")
-        return USAGE_ERROR
-
     devices = resolve_devices(args.devices)
     opts = plan.OutputSettings(args.processing_dir, args.format, quality)
 
@@ -757,8 +746,10 @@ def _doctor() -> int:
     print(f"model          : {state['model']} "
           f"({'ok' if state['models_ok'] else 'missing or corrupt'})")
     print(f"models dir     : {state['models_dir']}")
-    print(f"sips           : {imaging.SIPS} "
-          f"({'ok' if sips_is_present() else 'MISSING'})")
+    # No `sips` line. Everything doctor reports is something that can be
+    # missing, and since `probe` moved to ImageIO nothing on the imaging path
+    # can be: it is a framework linked into this process, not a tool on PATH.
+    # Reporting `sips: ok` would name a dependency the tool no longer has.
     return OK
 
 

@@ -21,7 +21,18 @@
 7. **`crop` always writes PNG and refuses a non-`.png` name.** Unchanged contract.
 8. **`crop` keeps its bounds check.** `execute.py` crops the 4x frame with `rect.scaled(4)`; an enlargement a pixel short must raise, not produce a black edge.
 9. **`upscale` stays a subprocess.** `upscayl-bin` is untouched.
-10. **The differential bar is byte-identical.** A difference either fails the build or is pinned as a named exception with its justification in the test itself.
+10. **The differential bar is byte-identical DECODED PIXELS**, and the comparison must also assert colour type and channel count.
+
+    Measured over all 894 corpus images at a common shape: 859 identical, 10 differing in `IDAT` while their pixels are identical, 25 differing in pixels. So the three candidate comparisons are not interchangeable and the gate names one.
+
+    - **Whole files are out.** 723 of 894 differ, because `sips` synthesises PNG ancillary chunks from a source's EXIF and XMP that ImageIO does not emit.
+    - **`IDAT` is out as the primary check.** It fires on ten files whose pixels are identical, for two container reasons the CoreGraphics writer will never match: nine are `sips` writing colour type 6 against CoreGraphics' type 2, and one is an Adam7 interlaced source that `sips` preserves and CoreGraphics does not.
+    - **Decoded pixels are the bar** — but an RGB-only comparison silently hides that `kCGImageAlphaNoneSkipLast` drops alpha, which it does on all 12 alpha-bearing corpus PNGs. Assert the channel count and colour type alongside the pixels, or the gate passes while the alpha goes.
+
+    **One correction to the counts above.** They were themselves measured by comparing decoded 8-bit RGB -- the very comparison this constraint rejects. For all 12 alpha-bearing corpus PNGs `sips` writes colour type 6 where CoreGraphics writes type 2, and the census filed nine of those under "pixels identical". Under the comparison mandated here they are differences, and real ones: the alpha is genuinely lost. What that means for Tasks 3 to 6 is smaller than it first looked. Task 1's `bitmap_format` already derives alpha from the source, so the loss the census hid has mostly been fixed ahead of the gates that would have caught it: a real 2880x1800 alpha-bearing corpus PNG resized through a bitmap context now comes back colour type 6 on **both** sides, with the harness reporting no difference. Expect the occasional alpha report where a path has not been made alpha-aware, and fix it there rather than pinning it.
+
+    Identical pixels is stricter than any perceptual threshold; this is not a relaxation. The constraint has been wrong three times — "never identical", then "identity holds for most sources", then "pixels or `IDAT`" as though those agreed. Each error generalised from a handful of fixtures. Count before you write a rule here.
+
 11. **The corpus at `~/Pictures/wallpaper` is READ-ONLY.** Tests copy out and pass `--processing-dir`. No wallpaper image is ever committed.
 12. **No non-AI enlargement.** Unchanged: nothing is enlarged except by the model.
 
@@ -150,9 +161,11 @@ git commit -m "docs: preflight measurements for the CoreGraphics replacement"
 **Acceptance Criteria:**
 - [ ] `load(path)` returns an opaque image handle inside a scope, or raises `ImagingError` for a non-image
 - [ ] `_checked(ptr, what, path)` raises `ImagingError` naming both when handed NULL, and returns the pointer otherwise
-- [ ] `_Scope` releases every handle added to it, on exception as well as on success
+- [ ] `Scope` releases every handle added to it, on exception as well as on success
 - [ ] A test loads and releases 300 images and asserts RSS growth stays under 50 MB
 - [ ] `ctypes` is imported in `_cg.py` and nowhere else in `paperhanger/`
+- [ ] the seven fixtures named in Step 3a all exist in `tests/conftest.py` and are each used by at least one test
+- [ ] `pixels.write_grey_png` emits IHDR colour type 0 and `pixels.write_png16` emits bit depth 16, each asserted from the IHDR bytes
 
 **Verify:** `uv run pytest tests/test_cg.py -v` → all pass
 
@@ -228,12 +241,32 @@ def test_repeated_loads_do_not_leak(tmp_path, png_fixture):
     assert growth_mb < 50, f"RSS grew {growth_mb:.0f} MB over 300 loads"
 ```
 
-`png_fixture` is an existing conftest fixture that writes a PNG at exact dimensions using `tests/pngwriter.py`. Check its exact name in `tests/conftest.py` before writing; if it differs, use the real one rather than adding a duplicate.
+**`png_fixture` does not exist, and neither do the others this plan names.** `tests/conftest.py` defines only `processing_dir`, `corpus`, `corpus_sample`, `fake_upscaler` and `ready_toolchain`. Building the fixture set is part of this task -- see Step 3a. Six later tasks depend on them, so they are built once, here.
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
 Run: `uv run pytest tests/test_cg.py -v`
 Expected: FAIL, `ModuleNotFoundError: No module named 'paperhanger._cg'`
+
+- [ ] **Step 3a: Build the fixture set the rest of the plan assumes**
+
+`tests/pixels.py` writes RGB 8-bit PNGs only: `write_png(path, width, height, colour=(120,140,110), noise=False)`, `write_marked_png`, `read_png_rgb`. Every other shape this plan's tests need has to be built.
+
+Extend `tests/pixels.py` with two stdlib writers, matching its existing style. `write_grey_png(path, width, height, top=0, bottom=255)` emits colour type 0 at 8 bits — the shape that renders BLACK through a naively-built bitmap context, which ten corpus images are and which Task 0 measured coming back with all 4,665,600 pixels zero at exit 0. Nothing else in `tests/` can produce that input. `write_png16(path, width, height)` emits colour type 2 at bit depth 16 — the shape the old `sips` pad path silently downconverted, and the one pinned exception in Task 3's gate.
+
+Then add seven fixtures to `tests/conftest.py`, each a factory taking `(path, width, height)`:
+
+- `png_fixture` — `pixels.write_png`, a plain RGB PNG at exact dimensions.
+- `photo_fixture` — `pixels.write_png(..., noise=True)`. Detailed content, so a resample has something to get wrong; a flat colour resamples identically under any algorithm and would pass a broken implementation.
+- `gradient_fixture` — `pixels.write_grey_png`. The top-left pixel identifies which SOURCE ROW came back, which is the only way to tell a correct crop from `sips`' centred one, because both have the right dimensions.
+- `grayscale_fixture` — `pixels.write_grey_png` with a flat value. Tasks 4 and 6 must not blacken it.
+- `png16_fixture` — `pixels.write_png16`.
+- `profiled_fixture` — takes `(path, width, height, profile)` and shells out to `sips --matchTo /System/Library/ColorSync/Profiles/<profile>`; `profile=None` returns the untagged base.
+- `webp_fixture` — writes a WebP and names it `.jpg`, because the corpus really contains one (`snowy_forest_landscape_9522.jpg`) and `probe` must report the real format rather than the name. Shells out to `magick`.
+
+The last two shell out deliberately: both need a real encoder, both are test-only, and Global Constraint 1 governs `paperhanger/`, not `tests/`. When Task 8 removes `sips` from the project, `profiled_fixture` is the one test-side use that may remain — note it there rather than deleting it.
+
+Write a test per new writer in `tests/test_pixels.py` asserting the IHDR colour type and bit depth from the bytes, not merely that a file appeared.
 
 - [ ] **Step 3: Write `_cg.py`**
 
@@ -430,7 +463,7 @@ git commit -m "feat: the CoreGraphics binding layer, scoped and null-checked"
 - Modify: `tests/conftest.py`
 
 **Acceptance Criteria:**
-- [ ] `compare(old_fn, new_fn, source, tmp_path)` returns `None` when the outputs are byte-identical and a described difference otherwise
+- [ ] `compare(old_fn, new_fn, source, tmp_path)` returns `None` when the outputs match and a described difference otherwise, comparing decoded pixels for PNG, and whole files for lossy formats **only where the source carries no metadata of its own** (see Global Constraint 10 and §5 of the spec)
 - [ ] A deliberately different pair of functions makes it report a difference, proving the harness can fail
 - [ ] Identical functions make it report none
 - [ ] The helper reports which bytes differ and at what offset, not just that they do
@@ -480,39 +513,9 @@ Expected: FAIL, `ModuleNotFoundError: No module named 'tests.differential'`
 
 - [ ] **Step 3: Write the harness**
 
-```python
-# tests/differential.py
-"""Compare a sips operation against its CoreGraphics replacement.
+**The code that was here has been removed rather than corrected.** It compared whole file bytes, which Global Constraint 10 now forbids, and leaving a superseded implementation four lines below the criterion that contradicts it is how an implementer ends up transcribing the wrong thing.
 
-The bar is byte-identical. Where a difference is intended, the calling
-test pins it as a named exception with its reason; nothing is waved
-through for being small.
-"""
-
-
-def compare(old_fn, new_fn, source, tmp_path):
-    """Run both, return None if the bytes match, else a description."""
-    old_out = tmp_path / "_old_out"
-    new_out = tmp_path / "_new_out"
-    old_fn(source, old_out)
-    new_fn(source, new_out)
-
-    old = old_out.read_bytes()
-    new = new_out.read_bytes()
-    if old == new:
-        return None
-
-    if len(old) != len(new):
-        return (f"{source.name}: sips wrote {len(old)} bytes, "
-                f"CoreGraphics wrote {len(new)} bytes")
-
-    for i, (a, b) in enumerate(zip(old, new)):
-        if a != b:
-            return (f"{source.name}: first difference at offset {i} "
-                    f"(sips {a:#04x}, CoreGraphics {b:#04x}), "
-                    f"{sum(x != y for x, y in zip(old, new))} bytes differ")
-    return f"{source.name}: differs"
-```
+What shipped is `tests/differential.py`. For PNG it decodes with `zlib` and `struct` only -- never through ImageIO, because a gate that decoded with the framework under test would agree with itself about a bitmap it had built wrongly -- and checks dimensions, then `IHDR` colour type and its implied channel count, then bit depth, then `PLTE`/`tRNS`, then every sample of every pixel. For lossy formats it compares whole files. It takes a `suffix` argument, defaulting to `.png`, because `crop` refuses a non-`.png` name and Task 5 needs `.heic`.
 
 - [ ] **Step 4: Run to verify pass**
 
@@ -928,7 +931,10 @@ def test_encode_matches_sips_byte_for_byte(tmp_path, photo_fixture, fmt, quality
     def new(source, out):
         imaging.resize_and_encode(source, 800, 600, fmt, quality, out, resize=False)
 
-    assert compare(old, new, src, tmp_path) is None
+    # suffix matters: without it the harness writes HEIC bytes into a .png
+    # name, and every reader downstream goes by the name.
+    ext = "jpg" if fmt == "jpeg" else fmt
+    assert compare(old, new, src, tmp_path, suffix=f".{ext}") is None
 
 
 def test_png_takes_no_quality(tmp_path, photo_fixture):

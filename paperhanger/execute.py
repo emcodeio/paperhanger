@@ -13,13 +13,13 @@ Two rules that are easy to get wrong and expensive to get wrong:
     volume TMPDIR is on, and an interrupted run never leaves a truncated file
     where the sorter will see it.
 
-What that does NOT buy is a peak of one frame. `imaging.crop` pads the whole
-image on the two --cropOffset shapes sips ignores (fact 6), so while a padded
-crop runs there are two full-size copies of the 4x frame on disk at once, and
-the pad fires for two of three horizontal slices and one of three vertical
-ones. The peak is two frames plus one slice, not one frame -- measured, not
-inferred. Spec section 7 names the fix, which is to pad each frame once
-instead of once per slice; it is not implemented here.
+The peak used to be worse than one frame plus one slice, and is not any more.
+`imaging.crop` padded the whole image on the two --cropOffset shapes sips
+ignores (fact 6) -- which fired for two of three horizontal slices and one of
+three vertical ones -- so a second full-size copy of the 4x frame sat on disk
+beside the first while the crop ran. The CoreGraphics crop takes the rect
+directly, so that copy is gone and with it the fix spec section 7 proposed for
+it. The frame itself still outlives the slices cut from it.
 """
 
 import shutil
@@ -50,9 +50,13 @@ UPSCALE_PIXEL_CAP = 300_000_000
 def _refuse_to_enlarge(source, out_width: int, out_height: int) -> None:
     """Global constraint 1, enforced rather than documented.
 
-    No image is ever enlarged except by the ML model, and `sips` is the one
-    tool here that would happily do it -- silently, at exit 0, producing a
-    plausible file of exactly the requested size. Nothing downstream can tell
+    No image is ever enlarged except by the ML model, and the resampler
+    would happily do it -- silently, producing a plausible file of exactly the
+    requested size. Measured on the current one: `resize_and_encode` takes a
+    100x80 source to 400x320 without complaint, because a bitmap context is
+    built at the size it is asked for and the draw scales into it. `sips
+    --resampleHeightWidth` did the same at exit 0, so replacing the tool
+    removed nothing this guard was needed for. Nothing downstream can tell
     such a wallpaper from a real one.
 
     The check is the constraint restated: whatever is about to be resampled
@@ -121,12 +125,15 @@ def sweep_partials(processing_dir) -> int:
 def _verify_dimensions(image, target) -> None:
     """Assert that what was encoded is the file the plan describes.
 
-    `imaging` already asserts that each operation wrote SOMETHING -- a zero
-    exit does not mean a file appeared. This is the other half: a file did
-    appear, and it is the wrong picture. Seven distinct ways sips returns
-    plausible wrong output at exit 0 have now been measured in this project,
-    and render is the function that writes every user file, so it checks its
-    own result rather than trusting the eighth to announce itself.
+    `imaging` already asserts that each operation wrote SOMETHING -- a call
+    that reports success does not mean a file appeared. This is the other
+    half: a file did appear, and it is the wrong picture. Seven distinct ways
+    the old `sips` pipeline returned plausible wrong output at exit 0 were
+    measured in this project, and the class did not go away with the tool --
+    an identity skip that stopped converting, a derived axis, a region the
+    caller did not ask for, each of them a valid file of the right size.
+    `render` writes every user file, so it checks its own result rather than
+    trusting the next one of these to announce itself.
 
     It also covers a hole the no-enlargement guard cannot, because the guard
     only runs when something is being resampled: a band 4 plan handed its own
@@ -179,8 +186,9 @@ def render(target, source_image, scale: int, workdir) -> Path:
     neither subsumes the other:
 
       * `_refuse_to_enlarge` measures the INPUT before any resample, and
-        refuses to ask sips to enlarge -- global constraint 1. It runs only
-        when something is being resampled, which is the only time sips could.
+        refuses to ask the resampler to enlarge -- global constraint 1. It
+        runs only when something is being resampled, which is the only time
+        the resampler could.
       * `_verify_dimensions` measures the OUTPUT before it is published, and
         refuses to hand over a file that is not the size its plan and its own
         filename claim. That covers the band 4 case the guard cannot see,
@@ -221,8 +229,12 @@ def render(target, source_image, scale: int, workdir) -> Path:
         if resize:
             _refuse_to_enlarge(current, target.out_width, target.out_height)
 
-        # Never fused with the crop above: sips applies a resample against the
-        # PRE-crop dimensions and silently returns the wrong size.
+        # Never fused with the crop above. `_cg` offers no fused operation,
+        # so today this is structural rather than a workaround -- but the
+        # separation is older than that: `sips -c H W --cropOffset Y X
+        # --resampleWidth N` applied the resample against the PRE-crop width
+        # and silently returned the wrong size. Research fact 2, and
+        # `tests/test_imaging.py` still measures it on the tool.
         imaging.resize_and_encode(
             current, target.out_width, target.out_height,
             target.fmt, target.quality, staged, resize=resize,
@@ -247,8 +259,8 @@ def render(target, source_image, scale: int, workdir) -> Path:
         # A file already at that path came from an EARLIER run, and the name
         # encodes stem, position, device, both dimensions and the factor, so
         # it is this same plan's output from this same source: correct, not
-        # misleading. Deleting it would turn a transient sips failure into the
-        # loss of a wallpaper the user already had.
+        # misleading. Deleting it would turn a transient imaging failure into
+        # the loss of a wallpaper the user already had.
         staged.unlink(missing_ok=True)
         raise
     finally:
@@ -310,13 +322,16 @@ def _upscale_one_plan(target, work, ctx, workdir) -> Path:
     4x frame.
 
     The crop runs before the normalize because it is cheaper to convert a third
-    of an image than all of it. That ordering is safe only because sips carries
-    the source's profile into the crop untouched, which is measured rather than
-    assumed: strip the profile from the crop and sips reports the result as
-    sRGB, `--matchTo` becomes a no-op, and the wide-gamut numbers survive into
-    a file that claims to be sRGB -- 144 out of 255 on a single channel, at
-    exit 0, with nothing to see in any dimension or file-exists check. Both
-    orderings are pinned byte-identical in test_imaging.
+    of an image than all of it. That ordering is safe only because the crop
+    carries the source's profile through untouched, which is measured rather
+    than assumed: strip the profile from the crop and the result reads as
+    sRGB, the conversion becomes a no-op, and the wide-gamut numbers survive
+    into a file that claims to be sRGB -- 144 out of 255 on a single channel,
+    at no error, with nothing to see in any dimension or file-exists check.
+    That was true of `sips --matchTo` and it is true of the CoreGraphics
+    conversion for the same reason: both decide the source space by what the
+    file says it is. Both orderings are pinned byte-identical in
+    test_imaging.
 
     Every intermediate is named after the plan, because one photo's three
     slices share this workdir. The caller drops each enlargement before it asks
@@ -607,15 +622,16 @@ def _unfinished(result, rejected: bool = False) -> str:
 
     Both leave the source in place. They are told apart because a report that
     calls them the same thing cannot distinguish one flaky slice from a photo
-    sips will never read at all, and only one of those is worth a second run.
+    the decoder will never read at all, and only one of those is worth a
+    second run.
 
     `rejected` is the third way of getting there. A photo too small for every
     device has no outputs by definition, so `written or skipped` reads it as
     a total failure -- but nothing about it failed. It was measured,
     classified and turned down, and the only thing that went wrong was the
-    move into error/. Reporting that as FAILED describes a photo sips could
-    not read, which is a different problem with a different fix, and it was
-    the one outcome in which the report lost the rejection entirely.
+    move into error/. Reporting that as FAILED describes a photo the decoder
+    could not read, which is a different problem with a different fix, and it
+    was the one outcome in which the report lost the rejection entirely.
     """
     return PARTIAL if (result.written or result.skipped or rejected) else FAILED
 
@@ -732,8 +748,9 @@ def run_and_archive(work, ctx) -> PhotoResult:
         # thing left saying whether this photo was rejected or produced
         # wallpapers: the outcome below can no longer be REJECTED, since the
         # original did not reach error/. `rejected=` is what keeps it from
-        # being called FAILED, which would describe a photo sips could not
-        # read. Passed only here -- a rejected photo has no plans, so the
+        # being called FAILED, which would describe a photo the decoder
+        # could not read. Passed only here -- a rejected photo has no plans,
+        # so the
         # earlier `_unfinished` call is unreachable for one.
         result.failures.append(
             f"could not move {work.source.name} to {destination.name}/: {error}")

@@ -6,10 +6,11 @@ It replaces a set of zsh scripts that depended on Pixelmator Pro and ImageMagick
 
 ## Requirements
 
-macOS, and Python 3.14 or newer. The tool has no third-party runtime dependencies. It shells out to two programs:
+macOS, and Python 3.14 or newer. The tool has no third-party runtime dependencies. It shells out to one program:
 
-- `sips`, which ships with macOS, for measuring, cropping, resizing and encoding.
 - `upscayl-bin`, the Upscayl ncnn command-line upscaler, for 4x enlargement. One self-contained binary plus one model file, installed by `paperhanger setup`.
+
+Everything else — measuring, cropping, resizing, encoding, and the colour conversion on the upscale path — is a CoreGraphics or ImageIO call in this process. `sips` is no longer invoked at all, for reading or for writing.
 
 `magick` (ImageMagick) appears in the test suite for image comparison. It is not needed to run the tool.
 
@@ -106,7 +107,7 @@ Whether cutting from an enlarged frame differs from enlarging each cut was measu
 
 A source image is archived to `originals/` once every plan for it has succeeded, been rejected, or was already done. It goes to `error/` instead if it was too small for every requested device.
 
-If some outputs succeeded and at least one failed, the source stays where it was found rather than being archived, and is reported as `partial`, so a re-run can still find it. The same holds if `sips` or `upscayl` failed on everything for that photo, or the run was killed before any of its plans finished. If rendering succeeded but the archive move itself failed, on a permissions error say, the source is again left in place: the outputs are already written and correct, and a re-run retries just the move.
+If some outputs succeeded and at least one failed, the source stays where it was found rather than being archived, and is reported as `partial`, so a re-run can still find it. The same holds if the imaging layer or `upscayl` failed on everything for that photo, or the run was killed before any of its plans finished. If rendering succeeded but the archive move itself failed, on a permissions error say, the source is again left in place: the outputs are already written and correct, and a re-run retries just the move.
 
 ### What `below_target/` means
 
@@ -146,15 +147,43 @@ The token exists because dimensions alone cannot answer the question that matter
 
 The defaults differ per encoder because each sits at that encoder's own quality-to-size knee rather than at a shared number. HEIC's encoder quantizes such that 85 produces a file byte-identical to 80, so 80 is the real ceiling before 90 nearly doubles the size. JPEG's curve favours 90 over both 85 (worse fidelity for 5% less size) and 95 (10% more size for less improvement). AVIF at 85 lands in HEIC 80's quality neighbourhood at about 19% smaller.
 
-## Working around sips
+## Replacing sips
 
-`sips` ships with macOS and needs no install, which is most of why it is here. It also fails silently in seven measured ways, each producing a plausible-looking wrong file at exit 0. They are documented with their measurements at the top of `paperhanger/imaging.py`. Two of them shape the code you will find there:
+`sips` ships with macOS and needs no install, which is most of why it was here. It also fails silently in seven measured ways, each producing a plausible-looking wrong file at exit 0. They are documented with their measurements in `docs/research/2026-09-11-replacing-pixelmator-and-imagemagick.md` section 12, and they are why the imaging layer moved to CoreGraphics one operation at a time. It is now gone from the tool entirely, and the differential tests that ran it beside each replacement are retired too — their last run was green, 116 comparisons over fixtures and 8 over the corpus sample. The sections below are what each move changed; the measurements behind them live in the docstrings of the code they explain.
 
-**`--cropOffset 0 0` returns the centred crop, at the correct dimensions.** No error, no warning, nothing in the output to indicate it. Because the dimensions are right, no size check can catch it; only comparing the returned pixels against the region requested will. The workaround pads one pixel on every side and crops at +1.
+`sips` survives test-side, in five test modules, and in four distinct roles rather than one. It is an **independent oracle** for dimensions, profiles and format names — the role it is most often described as. It is also a **fixture builder**: `--matchTo` is how the suite tags an ICC profile onto a generated PNG or JPEG, which nothing in the standard library can do. It is a **defect demonstrator**, run so that a test can show the original failure still happening rather than assert that it used to. And it is the **fake upscaler's resampler**, standing in for `upscayl-bin`'s 4× enlargement in milliseconds. Nothing on the tool's own path invokes it.
 
-**Argument order decides whether `-s format` is honoured.** Placed after `--padColor` it is silently dropped, and a lossy padded intermediate bleeds the pad colour into the pixels being kept: mean absolute error 63.14 at column 0 against 0.33 in the interior.
+**`--cropOffset 0 0` returns the centred crop, at the correct dimensions.** No error, no warning, nothing in the output to indicate it. Because the dimensions are right, no size check can catch it; only comparing the returned pixels against the region requested will. The workaround padded one pixel on every side and cropped at +1 — a full rewrite of an image that, on the upscale path, had already been quadrupled.
 
-Every crop in the tool routes through `imaging.crop` rather than calling `sips` directly, which is what keeps these workarounds from being forgotten at a new call site.
+**The crop itself no longer goes through `sips`.** It is `CGImageCreateWithImageInRect`, which honours any origin, so the pad and its magenta bleed are gone. With `probe` moved too, `crop` spawns nothing at all: three subprocesses per padded crop down to zero. Two behaviours changed with it: a 16-bit source keeps its depth where `sips` dropped it to 8-bit, and a baseline JPEG of more than a million pixels gives slightly different pixels, because ImageIO decodes a *region* of one differently from the whole frame — a mean absolute error under 1.4 out of 255 on real photographs, in both the old implementation and the new.
+
+Every crop in the tool routes through `imaging.crop` rather than calling an imaging API directly, which is what keeps the bounds check — still needed, since CoreGraphics silently returns the overlap where `sips` silently padded with black — from being forgotten at a new call site.
+
+**The resample no longer goes through `sips` either.** It is a `CGContextDrawImage` at interpolation High into a bitmap built from the source's own colour space, and both output dimensions are always passed explicitly — `--resampleWidth` and `--resampleHeight` derive the other axis and round it inconsistently, which is the third of the seven defects.
+
+**Nor does the encode, and the intermediate went with it.** Resample and encode are now one pass over one decoded frame: one `CGImageDestination`, no lossless PNG staged beside the output and read back — which for a 7680×5120 desktop slice was a ~110 MB file written and decoded for nothing. `-s formatOptions N` was always `kCGImageDestinationLossyCompressionQuality` at N/100, `sips` being ImageIO underneath, so the quality defaults are the same numbers producing the same bytes: measured byte-identical at JPEG 80 and 90, HEIC 80, 85 and 90, and AVIF 85, including HEIC 85 still reproducing HEIC 80's file exactly.
+
+**A resample that changes nothing now does nothing.** A fifth of the resamples a full run performs — 577 of 2734 — ask for the dimensions the image already has, because a phone slice of an upscaled frame is rendered at scale 4 and the render asks for a resample either way. Those hand the decoded frame straight to the encoder rather than drawing it at 1:1, which is not merely faster: over 63 corpus photographs at their own dimensions the pass-through matches `sips`' output on 63 of 63 where the 1:1 draw matches on 11, and on a 7680x5120 frame it holds peak memory to 351 MiB against the draw's 499 (`sips` itself peaks at 332). The draw is what introduced the difference — an alpha-bearing source loses a unit of precision to the premultiply round trip — so skipping it removes a divergence rather than trading accuracy for speed.
+
+Two behaviours changed with the resample. A 16-bit source keeps its depth, as with crop. And an unreadable source now fails inside ImageIO, naming the file, rather than as a `sips` warning on a zero exit — the same exception type, and still no output file left behind.
+
+**Outputs no longer carry the source's EXIF.** `sips` copied it forward; `CGImageDestinationAddImage` writes the picture and its colour profile and nothing else. On 21 of the 27 coverage images the HEIC and AVIF outputs are 127 to 2332 bytes smaller than `sips`' for that reason alone, with the coded picture identical underneath. It applies to JPEG too, where both tools write an Exif segment and only `sips` fills it from the source. The ICC profile is unaffected — an ICC-tagged source with no EXIF encodes byte-identically, whatever the profile — so nothing about colour changes; what is gone is the camera metadata riding along inside a wallpaper. The tag that would have been visible is Orientation, and no image in the corpus carries a rotating one: of 894, 257 carry Orientation 1, one the invalid 0, 128 carry EXIF without the tag, and the rest carry none.
+
+The same change makes a **progressive JPEG source come back baseline**, where `sips` inherited the source's scan: 10 to 21% more bytes on the four progressive images in the sample, and the same picture in the strongest sense — asked for progressive, ImageIO produces `sips`' own entropy-coded scan byte for byte on all four, two of them whole files included.
+
+**The sRGB conversion no longer goes through `--matchTo`, and it is the last `sips` write there was.** It is a `CGContextDrawImage` into a bitmap context built in sRGB, which is the one place in this codebase where the destination colour space is chosen rather than read off the source. That difference decides an optimisation: the resample skips its draw when the dimensions already match, and here the draw *is* the conversion, so a skip on the same condition would fire on every photo — nothing about normalizing resizes — and stop converting, silently, at the right dimensions and the right colour type. On a 600×400 source that costs 92% of the samples on an Adobe RGB file and a maximum channel error of 144; on the corpus sample it is caught by one Adobe RGB and one ProPhoto RGB photograph, and an untagged file cannot see it at all. `tests/test_cg.py` watches the call and `tests/test_imaging.py` the pixels, for exactly that reason.
+
+Three things changed with it. A 16-bit source comes back 8-bit — the one place the pipeline narrows depth, because `sips --matchTo` did the same and because the only reader of this file is `upscayl-bin`, which emits 8-bit PNG. Colour models the resampler refuses, indexed and CMYK among them, convert here without complaint, since they are only ever a *source* of this draw. And the two ITU video profiles now follow the transfer curve written in the profile rather than the gamma 2.4 `sips` applies instead — on the neutral axis that is 29, 25, 18 and 8 levels out of 255 at device values 28, 74, 135 and 203, largest in the shadows, and a mean absolute difference over a noise image of 20.83 for ITU-2020 and 16.73 for ITU-709, with ImageMagick's LittleCMS agreeing with CoreGraphics to the byte; no corpus file carries either profile.
+
+Memory does not move: peak RSS on a 7680×5120 photograph is 494.6 MiB here against `sips --matchTo`'s 479.2, and 21.5 MiB of ours is the Python interpreter and the `ctypes` bindings that the `sips` route runs without.
+
+**And measuring is an ImageIO call, which was the last `sips` invocation of any kind.** `probe` decides what counts as an image — `scan` tells photographs from junk with it, `crop` bounds-checks with it, and the report's non-image count is its refusals — so its answer had to be preserved exactly rather than approximately, and it is the one operation whose output is not a file, so no differential could have caught a change. The old answer was therefore recorded for all 894 corpus photographs first: 841 `jpeg`, 47 `png`, 3 `webp`, 2 `heic`, 1 `gif`, one non-image, and the new one reproduces every dimension and every format string, `snowy_forest_landscape_9522.jpg` — a WebP under a `.jpg` name — included.
+
+The format names are a measured table rather than a rule, because both obvious rules are wrong. Stripping the `public.` prefix breaks on `org.webmproject.webp` and `com.compuserve.gif`, which are two of the corpus's five formats; taking the last dot-separated component gets those right and then breaks on `com.adobe.photoshop-image`, `com.truevision.tga-image`, `com.sgi.sgi-image` and `public.jpeg-2000`. Four of fifteen measured formats, so an unlisted one is reported `unknown` rather than guessed at.
+
+It is also cheaper than what it replaces, which is not obvious, since it decodes where `sips -g` read a header. `CGImageSourceCreateImageAtIndex` returns a lazily-decoded image, so asking for its dimensions never pulls the pixels through: on the largest corpus file, a 9072×12096 PNG, peak RSS is 25.5 MiB against a 21.1 MiB floor for the interpreter alone, where forcing the pixels through the same image takes 1004.7 MiB. Twenty-five corpus photographs measure in 0.021 s against 0.399 s for the `sips` subprocess.
+
+**`paperhanger doctor` no longer mentions `sips`, and a run no longer pre-flights it.** Both existed for one failure: a probe that could not spawn `sips` returned "not an image" for every photograph, so a missing or quarantined binary reported an entire 894-image library as unreadable at exit 0. Measuring in-process removes the failure rather than guarding it. `doctor` still reports `upscayl-bin` and the model, which really can be missing.
 
 ## Testing
 
@@ -194,8 +223,6 @@ Tier 4 is not a pytest run at all. It is the author processing all 894 images on
 ## Troubleshooting
 
 **`paperhanger doctor` reports the binary missing.** Run `paperhanger setup`. If it was installed and then quarantined by Gatekeeper, remove the quarantine attribute or re-run setup.
-
-**Everything is reported as a non-image.** The tool detects images by parsing `sips` output rather than its exit status, so a missing or quarantined `sips` would produce this. `paperhanger doctor` checks for it; a run now refuses to start rather than report a whole library as unreadable.
 
 **A run was interrupted.** Re-run the same command. Finished outputs are skipped, sources whose outputs are incomplete were left in place, and stray `.partial` files are swept at startup.
 

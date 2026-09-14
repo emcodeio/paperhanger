@@ -1,5 +1,6 @@
 import ast
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -9,9 +10,11 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from paperhanger import toolchain                    # noqa: E402 - after sys.path
+from tests import pixels                             # noqa: E402 - after sys.path
 
 CORPUS = Path.home() / "Pictures" / "wallpaper"
 SAMPLE_MANIFEST = Path(__file__).parent / "corpus_sample.txt"
+COLORSYNC_PROFILES = Path("/System/Library/ColorSync/Profiles")
 
 
 @pytest.fixture
@@ -20,12 +23,247 @@ def processing_dir(tmp_path):
     return tmp_path / "processing"
 
 
+# ---------------------------------------------------------------------------
+# Image fixtures.
+#
+# Eight factories, each `(path, width, height) -> path`, so a test says the
+# SHAPE of input it needs rather than the writer call that produces it. They
+# live here rather than in the one test file that first wanted them because
+# six tasks of the CoreGraphics migration use them and a second copy would
+# drift.
+#
+# Three of the eight are not conveniences. `grayscale_fixture` is the only way
+# in this suite to construct the input that renders entirely black through a
+# naively-built bitmap context; `gradient_fixture` is the only way to tell a
+# correct crop from a centred one, since both come back at the right
+# dimensions and only the pixels disagree; and `interlaced_fixture` is the
+# only input that reaches the differential harness's Adam7 decoder, which no
+# other fixture can exercise. The six gates that once depended on that
+# decoder are retired; the harness is retained for the next migration, so the
+# fixture is what keeps the decoder tested rather than merely present.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def png_fixture():
+    """A plain 8-bit RGB PNG at exactly the dimensions asked for."""
+    def make(path, width, height):
+        return pixels.write_png(path, width, height)
+    return make
+
+
+@pytest.fixture
+def photo_fixture():
+    """An RGB PNG with high-frequency detail in it.
+
+    Noisy rather than flat because a flat colour resamples to the same
+    answer under every algorithm, including a broken one: an implementation
+    that dropped interpolation entirely, or scaled by the wrong factor and
+    padded, would pass a comparison of flat images. Detail is what makes a
+    resample comparison mean anything.
+    """
+    def make(path, width, height):
+        return pixels.write_png(path, width, height, noise=True)
+    return make
+
+
+@pytest.fixture
+def gradient_fixture():
+    """A greyscale PNG whose value identifies the source ROW it came from.
+
+    For crop, which is the operation where dimensions cannot settle it: the
+    `sips` centred-crop defect returns a region of exactly the requested
+    size from the wrong place, so only the contents say which one it is.
+    """
+    def make(path, width, height):
+        return pixels.write_grey_png(path, width, height)
+    return make
+
+
+@pytest.fixture
+def grayscale_fixture():
+    """A FLAT greyscale PNG: IHDR colour type 0, one value everywhere.
+
+    The input that comes back black. Flat on purpose -- a gradient that
+    returned black and a gradient that returned the wrong rows are two
+    different failures, and this fixture is for the first.
+    """
+    def make(path, width, height, value=128):
+        return pixels.write_grey_png(path, width, height,
+                                     top=value, bottom=value)
+    return make
+
+
+@pytest.fixture
+def png16_fixture():
+    """A 16-bit RGB PNG, the depth the `sips` path silently drops."""
+    def make(path, width, height):
+        return pixels.write_png16(path, width, height)
+    return make
+
+
+@pytest.fixture
+def interlaced_fixture():
+    """An Adam7 PNG carrying exactly `png_fixture`'s pixels.
+
+    The differential harness has to decode interlacing and then say the
+    pixels agree, because one corpus source is interlaced, `sips` preserves
+    that and CoreGraphics does not. Pairing this with `png_fixture` at the
+    same arguments is what makes "the container differs and the image does
+    not" a thing a test can state.
+    """
+    def make(path, width, height, noise=False):
+        return pixels.write_interlaced_png(path, width, height, noise=noise)
+    return make
+
+
+@pytest.fixture
+def profiled_fixture(tmp_path):
+    """An RGB PNG tagged with a named ColorSync profile, or untagged.
+
+    Takes `(path, width, height, profile)`, where `profile` is a filename
+    under /System/Library/ColorSync/Profiles and None returns the untagged
+    base image for comparison.
+
+    Shells out to `sips --matchTo` deliberately. Tagging a file with a real
+    ICC profile needs a real colour-management implementation, this is
+    test-only, and Global Constraint 1 governs `paperhanger/`, not `tests/`.
+    When Task 8 removes `sips` from the project, this is the one test-side
+    use that may remain -- it is noted here rather than deleted.
+    """
+    def make(path, width, height, profile):
+        path = Path(path)
+        if profile is None:
+            return pixels.write_png(path, width, height, noise=True)
+        icc = COLORSYNC_PROFILES / profile
+        if not icc.is_file():
+            pytest.skip(f"colour profile not installed: {icc}")
+        base = pixels.write_png(tmp_path / f"untagged-{path.name}",
+                                width, height, noise=True)
+        subprocess.run(
+            [sips_or_skip(), "--matchTo", str(icc), "-s", "format", "png",
+             str(base), "--out", str(path)],
+            check=True, capture_output=True,
+        )
+        return path
+    return make
+
+
+@pytest.fixture
+def cmyk_fixture(tmp_path):
+    """A four-channel CMYK JPEG: a colour model no bitmap context accepts.
+
+    `bitmap_format` refuses indexed, CMYK, Lab and anything above 16 bits per
+    component, and CMYK is the member of that class a real photo folder could
+    plausibly hold -- four-channel JPEGs come out of print workflows, and
+    `sips` resampled one without complaint. No corpus file is CMYK today, so
+    this is the only way to reach that branch with a realistic input.
+
+    Shells out to `sips --matchTo` for the same reason `profiled_fixture`
+    does: making a genuinely CMYK file needs a real colour-management
+    implementation, and nothing in the standard library has one. JPEG rather
+    than PNG because PNG cannot carry CMYK at all.
+
+    It then ASSERTS that what came back really is CMYK. A fixture that
+    quietly produced RGB would leave every test using it passing while
+    testing nothing, which is this project's signature failure.
+    """
+    def make(path, width, height):
+        icc = COLORSYNC_PROFILES / "Generic CMYK Profile.icc"
+        if not icc.is_file():
+            pytest.skip(f"colour profile not installed: {icc}")
+        path = Path(path)
+        base = pixels.write_png(tmp_path / f"cmyk-source-{path.name}.png",
+                                width, height, noise=True)
+        subprocess.run(
+            [sips_or_skip(), "--matchTo", str(icc), "-s", "format", "jpeg",
+             str(base), "--out", str(path)],
+            check=True, capture_output=True,
+        )
+        probe = subprocess.run(
+            [sips_or_skip(), "-g", "space", "-g", "samplesPerPixel", str(path)],
+            capture_output=True, text=True,
+        )
+        assert "CMYK" in probe.stdout and "samplesPerPixel: 4" in probe.stdout, (
+            f"the CMYK fixture came back as {probe.stdout.strip()!r}; every "
+            f"test using it would pass against an RGB file"
+        )
+        return path
+    return make
+
+
+@pytest.fixture
+def webp_fixture(tmp_path):
+    """A real WebP written under whatever name the caller gives it.
+
+    Usually a `.jpg` one, because the corpus really contains such a file --
+    `snowy_forest_landscape_9522.jpg` is a WebP -- and `probe` has to report
+    the format that is in the bytes rather than the one in the name. The
+    `webp:` prefix is what forces the encoder regardless of the suffix;
+    without it `magick` picks the format from the extension and the fixture
+    would quietly produce exactly the file it exists to rule out.
+
+    Shells out to `magick` for the same reason `profiled_fixture` shells out
+    to `sips`: it needs a real encoder, and nothing in the standard library
+    writes WebP.
+    """
+    def make(path, width, height):
+        if shutil.which("magick") is None:
+            pytest.skip("ImageMagick (`magick`) is not installed")
+        source = pixels.write_png(tmp_path / f"webp-source-{Path(path).name}.png",
+                                  width, height, noise=True)
+        subprocess.run(["magick", str(source), f"webp:{path}"],
+                       check=True, capture_output=True)
+        return Path(path)
+    return make
+
+
+SIPS = Path("/usr/bin/sips")
+
+
+def sips_or_skip() -> str:
+    """`/usr/bin/sips`, or skip. Callable from any fixture scope.
+
+    THE TOOL NO LONGER USES IT, which is the whole reason for the guard: a
+    suite for a tool that dropped a binary should not go red because Apple
+    dropped it too. Every site here would otherwise raise
+    `CalledProcessError` from `check=True`, or read an empty stdout, and
+    report a missing dependency as a failing assertion about imaging.
+
+    The `magick` sites already skip this way (`test_cg.py`,
+    `webp_fixture`), and `sips` not doing so was an oversight rather than a
+    decision -- `magick` is a package a machine may not have installed, and
+    `sips` was on every Mac, which made the asymmetry easy to miss.
+
+    A plain function as well as a fixture for the same reason
+    `corpus_or_skip` is one: the module-scoped Tier 2 fixtures and the
+    factory closures inside function-scoped fixtures both need it, and
+    neither can depend on a function-scoped fixture. Returns the path as a
+    string, so a call site reads `[sips_or_skip(), "-g", ...]`.
+
+    It does NOT cover `FAKE_UPSCALER`, which runs `sips` in a child process
+    of its own; `install_fake_upscaler` skips for it instead.
+    """
+    if not SIPS.exists():
+        pytest.skip(f"{SIPS} is not present on this machine")
+    return str(SIPS)
+
+
+@pytest.fixture(scope="session")
+def sips() -> str:
+    """`/usr/bin/sips`, or skip. Test-side only; nothing in the tool runs it."""
+    return sips_or_skip()
+
+
 def corpus_or_skip() -> Path:
     """The corpus directory, or skip. Callable from any fixture scope.
 
     A plain function rather than only a fixture because the Tier 2 run is
-    module-scoped -- 192 MB of photographs and seven minutes of sips -- and a
-    module-scoped fixture cannot depend on a function-scoped one.
+    module-scoped -- 192 MB of photographs and five to six minutes of work,
+    4:58 and 5:52 on two runs of 2026-09-14 -- and a module-scoped fixture
+    cannot depend on a function-scoped one. It is no longer "minutes of
+    sips": the 894-file `sips` cross-check is 2.4 s of that, and what costs
+    the minutes is the sample run itself.
     """
     if not CORPUS.is_dir():
         pytest.skip(f"corpus not present at {CORPUS}")
@@ -251,7 +489,13 @@ def install_fake_upscaler(directory: Path, monkeypatch):
     and cannot take a function-scoped fixture. One copy of the stub, reachable
     from either scope: a second copy would drift from the format rule above,
     which is the only thing making the normalize step testable at all.
+
+    Skips if `sips` is gone, because the stub resamples with it in a child
+    process of its own where `sips_or_skip` cannot reach. Without this the
+    stub would exit non-zero and every test that reaches the upscale path
+    would report a failure about upscaling.
     """
+    sips_or_skip()
     binary = directory / "fake-upscayl-bin"
     binary.write_text(FAKE_UPSCALER)
     binary.chmod(0o755)

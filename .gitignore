@@ -19,3 +19,11 @@ __pycache__/
 # The exact directory is a design decision; uncomment once settled.
 # vendor/
 # models/
+
+# Preflight instruments write scratch images beside themselves, and some are
+# derived from corpus photographs. Task 8 ends with a stage-everything step.
+docs/research/coregraphics-preflight/*.png
+docs/research/coregraphics-preflight/*.jpg
+docs/research/coregraphics-preflight/*.jpeg
+docs/research/coregraphics-preflight/*.heic
+docs/research/coregraphics-preflight/__pycache__/
