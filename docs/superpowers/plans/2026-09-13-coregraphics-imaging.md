@@ -463,7 +463,7 @@ git commit -m "feat: the CoreGraphics binding layer, scoped and null-checked"
 - Modify: `tests/conftest.py`
 
 **Acceptance Criteria:**
-- [ ] `compare(old_fn, new_fn, source, tmp_path)` returns `None` when the outputs match and a described difference otherwise, comparing decoded pixels for PNG and whole files for lossy formats (see Global Constraint 10)
+- [ ] `compare(old_fn, new_fn, source, tmp_path)` returns `None` when the outputs match and a described difference otherwise, comparing decoded pixels for PNG, and whole files for lossy formats **only where the source carries no metadata of its own** (see Global Constraint 10 and §5 of the spec)
 - [ ] A deliberately different pair of functions makes it report a difference, proving the harness can fail
 - [ ] Identical functions make it report none
 - [ ] The helper reports which bytes differ and at what offset, not just that they do
