@@ -266,11 +266,13 @@ def test_probe_agrees_with_sips_on_every_corpus_dimension(corpus):
 
     THAT IS ELEVEN SECONDS, NOT SIX MINUTES, and the six was worth checking
     rather than inheriting. This test was recorded as costing "about six
-    minutes, most of tier 2's runtime"; the whole of tier 2 is 4:59, of which
-    this was 14 s. `sips -g pixelWidth` reads a header and does not decode,
-    so 894 of them are cheap however they are spawned. The pool is still
-    worth having -- it is strictly less wall clock for an identical
-    comparison -- but it is not where tier 2's five minutes go.
+    minutes, most of tier 2's runtime". The whole of tier 2 is five to six
+    minutes -- 4:58 and 5:52 on two runs the same afternoon, which is the
+    other reason not to quote one figure for it -- and this test was 14 s of
+    that. `sips -g pixelWidth` reads a header and does not decode, so 894 of
+    them are cheap however they are spawned. The pool is still worth having:
+    it is strictly less wall clock for an identical comparison. It is just
+    not where tier 2's minutes go.
 
     `imaging.probe` deliberately stays on the main thread. It is the thing
     under test and it is `ctypes` into ImageIO; running it exactly as the

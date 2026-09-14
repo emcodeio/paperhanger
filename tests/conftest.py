@@ -259,11 +259,11 @@ def corpus_or_skip() -> Path:
     """The corpus directory, or skip. Callable from any fixture scope.
 
     A plain function rather than only a fixture because the Tier 2 run is
-    module-scoped -- 192 MB of photographs and about five minutes of work,
-    measured at 4:59 on 2026-09-14 -- and a module-scoped fixture cannot
-    depend on a function-scoped one. It is no longer "minutes of sips": the
-    894-file `sips` cross-check is 2.4 s of that, and what costs the five
-    minutes is the sample run itself.
+    module-scoped -- 192 MB of photographs and five to six minutes of work,
+    4:58 and 5:52 on two runs of 2026-09-14 -- and a module-scoped fixture
+    cannot depend on a function-scoped one. It is no longer "minutes of
+    sips": the 894-file `sips` cross-check is 2.4 s of that, and what costs
+    the minutes is the sample run itself.
     """
     if not CORPUS.is_dir():
         pytest.skip(f"corpus not present at {CORPUS}")
