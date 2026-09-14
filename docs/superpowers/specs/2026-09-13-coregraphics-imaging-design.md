@@ -119,13 +119,29 @@ Over real photographs whole files do **not** match: heic 6 of 27, avif 6 of 27, 
 
 Four things are unknown. They are listed here rather than left to be discovered mid-implementation, because any of them could change the design.
 
+*All four resolved; recorded 2026-09-14.* Task 0's preflight was written to answer exactly these, and each was then pinned by the task that depended on it. **None of them changed the design.** The four statements below are kept as written — what was unknown at design time is part of the record — with each resolution appended, and **two of the stated facts were refuted by the measurements**. The refutations are marked where they occur rather than edited away.
+
 **EXIF orientation.** Untested; no synthetic fixture could be constructed during design. The corpus carries no orientation tags on any of its 894 files, but photos straight off a phone routinely do. If `sips` applies orientation where ImageIO returns raw pixels, crop geometry diverges silently for those files. This needs a real measurement and an explicit decision about which behaviour is correct.
+
+> *Resolved by Task 0's preflight and Task 5's census.* `sips` and ImageIO agree — both return 1200x600 for an orientation-bearing source — so crop geometry does not diverge and no decision was needed.
+>
+> **The stated fact is false.** Measured over the corpus: **257 files carry Orientation 1**, one carries an invalid 0, 128 carry EXIF with no Orientation tag, and the rest carry none. What is true is the narrower claim the design actually needed: **none of the 894 carries a ROTATING orientation.** Orientation 1 means "as stored", so the pixels and the geometry are the same either way. `README.md` carries the breakdown.
 
 **Peak memory at 300 Mpx.** The pixel cap exists because whole-frame upscaling strains memory, and a bitmap context for a 300 Mpx resize allocates the entire bitmap. Whether the new path's peak is better or worse than the `sips` path should be known before committing, since it may move the cap.
 
+> *Resolved by Task 0's preflight: **the cap does not move.*** CoreGraphics' peak RSS sits a constant ~30 MiB above the `sips` route at both pixel counts measured, and constant means it is the Python interpreter and the `ctypes` bindings rather than the imaging. Confirmed again per operation as each moved, on a 7680x5120 frame: the resample skip 351.0 MiB against `sips`' 332.1 and the whole-frame draw's 499.2, and `normalize_to_srgb_png` 494.6 against `sips --matchTo`'s 479.2. The numbers live in the docstrings of the functions they were measured on.
+
 **HEIC input** through `CGImageSourceCreateWithURL`. The corpus contains one HEIC source; only PNG and JPEG inputs were tested during design.
 
+> *Resolved by Task 0's preflight and Task 6's corpus differential.* It loads, the dimensions agree, and the encode side was measured byte-for-byte.
+>
+> **The stated fact is false: the corpus contains TWO HEIC sources, not one.** Task 0 found the second. It is pinned as `"heic": 2` in `CORPUS_FORMATS` (`tests/test_imaging.py`), which a tier-2 test enforces as counts over all 894 files, and reflected in `_cg.SOURCE_FORMATS` and `README.md`.
+
 **Whether interpolation High stays exact** across aspect ratios, and on enlargement as well as reduction. One downscale was tested.
+
+> *Resolved by Task 0's preflight, its round-3 computation, and Task 4 — and this is the one of the four whose answer was NO.* 7 of 8 shapes matched; 2880x4320 failed at a mean absolute error of 1458, and that shape is a phone target out of `sizes.py`. It was then isolated: the divergence is a **JPEG decode** difference and not a resampler one — both tools agree exactly through a lossless PNG intermediate — and it appears only at aspect-DISTORTING shapes. 22 of 894 corpus sources diverge, up to 250,459 differing bytes at a delta of 38, and all 22 match at four aspect-preserving scales.
+>
+> Whether production ever asks for an anisotropic resample was then **computed rather than assumed**, over all 894 images and every plan the real planner produces. It does: 1086 of 2562 crop rects are not the target's aspect and 955 of 2734 resamples have an x scale different from their y scale, caused by `geometry.py`'s ceiling division. What rescues it is the second condition — 886 of those 955 read a lossless PNG intermediate, and all 69 that read an original JPEG diverge **zero** times at their planned dimensions. The residual risk is the size of the anisotropy (1.6e-4) rather than a structural guarantee, which is why it is written down here. Task 4 then held the identity-skip condition under attack across thirteen shapes without finding an input where the draw does work the skip omits.
 
 ## 7. Documentation
 
@@ -135,7 +151,14 @@ Four things are unknown. They are listed here rather than left to be discovered 
 
 - All three gating tiers green.
 - The differential clean over the 27-image sample, with only pinned exceptions.
+
+  > *Substituted during Task 3; recorded here 2026-09-14.* **Not met as written, deliberately.** 14 of the 27 differed on crop, for the reason §5 records: the `sips` reference is itself a region decode, so both sides depart from a frame decode and neither is the better answer. Pinning 14 exceptions would have recorded a divergence rather than tested anything, and it would have made the gate weaker the more it fired. What replaced it is stronger: hand both implementations the **same decoded pixels** and require exact agreement, with any file the control cannot account for failing the gate. §5 carries the correction; it belongs here too, because as written this bullet reads as a criterion that was missed rather than one that was replaced.
+
 - A tier-3 run against the real upscaler.
 - `sips` referenced nowhere in `paperhanger/`.
+
+  > *Narrowed by ruling during Task 8; recorded here 2026-09-14.* **Literally unmet:** about ninety prose mentions remain — 92, counted case-insensitively on 2026-09-14. The criterion means **executable and normative** references: code that runs `sips`, or a docstring that states its behaviour as a constraint on ours rather than as a measurement of it. Of those there was exactly one left when Task 8 began, and it is gone. Nothing in the package spawns anything but `upscayl-bin` — `imaging._run` has one caller — and `grep -rnw SIPS paperhanger/` is empty.
+  >
+  > The measurement provenance was kept on purpose, which is the other half of the ruling. Every remaining mention is the comparison a construction was accepted on: which outputs were byte-identical, which diverged and by how much, and therefore why the code is shaped the way it is rather than the obvious way. Deleting them would leave the code looking arbitrary and the next reader re-deriving them. The defects themselves moved to `docs/research/` per §7, where they are findings about a tool rather than constraints on this one.
 
 Tier 4, the 894-image acceptance pass, remains the author's and gates nothing.
