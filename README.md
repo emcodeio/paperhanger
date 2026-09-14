@@ -10,7 +10,7 @@ macOS, and Python 3.14 or newer. The tool has no third-party runtime dependencie
 
 - `upscayl-bin`, the Upscayl ncnn command-line upscaler, for 4x enlargement. One self-contained binary plus one model file, installed by `paperhanger setup`.
 
-Everything else — measuring, cropping, resizing, encoding, and the colour conversion on the upscale path — is a CoreGraphics or ImageIO call in this process. `sips` is no longer invoked at all, for reading or for writing.
+Everything else (measuring, cropping, resizing, encoding, and the colour conversion on the upscale path) is a CoreGraphics or ImageIO call in this process. `sips` is no longer invoked at all, for reading or for writing.
 
 `magick` (ImageMagick) appears in the test suite for image comparison. It is not needed to run the tool.
 
@@ -149,35 +149,35 @@ The defaults differ per encoder because each sits at that encoder's own quality-
 
 ## Replacing sips
 
-`sips` ships with macOS and needs no install, which is most of why it was here. It also fails silently in seven measured ways, each producing a plausible-looking wrong file at exit 0. They are documented with their measurements in `docs/research/2026-09-11-replacing-pixelmator-and-imagemagick.md` section 12, and they are why the imaging layer moved to CoreGraphics one operation at a time. It is now gone from the tool entirely, and the differential tests that ran it beside each replacement are retired too — their last run was green, 116 comparisons over fixtures and 8 over the corpus sample. The sections below are what each move changed; the measurements behind them live in the docstrings of the code they explain.
+`sips` ships with macOS and needs no install, which is most of why it was here. It also fails silently in seven measured ways, each producing a plausible-looking wrong file at exit 0. They are documented with their measurements in `docs/research/2026-09-11-replacing-pixelmator-and-imagemagick.md` section 12, and they are why the imaging layer moved to CoreGraphics one operation at a time. It is now gone from the tool entirely, and the differential tests that ran it beside each replacement are retired too. Their last run was green: 116 comparisons over fixtures and 8 over the corpus sample. The sections below are what each move changed; the measurements behind them live in the docstrings of the code they explain.
 
-`sips` survives test-side, in five test modules, and in four distinct roles rather than one. It is an **independent oracle** for dimensions, profiles and format names — the role it is most often described as. It is also a **fixture builder**: `--matchTo` is how the suite tags an ICC profile onto a generated PNG or JPEG, which nothing in the standard library can do. It is a **defect demonstrator**, run so that a test can show the original failure still happening rather than assert that it used to. And it is the **fake upscaler's resampler**, standing in for `upscayl-bin`'s 4× enlargement in milliseconds. Nothing on the tool's own path invokes it.
+`sips` survives test-side, in five test modules, and in four distinct roles rather than one. It is an **independent oracle** for dimensions, profiles and format names, which is the role it is most often described as. It is also a **fixture builder**: `--matchTo` is how the suite tags an ICC profile onto a generated PNG or JPEG, which nothing in the standard library can do. It is a **defect demonstrator**, run so that a test can show the original failure still happening rather than assert that it used to. And it is the **fake upscaler's resampler**, standing in for `upscayl-bin`'s 4× enlargement in milliseconds. Nothing on the tool's own path invokes it.
 
-**`--cropOffset 0 0` returns the centred crop, at the correct dimensions.** No error, no warning, nothing in the output to indicate it. Because the dimensions are right, no size check can catch it; only comparing the returned pixels against the region requested will. The workaround padded one pixel on every side and cropped at +1 — a full rewrite of an image that, on the upscale path, had already been quadrupled.
+**`--cropOffset 0 0` returns the centred crop, at the correct dimensions.** No error, no warning, nothing in the output to indicate it. Because the dimensions are right, no size check can catch it; only comparing the returned pixels against the region requested will. The workaround padded one pixel on every side and cropped at +1, a full rewrite of an image that, on the upscale path, had already been quadrupled.
 
-**The crop itself no longer goes through `sips`.** It is `CGImageCreateWithImageInRect`, which honours any origin, so the pad and its magenta bleed are gone. With `probe` moved too, `crop` spawns nothing at all: three subprocesses per padded crop down to zero. Two behaviours changed with it: a 16-bit source keeps its depth where `sips` dropped it to 8-bit, and a baseline JPEG of more than a million pixels gives slightly different pixels, because ImageIO decodes a *region* of one differently from the whole frame — a mean absolute error under 1.4 out of 255 on real photographs, in both the old implementation and the new.
+**The crop itself no longer goes through `sips`.** It is `CGImageCreateWithImageInRect`, which honours any origin, so the pad and its magenta bleed are gone. With `probe` moved too, `crop` spawns nothing at all: three subprocesses per padded crop down to zero. Two behaviours changed with it: a 16-bit source keeps its depth where `sips` dropped it to 8-bit, and a baseline JPEG of more than a million pixels gives slightly different pixels, because ImageIO decodes a *region* of one differently from the whole frame. The gap is a mean absolute error under 1.4 out of 255 on real photographs, in both the old implementation and the new.
 
-Every crop in the tool routes through `imaging.crop` rather than calling an imaging API directly, which is what keeps the bounds check — still needed, since CoreGraphics silently returns the overlap where `sips` silently padded with black — from being forgotten at a new call site.
+Every crop in the tool routes through `imaging.crop` rather than calling an imaging API directly, which is what keeps the bounds check from being forgotten at a new call site. It is still needed: CoreGraphics silently returns the overlap where `sips` silently padded with black.
 
-**The resample no longer goes through `sips` either.** It is a `CGContextDrawImage` at interpolation High into a bitmap built from the source's own colour space, and both output dimensions are always passed explicitly — `--resampleWidth` and `--resampleHeight` derive the other axis and round it inconsistently, which is the third of the seven defects.
+**The resample no longer goes through `sips` either.** It is a `CGContextDrawImage` at interpolation High into a bitmap built from the source's own colour space, and both output dimensions are always passed explicitly, because `--resampleWidth` and `--resampleHeight` derive the other axis and round it inconsistently, which is the third of the seven defects.
 
-**Nor does the encode, and the intermediate went with it.** Resample and encode are now one pass over one decoded frame: one `CGImageDestination`, no lossless PNG staged beside the output and read back — which for a 7680×5120 desktop slice was a ~110 MB file written and decoded for nothing. `-s formatOptions N` was always `kCGImageDestinationLossyCompressionQuality` at N/100, `sips` being ImageIO underneath, so the quality defaults are the same numbers producing the same bytes: measured byte-identical at JPEG 80 and 90, HEIC 80, 85 and 90, and AVIF 85, including HEIC 85 still reproducing HEIC 80's file exactly.
+**Nor does the encode, and the intermediate went with it.** Resample and encode are now one pass over one decoded frame: one `CGImageDestination`, no lossless PNG staged beside the output and read back, which for a 7680×5120 desktop slice was a ~110 MB file written and decoded for nothing. `-s formatOptions N` was always `kCGImageDestinationLossyCompressionQuality` at N/100, `sips` being ImageIO underneath, so the quality defaults are the same numbers producing the same bytes: measured byte-identical at JPEG 80 and 90, HEIC 80, 85 and 90, and AVIF 85, including HEIC 85 still reproducing HEIC 80's file exactly.
 
-**A resample that changes nothing now does nothing.** A fifth of the resamples a full run performs — 577 of 2734 — ask for the dimensions the image already has, because a phone slice of an upscaled frame is rendered at scale 4 and the render asks for a resample either way. Those hand the decoded frame straight to the encoder rather than drawing it at 1:1, which is not merely faster: over 63 corpus photographs at their own dimensions the pass-through matches `sips`' output on 63 of 63 where the 1:1 draw matches on 11, and on a 7680x5120 frame it holds peak memory to 351 MiB against the draw's 499 (`sips` itself peaks at 332). The draw is what introduced the difference — an alpha-bearing source loses a unit of precision to the premultiply round trip — so skipping it removes a divergence rather than trading accuracy for speed.
+**A resample that changes nothing now does nothing.** A fifth of the resamples a full run performs (577 of 2734) ask for the dimensions the image already has, because a phone slice of an upscaled frame is rendered at scale 4 and the render asks for a resample either way. Those hand the decoded frame straight to the encoder rather than drawing it at 1:1, which is not merely faster: over 63 corpus photographs at their own dimensions the pass-through matches `sips`' output on 63 of 63 where the 1:1 draw matches on 11, and on a 7680x5120 frame it holds peak memory to 351 MiB against the draw's 499 (`sips` itself peaks at 332). The draw is what introduced the difference, since an alpha-bearing source loses a unit of precision to the premultiply round trip, so skipping it removes a divergence rather than trading accuracy for speed.
 
-Two behaviours changed with the resample. A 16-bit source keeps its depth, as with crop. And an unreadable source now fails inside ImageIO, naming the file, rather than as a `sips` warning on a zero exit — the same exception type, and still no output file left behind.
+Two behaviours changed with the resample. A 16-bit source keeps its depth, as with crop. And an unreadable source now fails inside ImageIO, naming the file, rather than as a `sips` warning on a zero exit. Same exception type, and still no output file left behind.
 
-**Outputs no longer carry the source's EXIF.** `sips` copied it forward; `CGImageDestinationAddImage` writes the picture and its colour profile and nothing else. On 21 of the 27 coverage images the HEIC and AVIF outputs are 127 to 2332 bytes smaller than `sips`' for that reason alone, with the coded picture identical underneath. It applies to JPEG too, where both tools write an Exif segment and only `sips` fills it from the source. The ICC profile is unaffected — an ICC-tagged source with no EXIF encodes byte-identically, whatever the profile — so nothing about colour changes; what is gone is the camera metadata riding along inside a wallpaper. The tag that would have been visible is Orientation, and no image in the corpus carries a rotating one: of 894, 257 carry Orientation 1, one the invalid 0, 128 carry EXIF without the tag, and the rest carry none.
+**Outputs no longer carry the source's EXIF.** `sips` copied it forward; `CGImageDestinationAddImage` writes the picture and its colour profile and nothing else. On 21 of the 27 coverage images the HEIC and AVIF outputs are 127 to 2332 bytes smaller than `sips`' for that reason alone, with the coded picture identical underneath. It applies to JPEG too, where both tools write an Exif segment and only `sips` fills it from the source. The ICC profile is unaffected: an ICC-tagged source with no EXIF encodes byte-identically, whatever the profile. Nothing about colour changes. What is gone is the camera metadata riding along inside a wallpaper. The tag that would have been visible is Orientation, and no image in the corpus carries a rotating one: of 894, 257 carry Orientation 1, one the invalid 0, 128 carry EXIF without the tag, and the rest carry none.
 
-The same change makes a **progressive JPEG source come back baseline**, where `sips` inherited the source's scan: 10 to 21% more bytes on the four progressive images in the sample, and the same picture in the strongest sense — asked for progressive, ImageIO produces `sips`' own entropy-coded scan byte for byte on all four, two of them whole files included.
+The same change makes a **progressive JPEG source come back baseline**, where `sips` inherited the source's scan: 10 to 21% more bytes on the four progressive images in the sample, and the same picture in the strongest sense. Asked for progressive, ImageIO produces `sips`' own entropy-coded scan byte for byte on all four, two of them whole files included.
 
-**The sRGB conversion no longer goes through `--matchTo`, and it is the last `sips` write there was.** It is a `CGContextDrawImage` into a bitmap context built in sRGB, which is the one place in this codebase where the destination colour space is chosen rather than read off the source. That difference decides an optimisation: the resample skips its draw when the dimensions already match, and here the draw *is* the conversion, so a skip on the same condition would fire on every photo — nothing about normalizing resizes — and stop converting, silently, at the right dimensions and the right colour type. On a 600×400 source that costs 92% of the samples on an Adobe RGB file and a maximum channel error of 144; on the corpus sample it is caught by one Adobe RGB and one ProPhoto RGB photograph, and an untagged file cannot see it at all. `tests/test_cg.py` watches the call and `tests/test_imaging.py` the pixels, for exactly that reason.
+**The sRGB conversion no longer goes through `--matchTo`, and it is the last `sips` write there was.** It is a `CGContextDrawImage` into a bitmap context built in sRGB, which is the one place in this codebase where the destination colour space is chosen rather than read off the source. That difference decides an optimisation: the resample skips its draw when the dimensions already match, and here the draw *is* the conversion, so a skip on the same condition would fire on every photo, since nothing about normalizing resizes, and stop converting, silently, at the right dimensions and the right colour type. On a 600×400 source that costs 92% of the samples on an Adobe RGB file and a maximum channel error of 144; on the corpus sample it is caught by one Adobe RGB and one ProPhoto RGB photograph, and an untagged file cannot see it at all. `tests/test_cg.py` watches the call and `tests/test_imaging.py` the pixels, for exactly that reason.
 
-Three things changed with it. A 16-bit source comes back 8-bit — the one place the pipeline narrows depth, because `sips --matchTo` did the same and because the only reader of this file is `upscayl-bin`, which emits 8-bit PNG. Colour models the resampler refuses, indexed and CMYK among them, convert here without complaint, since they are only ever a *source* of this draw. And the two ITU video profiles now follow the transfer curve written in the profile rather than the gamma 2.4 `sips` applies instead — on the neutral axis that is 29, 25, 18 and 8 levels out of 255 at device values 28, 74, 135 and 203, largest in the shadows, and a mean absolute difference over a noise image of 20.83 for ITU-2020 and 16.73 for ITU-709, with ImageMagick's LittleCMS agreeing with CoreGraphics to the byte; no corpus file carries either profile.
+Three things changed with it. A 16-bit source comes back 8-bit, the one place the pipeline narrows depth, because `sips --matchTo` did the same and because the only reader of this file is `upscayl-bin`, which emits 8-bit PNG. Colour models the resampler refuses, indexed and CMYK among them, convert here without complaint, since they are only ever a *source* of this draw. And the two ITU video profiles now follow the transfer curve written in the profile rather than the gamma 2.4 `sips` applies instead. On the neutral axis that is 29, 25, 18 and 8 levels out of 255 at device values 28, 74, 135 and 203, largest in the shadows, and a mean absolute difference over a noise image of 20.83 for ITU-2020 and 16.73 for ITU-709, with ImageMagick's LittleCMS agreeing with CoreGraphics to the byte; no corpus file carries either profile.
 
 Memory does not move: peak RSS on a 7680×5120 photograph is 494.6 MiB here against `sips --matchTo`'s 479.2, and 21.5 MiB of ours is the Python interpreter and the `ctypes` bindings that the `sips` route runs without.
 
-**And measuring is an ImageIO call, which was the last `sips` invocation of any kind.** `probe` decides what counts as an image — `scan` tells photographs from junk with it, `crop` bounds-checks with it, and the report's non-image count is its refusals — so its answer had to be preserved exactly rather than approximately, and it is the one operation whose output is not a file, so no differential could have caught a change. The old answer was therefore recorded for all 894 corpus photographs first: 841 `jpeg`, 47 `png`, 3 `webp`, 2 `heic`, 1 `gif`, one non-image, and the new one reproduces every dimension and every format string, `snowy_forest_landscape_9522.jpg` — a WebP under a `.jpg` name — included.
+**And measuring is an ImageIO call, which was the last `sips` invocation of any kind.** `probe` decides what counts as an image. `scan` tells photographs from junk with it, `crop` bounds-checks with it, and the report's non-image count is its refusals, so its answer had to be preserved exactly rather than approximately, and it is the one operation whose output is not a file, so no differential could have caught a change. The old answer was therefore recorded for all 894 corpus photographs first: 841 `jpeg`, 47 `png`, 3 `webp`, 2 `heic`, 1 `gif`, one non-image, and the new one reproduces every dimension and every format string, including `snowy_forest_landscape_9522.jpg`, a WebP under a `.jpg` name.
 
 The format names are a measured table rather than a rule, because both obvious rules are wrong. Stripping the `public.` prefix breaks on `org.webmproject.webp` and `com.compuserve.gif`, which are two of the corpus's five formats; taking the last dot-separated component gets those right and then breaks on `com.adobe.photoshop-image`, `com.truevision.tga-image`, `com.sgi.sgi-image` and `public.jpeg-2000`. Four of fifteen measured formats, so an unlisted one is reported `unknown` rather than guessed at.
 
@@ -191,30 +191,33 @@ Four tiers. Only the first three are part of "implemented". The full-corpus run 
 
 | Tier | What | Cost | When |
 |---|---|---|---|
-| 1 | generated fixtures, pure functions, stubbed upscaler | ~90 s | every commit |
-| 2 | 27 real corpus images, stubbed upscaler | ~8 min | before every push |
-| 3 | the same 27 images, real upscaler (21 model calls) | ~25 min | once, before calling the tool done |
+| 1 | generated fixtures, pure functions, stubbed upscaler | 723 tests, ~1m35s | every commit |
+| 2 | 27 real corpus images, stubbed upscaler | 21 tests, ~5-6 min | before every push |
+| 3 | the same 27 images, real upscaler (21 model calls) | 6 tests, ~41 min | once, before calling the tool done |
 | 4 | all 894 images in the real corpus | ~24 h | the author's acceptance pass, not a gate |
 
-Fast loop, every commit. Tier 1 alone, 526 tests in about 90 seconds:
+Tiers 1 and 2 are measured on every run and the numbers above are current. Tier 3's cost
+is one measurement, from its first run against the CoreGraphics pipeline.
+
+Fast loop, every commit. Tier 1 alone, 723 tests in about ninety seconds:
 
     uv run pytest
 
 That is the default. `pyproject.toml` sets `addopts = "-m 'not corpus and not real_upscaler'"`, so the bare command is the per-commit gate.
 
-Before a push, tiers 1 and 2, about 8 minutes:
+Before a push, tiers 1 and 2, about seven minutes:
 
     uv run pytest -m "not real_upscaler"
 
 Either slow tier on its own:
 
-    uv run pytest -m corpus                    # tier 2, ~8 min
-    uv run pytest -m real_upscaler             # tier 3, ~25 min, needs the real binary
+    uv run pytest -m corpus                    # tier 2, ~5-6 min
+    uv run pytest -m real_upscaler             # tier 3, ~41 min, needs the real binary
 
 **A `-m` on the command line replaces `addopts`. It does not AND with it.** That has two consequences:
 
-- `uv run pytest -m "not corpus"` re-admits tier 3: 25 minutes, and a hard failure without `upscayl-bin` installed. Say `-m "not real_upscaler"` when what you mean is "everything but the slowest tier".
-- `uv run pytest tests/test_corpus_sample.py` selects nothing. The default `-m` still applies and every test in that file carries the `corpus` marker, so pytest reports `no tests collected (19 deselected)`. Add `-m corpus` to run a slow-tier file by name.
+- `uv run pytest -m "not corpus"` re-admits tier 3: forty minutes, and a hard failure without `upscayl-bin` installed. Say `-m "not real_upscaler"` when what you mean is "everything but the slowest tier".
+- `uv run pytest tests/test_corpus_sample.py` selects nothing. The default `-m` still applies and every test in that file carries the `corpus` marker, so pytest reports `no tests collected` with everything deselected. Add `-m corpus` to run a slow-tier file by name.
 
 Tier 2 tests are marked `corpus` and skip cleanly on a machine that has never seen `~/Pictures/wallpaper`. That corpus is read-only: nothing in this repo writes to it, and the images are never committed. `tests/corpus_sample.txt` names 27 filenames, copied to scratch at test time.
 
@@ -230,9 +233,27 @@ Tier 4 is not a pytest run at all. It is the author processing all 894 images on
 
 ## Status
 
-All sixteen planned tasks are complete, reviewed, and green: 551 tests across the three gating tiers, 526 in tier 1, 19 against the real corpus, 6 driving the real upscaler.
+Complete and reviewed, in two stages. Sixteen tasks built the tool. Eight more moved its
+imaging layer off `sips` and onto CoreGraphics, which is the section above. 750 tests
+pass across the three gating tiers: 723 in tier 1, 21 against the real corpus, 6 driving
+the real upscaler.
 
-One known optimisation is outstanding. The crop workaround pads once per slice where it could pad each 4x frame once, measured at 1.22 s against 0.58 s on a 6000x4000 source. It is a speedup, not a correctness gap, and it is tracked as a repo issue.
+Nothing is known to be wrong, and nothing is known to be slow on purpose. The one
+optimisation this section used to list, padding each 4x frame once instead of once per
+slice, is gone rather than done: `CGImageCreateWithImageInRect` crops at any origin, so
+there is no extra pass left to amortise.
+
+What has never happened is tier 4. No run has processed the whole 894-image library end
+to end, and a full run takes about a day, so the longest thing this code has done is a
+27-image sample. Nothing in the test suite covers what only volume reveals: a filename
+collision in the archive after four hundred moves, a single corrupt file eight hours in,
+disk filling partway through. Start with `--dry-run`, then a directory of twenty, before
+pointing it at everything.
+
+Six tests are the only thing standing between a specific silent defect and a wrong
+wallpaper, and they are named as such in
+`docs/research/2026-09-14-coregraphics-branch-review.md`. Three of them have a
+DO-NOT-DELETE header saying why.
 
 ## Lineage
 
@@ -254,7 +275,11 @@ See also:
 - `docs/superpowers/specs/2026-09-11-paperhanger-design.md` — the full design spec these sections summarize.
 - `docs/research/2026-09-11-replacing-pixelmator-and-imagemagick.md` — the research that established the upscaler choice, the `sips` findings, and the legacy behaviors this tool preserves or changes.
 - `docs/research/2026-09-13-whole-frame-equivalence-gate.md` — how the whole-frame upscaling decision was measured.
-- `docs/research/2026-09-13-final-branch-review.md` — the merge-readiness review, and what remains thin.
+- `docs/research/2026-09-13-final-branch-review.md` — the merge-readiness review of the original sixteen tasks.
+- `docs/superpowers/specs/2026-09-13-coregraphics-imaging-design.md` — the design for moving the imaging layer off `sips`.
+- `docs/research/2026-09-13-coregraphics-preflight-measurements.md` — the four unknowns that had to be settled before that design could be implemented, and the twenty-one instruments that settled them.
+- `docs/research/2026-09-14-coregraphics-branch-review.md` — the merge-readiness review of that migration, including the line-by-line ownership audit of `_cg.py` and the mutation evidence for what the suite guards.
+- `docs/research/coregraphics-task-reports/` — the nine implementation reports, kept as the provenance for the measured numbers in the docstrings.
 
 ## License
 
