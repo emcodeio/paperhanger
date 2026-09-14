@@ -155,13 +155,32 @@ def test_ancillary_chunks_and_compression_are_not_a_difference(tmp_path,
     assert compare(_writes(plain), _writes(rewrapped), src, tmp_path) is None
 
 
+def _predictor(a, b, c):
+    """RFC 2083 section 6.6's PaethPredictor, transcribed here on purpose.
+
+    `pixels._paeth` is what the harness DECODES with. Encoding with it too
+    would make a wrong predictor cancel out: filter with it, unfilter with
+    it, and the pixels come back whatever it computes. So this is a second
+    reading of the specification rather than a call to the first one, and
+    mutating `pixels._paeth` now turns the Paeth case red.
+    """
+    p = a + b - c
+    pa, pb, pc = abs(p - a), abs(p - b), abs(p - c)
+    if pa <= pb and pa <= pc:
+        return a
+    if pb <= pc:
+        return b
+    return c
+
+
 def _refilter(path, filter_type):
     """The same pixels, every scanline written under one PNG filter.
 
     Real `sips` output is adaptively filtered, so the harness's unfilter path
     runs on every corpus comparison the fast path does not settle. This
-    APPLIES the four filters rather than undoing them, so the test is not the
-    decoder checking its own work.
+    APPLIES the four filters rather than undoing them, and applies Paeth
+    through its own predictor, so the test is not the decoder checking its
+    own work.
     """
     width, height, rows = pixels.read_png_rgb(path)
     stride = width * 3
@@ -186,7 +205,7 @@ def _refilter(path, filter_type):
             elif filter_type == 3:
                 encoded[i] = (line[i] - (left + up) // 2) & 0xFF
             else:
-                encoded[i] = (line[i] - pixels._paeth(left, up, up_left)) & 0xFF
+                encoded[i] = (line[i] - _predictor(left, up, up_left)) & 0xFF
         stream.extend(encoded)
         previous = line
 
@@ -220,6 +239,68 @@ def test_interlacing_is_not_a_difference(tmp_path, photo_fixture,
     assert pixels.read_ihdr(woven)[4] == 1, "the fixture must be interlaced"
 
     assert compare(_copies(plain), _copies(woven), plain, tmp_path) is None
+
+
+def test_the_interlace_flag_is_read_before_the_streams_are_trusted(tmp_path):
+    """Identical IDAT, different layout, different image. Must be reported.
+
+    The equal-stream short-circuit proves agreement only when both files
+    agree on how the stream is laid out. At 1x8 the two layouts write the
+    same 32 bytes -- four of Adam7's seven passes are empty at width 1, and
+    the rest emit one pixel each -- and Adam7 reads them out as rows
+    0, 4, 2, 6, 1, 3, 5, 7. So the streams coincide while the images do not,
+    and a fast path that looked only at the bytes would report agreement.
+    """
+    rows = bytearray()
+    for y in range(8):
+        rows.append(0)                              # filter type 0 (None)
+        rows.extend((y * 30, 255 - y * 30, 40))     # the row says which row
+    header = struct.pack(">IIBBBBB", 1, 8, 8, 2, 0, 0, 0)
+    plain = _png(header, bytes(rows))
+    woven = _png(header[:12] + b"\x01", bytes(rows))
+
+    assert _parts(plain)[1] == _parts(woven)[1], (
+        "the fixture only tests the fast path if the streams are identical")
+
+    result = compare(_writes(plain), _writes(woven), tmp_path / "a.png", tmp_path)
+    assert result is not None, "the fast path returned agreement on two images"
+    assert "(0, 1)" in result, result
+
+
+def test_scanline_data_longer_than_the_header_allows_is_reported(tmp_path,
+                                                                 png_fixture):
+    """The other half of the size check: data too long, not too short.
+
+    Too short is caught reading past the end. Too long is caught only by
+    comparing what was consumed against what was there, and an implementation
+    that appended a scanline would otherwise have it silently ignored.
+    """
+    src = png_fixture(tmp_path / "a.png", 16, 16)
+    good = src.read_bytes()
+    header, raw = _parts(good)
+    overlong = _png(header, raw + bytes(1 + 16 * 3))
+
+    result = compare(_writes(good), _writes(overlong), src, tmp_path)
+    assert result is not None
+    assert "would not decode" in result and "needs" in result
+
+
+def test_an_interlaced_png_shorter_than_its_header_claims_is_reported(tmp_path):
+    """And the same check on the Adam7 path, before it allocates a grid.
+
+    The grid is sized from the header, which is the part of a malformed file
+    that can claim anything; the scanline stream is the part that has to be
+    there.
+    """
+    woven = pixels.write_interlaced_png(tmp_path / "woven.png", 24, 16,
+                                        noise=True)
+    header, raw = _parts(woven.read_bytes())
+    truncated = _png(header, raw[:len(raw) // 2])
+
+    result = compare(_writes(woven.read_bytes()), _writes(truncated),
+                     tmp_path / "a.png", tmp_path)
+    assert result is not None
+    assert "Adam7" in result and "needs" in result
 
 
 def test_a_real_sips_png_is_compared_through_its_pixels(tmp_path,
@@ -323,6 +404,29 @@ def test_a_differing_palette_is_reported(tmp_path):
     result = compare(_copies(one), _copies(two), one, tmp_path)
     assert result is not None
     assert "palette" in result
+
+
+def test_palette_entries_no_pixel_can_reach_are_not_a_difference(tmp_path):
+    """A longer palette carrying the same colours is a container difference.
+
+    Same indices, same entries for every index in use, and some spare
+    entries on the end that nothing points at. Reporting that would be the
+    ancillary-chunk mistake wearing a palette.
+    """
+    two = [(200, 30, 40), (30, 200, 40)]
+    indexed = pixels.write_indexed_png(tmp_path / "indexed.png", 20, 20,
+                                       colours=two)
+    # write_indexed_png cycles its indices over the palette it is given, so
+    # both files are built from this one index stream to keep them equal.
+    header, raw = _parts(indexed.read_bytes())
+    palette = b"".join(bytes(colour) for colour in two)
+    spare = palette + bytes((1, 2, 3, 4, 5, 6))
+    with_short = _png(header, raw, extra=pixels._chunk(b"PLTE", palette))
+    with_long = _png(header, raw, extra=pixels._chunk(b"PLTE", spare))
+    assert with_short != with_long
+
+    assert compare(_writes(with_short), _writes(with_long),
+                   tmp_path / "a.png", tmp_path) is None
 
 
 def test_a_sixteen_bit_difference_is_reported_at_full_depth(tmp_path):

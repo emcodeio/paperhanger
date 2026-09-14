@@ -240,12 +240,15 @@ def _compare_png(source: Path, old: bytes, new: bytes):
         return (f"{source.name}: {OLD} wrote {a.depth} bits per channel, "
                 f"{NEW} wrote {b.depth}")
 
-    if a.palette != b.palette:
-        if len(a.palette) != len(b.palette):
-            return (f"{source.name}: the palettes differ -- {OLD} wrote "
-                    f"{len(a.palette) // 3} entries, {NEW} wrote "
-                    f"{len(b.palette) // 3}")
-        entry = _first_differing_index(a.palette, b.palette) // 3
+    # Only over the entries both palettes have. A palette longer than the
+    # other's by entries beyond its end is a container difference, not an
+    # image one: no index in the shorter file can reach them, so reporting it
+    # would be the ancillary-chunk mistake in another costume. (An index that
+    # overruns its own palette would be a malformed file, and this harness
+    # does not validate that; nothing in the pipeline writes indexed PNG.)
+    shared = min(len(a.palette), len(b.palette))
+    if a.palette[:shared] != b.palette[:shared]:
+        entry = _first_differing_index(a.palette[:shared], b.palette[:shared]) // 3
         return (f"{source.name}: the palettes differ at entry {entry} -- "
                 f"{OLD} {tuple(a.palette[entry * 3:entry * 3 + 3])}, "
                 f"{NEW} {tuple(b.palette[entry * 3:entry * 3 + 3])}")
@@ -255,10 +258,14 @@ def _compare_png(source: Path, old: bytes, new: bytes):
                 f"{len(a.transparency)} bytes, {NEW} wrote "
                 f"{len(b.transparency)}")
 
-    # Equal headers and equal filtered scanline streams mean equal pixels,
-    # and that is a memcmp against a decode measured in minutes on a 36 Mpx
-    # frame. One-way only: it proves agreement, never disagreement.
-    if a.raw == b.raw:
+    # Equal filtered scanline streams mean equal pixels ONLY when the two
+    # files agree on how the stream is laid out, and the interlace flag is
+    # what decides that. A 1x8 image writes the same 32 bytes either way, and
+    # Adam7 reads them out as rows 0, 4, 2, 6, 1, 3, 5, 7 -- so without the
+    # second conjunct this returns agreement on two genuinely different
+    # images. It is a memcmp against a decode measured in seconds per frame,
+    # and one-way: it proves agreement, never disagreement.
+    if a.raw == b.raw and a.interlace == b.interlace:
         return None
 
     try:
@@ -419,12 +426,26 @@ def _deinterlace(png: _Png) -> list:
     pixels are identical either way -- so this exists to make interlacing a
     non-difference rather than a reported one.
     """
+    passes = [(range(x_origin, png.width, x_step),
+               range(y_origin, png.height, y_step))
+              for x_origin, y_origin, x_step, y_step in pixels.ADAM7]
+
+    # Before allocating anything. The grid is sized from the HEADER, and a
+    # header is the part of a malformed file that can claim any size it
+    # likes; the scanline stream is the part that has to be there.
+    required = sum(
+        len(lines) * (1 + (len(columns) * png.channels * png.depth + 7) // 8)
+        for columns, lines in passes if len(columns) and len(lines))
+    if required != len(png.raw):
+        raise ValueError(f"it carries {len(png.raw)} bytes of scanline data, "
+                         f"and a {png.width}x{png.height} Adam7 image at "
+                         f"{png.channels} channels and {png.depth} bits needs "
+                         f"{required}")
+
     pixel = png.channels * png.sample_size
     grid = [bytearray(png.width * pixel) for _ in range(png.height)]
     offset = 0
-    for x_origin, y_origin, x_step, y_step in pixels.ADAM7:
-        columns = range(x_origin, png.width, x_step)
-        lines = range(y_origin, png.height, y_step)
+    for columns, lines in passes:
         rows, offset = _scanlines(png.raw, offset, len(columns), len(lines), png)
         for row, y in zip(rows, lines):
             for index, x in enumerate(columns):
