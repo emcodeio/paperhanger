@@ -4,6 +4,7 @@ import zlib
 
 import pytest
 
+from tests.conftest import sips_or_skip
 from tests.pixels import (read_ihdr, read_png_grey, write_grey_alpha_png,
                           write_grey_png, write_indexed_png,
                           write_interlaced_png, write_png, write_png16,
@@ -12,7 +13,7 @@ from tests.pixels import (read_ihdr, read_png_grey, write_grey_alpha_png,
 
 def _sips_dimensions(path):
     proc = subprocess.run(
-        ["/usr/bin/sips", "-g", "pixelWidth", "-g", "pixelHeight", str(path)],
+        [sips_or_skip(), "-g", "pixelWidth", "-g", "pixelHeight", str(path)],
         capture_output=True, text=True, check=True,
     )
     values = {}
@@ -184,7 +185,7 @@ def test_interlaced_png_holds_the_plain_writer_s_image(tmp_path, width, height):
     rendered = []
     for source in (plain, woven):
         out = tmp_path / f"{source.stem}.jpg"
-        subprocess.run(["/usr/bin/sips", "-s", "format", "jpeg", "-s",
+        subprocess.run([sips_or_skip(), "-s", "format", "jpeg", "-s",
                         "formatOptions", "100", str(source), "--out", str(out)],
                        check=True, capture_output=True)
         rendered.append(out.read_bytes())

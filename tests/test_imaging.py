@@ -3,7 +3,9 @@ import shutil
 import struct
 import subprocess
 import zlib
+from concurrent.futures import ThreadPoolExecutor
 from ctypes import c_void_p
+from functools import partial
 from pathlib import Path
 
 import pytest
@@ -11,6 +13,7 @@ import pytest
 from paperhanger import _cg, cli, formats, geometry, imaging
 from paperhanger.geometry import Rect
 from tests import pixels
+from tests.conftest import sips_or_skip
 from tests.differential import PNG_SIGNATURE, _format_of
 from tests.pixels import read_png_rgb, write_marked_png, write_png
 
@@ -222,6 +225,29 @@ def test_probe_reproduces_the_sips_format_census_over_the_whole_corpus(corpus):
         "the corpus holds exactly one non-image, its .DS_Store"
 
 
+def _sips_dimensions(sips: str, path):
+    """`sips -g pixelWidth -g pixelHeight`, parsed. None for a non-image.
+
+    Split out of the test below so it can be handed to a thread pool. The
+    parse is the original one, unchanged: stdout rather than exit status,
+    because `sips -g pixelWidth` exits 0 while printing `<nil>` and dies by
+    signal on `.DS_Store` -- fact 1, and the reason the `except` is this
+    broad.
+    """
+    proc = subprocess.run(
+        [sips, "-g", "pixelWidth", "-g", "pixelHeight", str(path)],
+        capture_output=True, text=True)
+    values = {}
+    for line in proc.stdout.splitlines():
+        key, sep, value = line.strip().partition(":")
+        if sep:
+            values[key.strip()] = value.strip()
+    try:
+        return (int(values["pixelWidth"]), int(values["pixelHeight"]))
+    except (KeyError, ValueError):
+        return None                                # the .DS_Store, and only it
+
+
 @pytest.mark.corpus
 def test_probe_agrees_with_sips_on_every_corpus_dimension(corpus):
     """The other half of the triple, over the same 894 files.
@@ -230,23 +256,39 @@ def test_probe_agrees_with_sips_on_every_corpus_dimension(corpus):
     census, because dimensions are 894 pairs and a table of them in this file
     would be a transcription nobody could check. Zero disagreements was the
     measured result.
-    """
-    disagreed = []
-    for path in sorted(p for p in Path(corpus).iterdir() if p.is_file()):
-        proc = subprocess.run(
-            ["/usr/bin/sips", "-g", "pixelWidth", "-g", "pixelHeight",
-             str(path)],
-            capture_output=True, text=True)
-        values = {}
-        for line in proc.stdout.splitlines():
-            key, sep, value = line.strip().partition(":")
-            if sep:
-                values[key.strip()] = value.strip()
-        try:
-            expected = (int(values["pixelWidth"]), int(values["pixelHeight"]))
-        except (KeyError, ValueError):
-            expected = None                        # the .DS_Store, and only it
 
+    EIGHT WORKERS, AND ONLY FOR THE SUBPROCESS. The pool spawns the same 894
+    processes with the same arguments, and `pool.map` returns them in input
+    order, so the comparison, its assertions and its failure message are the
+    ones they were. Measured on this machine: the serial body 14.14 s with
+    zero disagreements, this one 2.97 s -- the `sips` half alone goes 13.99 s
+    to 2.41 s, 5.8x.
+
+    THAT IS ELEVEN SECONDS, NOT SIX MINUTES, and the six was worth checking
+    rather than inheriting. This test was recorded as costing "about six
+    minutes, most of tier 2's runtime"; the whole of tier 2 is 4:59, of which
+    this was 14 s. `sips -g pixelWidth` reads a header and does not decode,
+    so 894 of them are cheap however they are spawned. The pool is still
+    worth having -- it is strictly less wall clock for an identical
+    comparison -- but it is not where tier 2's five minutes go.
+
+    `imaging.probe` deliberately stays on the main thread. It is the thing
+    under test and it is `ctypes` into ImageIO; running it exactly as the
+    tool does keeps this a measurement of the probe rather than of the probe
+    under concurrency. It costs almost nothing to leave there: `probe`
+    returns a lazily-decoded image and never pulls the pixels, so all 894 of
+    them are a fraction of the subprocess half.
+
+    `~/Pictures/wallpaper` is read-only and irreplaceable. Every call here,
+    in the pool and out of it, only reads.
+    """
+    sips = sips_or_skip()
+    paths = sorted(p for p in Path(corpus).iterdir() if p.is_file())
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        expectations = list(pool.map(partial(_sips_dimensions, sips), paths))
+
+    disagreed = []
+    for path, expected in zip(paths, expectations):
         measured = imaging.probe(path)
         got = None if measured is None else measured[:2]
         if got != expected:
@@ -259,7 +301,7 @@ def test_probe_agrees_with_sips_on_every_corpus_dimension(corpus):
 # ---------- operations ----------
 
 def _profile(path):
-    proc = subprocess.run(["/usr/bin/sips", "-g", "profile", str(path)],
+    proc = subprocess.run([sips_or_skip(), "-g", "profile", str(path)],
                           capture_output=True, text=True)
     for line in proc.stdout.splitlines():
         if "profile:" in line:
@@ -476,7 +518,7 @@ def test_fusing_crop_and_resample_is_wrong(tmp_path):
     source = write_png(tmp_path / "wide.png", 3840, 2160, noise=True)
 
     fused = tmp_path / "fused.png"
-    subprocess.run(["/usr/bin/sips", "-c", "1080", "1920", "--cropOffset", "0", "500",
+    subprocess.run([sips_or_skip(), "-c", "1080", "1920", "--cropOffset", "0", "500",
                     "--resampleWidth", "960", str(source), "--out", str(fused)],
                    check=True, capture_output=True)
     assert imaging.probe(fused)[:2] == (480, 270)      # NOT 960x540
@@ -539,7 +581,7 @@ def test_one_resample_flag_alone_would_miss_each_of_those(
     source = write_png(tmp_path / "s.png", width, height)
     out = tmp_path / "one_flag.png"
     axis = str(out_width) if dropped == "--resampleWidth" else str(out_height)
-    subprocess.run(["/usr/bin/sips", dropped, axis, "-s", "format", "png",
+    subprocess.run([sips_or_skip(), dropped, axis, "-s", "format", "png",
                     str(source), "--out", str(out)],
                    check=True, capture_output=True)
 
@@ -615,7 +657,7 @@ def _wide_gamut_png(tmp_path, name, width, height):
     """
     flat = write_png(tmp_path / f"flat_{name}", width, height, noise=True)
     wide = tmp_path / name
-    subprocess.run(["/usr/bin/sips", "--matchTo", ADOBE_RGB_PROFILE,
+    subprocess.run([sips_or_skip(), "--matchTo", ADOBE_RGB_PROFILE,
                     "-s", "format", "png", str(flat), "--out", str(wide)],
                    capture_output=True, check=True)
     assert "Adobe RGB" in (_profile(wide) or ""), _profile(wide)
@@ -1031,8 +1073,14 @@ def test_a_region_decode_of_a_big_baseline_jpeg_is_not_the_frame_decode(
         uv run pytest -m corpus -k crop     2 passed  (5m39s)  -- GREEN
         uv run pytest                       1 failed of 647    -- RED
 
-    and the single failure was this test at `expect_agreement=True`. Nothing
-    else in 647 tests noticed, because every other JPEG-crop assertion was
+    and re-injected against the suite as it stands, in Task 8, where the
+    numbers are 1 failed / 722 passed and the one failure is this test at
+    `[1000-1000-True]`, 89,522 samples differing. Both runs are kept: the
+    first is the original evidence at the suite size of the day, the second
+    is the same mutation still being caught 76 tests later.
+
+    The single failure was this test at `expect_agreement=True`. Nothing
+    else in the suite noticed, because every other JPEG-crop assertion was
     relative -- comparing two implementations to each other -- and the corpus
     gate's control re-ran both against a decoded PNG, so a bug that fired
     only on an un-decoded source was invisible to it. Here the crop must
@@ -1710,7 +1758,7 @@ def _tagged(base, profile, out_path):
     icc = PROFILE_DIR / profile
     if not icc.is_file():
         pytest.skip(f"colour profile not installed: {icc}")
-    subprocess.run(["/usr/bin/sips", "--matchTo", str(icc), "-s", "format",
+    subprocess.run([sips_or_skip(), "--matchTo", str(icc), "-s", "format",
                     "png", str(base), "--out", str(out_path)],
                    check=True, capture_output=True)
     assert _profile(out_path), f"{out_path} came back untagged"

@@ -37,8 +37,10 @@ def processing_dir(tmp_path):
 # naively-built bitmap context; `gradient_fixture` is the only way to tell a
 # correct crop from a centred one, since both come back at the right
 # dimensions and only the pixels disagree; and `interlaced_fixture` is the
-# only input that reaches the differential harness's Adam7 decoder, which
-# six later gates depend on and no other fixture can exercise.
+# only input that reaches the differential harness's Adam7 decoder, which no
+# other fixture can exercise. The six gates that once depended on that
+# decoder are retired; the harness is retained for the next migration, so the
+# fixture is what keeps the decoder tested rather than merely present.
 # ---------------------------------------------------------------------------
 
 
@@ -139,7 +141,7 @@ def profiled_fixture(tmp_path):
         base = pixels.write_png(tmp_path / f"untagged-{path.name}",
                                 width, height, noise=True)
         subprocess.run(
-            ["/usr/bin/sips", "--matchTo", str(icc), "-s", "format", "png",
+            [sips_or_skip(), "--matchTo", str(icc), "-s", "format", "png",
              str(base), "--out", str(path)],
             check=True, capture_output=True,
         )
@@ -174,12 +176,12 @@ def cmyk_fixture(tmp_path):
         base = pixels.write_png(tmp_path / f"cmyk-source-{path.name}.png",
                                 width, height, noise=True)
         subprocess.run(
-            ["/usr/bin/sips", "--matchTo", str(icc), "-s", "format", "jpeg",
+            [sips_or_skip(), "--matchTo", str(icc), "-s", "format", "jpeg",
              str(base), "--out", str(path)],
             check=True, capture_output=True,
         )
         probe = subprocess.run(
-            ["/usr/bin/sips", "-g", "space", "-g", "samplesPerPixel", str(path)],
+            [sips_or_skip(), "-g", "space", "-g", "samplesPerPixel", str(path)],
             capture_output=True, text=True,
         )
         assert "CMYK" in probe.stdout and "samplesPerPixel: 4" in probe.stdout, (
@@ -216,12 +218,52 @@ def webp_fixture(tmp_path):
     return make
 
 
+SIPS = Path("/usr/bin/sips")
+
+
+def sips_or_skip() -> str:
+    """`/usr/bin/sips`, or skip. Callable from any fixture scope.
+
+    THE TOOL NO LONGER USES IT, which is the whole reason for the guard: a
+    suite for a tool that dropped a binary should not go red because Apple
+    dropped it too. Every site here would otherwise raise
+    `CalledProcessError` from `check=True`, or read an empty stdout, and
+    report a missing dependency as a failing assertion about imaging.
+
+    The `magick` sites already skip this way (`test_cg.py`,
+    `webp_fixture`), and `sips` not doing so was an oversight rather than a
+    decision -- `magick` is a package a machine may not have installed, and
+    `sips` was on every Mac, which made the asymmetry easy to miss.
+
+    A plain function as well as a fixture for the same reason
+    `corpus_or_skip` is one: the module-scoped Tier 2 fixtures and the
+    factory closures inside function-scoped fixtures both need it, and
+    neither can depend on a function-scoped fixture. Returns the path as a
+    string, so a call site reads `[sips_or_skip(), "-g", ...]`.
+
+    It does NOT cover `FAKE_UPSCALER`, which runs `sips` in a child process
+    of its own; `install_fake_upscaler` skips for it instead.
+    """
+    if not SIPS.exists():
+        pytest.skip(f"{SIPS} is not present on this machine")
+    return str(SIPS)
+
+
+@pytest.fixture(scope="session")
+def sips() -> str:
+    """`/usr/bin/sips`, or skip. Test-side only; nothing in the tool runs it."""
+    return sips_or_skip()
+
+
 def corpus_or_skip() -> Path:
     """The corpus directory, or skip. Callable from any fixture scope.
 
     A plain function rather than only a fixture because the Tier 2 run is
-    module-scoped -- 192 MB of photographs and seven minutes of sips -- and a
-    module-scoped fixture cannot depend on a function-scoped one.
+    module-scoped -- 192 MB of photographs and about five minutes of work,
+    measured at 4:59 on 2026-09-14 -- and a module-scoped fixture cannot
+    depend on a function-scoped one. It is no longer "minutes of sips": the
+    894-file `sips` cross-check is 2.4 s of that, and what costs the five
+    minutes is the sample run itself.
     """
     if not CORPUS.is_dir():
         pytest.skip(f"corpus not present at {CORPUS}")
@@ -447,7 +489,13 @@ def install_fake_upscaler(directory: Path, monkeypatch):
     and cannot take a function-scoped fixture. One copy of the stub, reachable
     from either scope: a second copy would drift from the format rule above,
     which is the only thing making the normalize step testable at all.
+
+    Skips if `sips` is gone, because the stub resamples with it in a child
+    process of its own where `sips_or_skip` cannot reach. Without this the
+    stub would exit non-zero and every test that reaches the upscale path
+    would report a failure about upscaling.
     """
+    sips_or_skip()
     binary = directory / "fake-upscayl-bin"
     binary.write_text(FAKE_UPSCALER)
     binary.chmod(0o755)

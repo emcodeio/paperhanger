@@ -65,7 +65,7 @@ import pytest
 # the run went ahead regardless.
 import conftest
 from conftest import (copy_sample, corpus_or_skip, install_fake_models,
-                      install_fake_upscaler, sample_names)
+                      install_fake_upscaler, sample_names, sips_or_skip)
 
 from paperhanger import bands, cli, execute, formats, imaging, plan, sizes
 
@@ -105,7 +105,7 @@ NAME = re.compile(r"_(?P<w>\d+)x(?P<h>\d+)_(?P<factor>native|[\d.]+x)\.[a-z]+$")
 
 
 def _profile(path):
-    proc = subprocess.run(["/usr/bin/sips", "-g", "profile", str(path)],
+    proc = subprocess.run([sips_or_skip(), "-g", "profile", str(path)],
                           capture_output=True, text=True)
     for line in proc.stdout.splitlines():
         if "profile:" in line:

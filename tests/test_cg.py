@@ -29,6 +29,7 @@ import pytest
 from paperhanger import _cg, imaging
 from paperhanger.imaging import ImagingError
 from tests import pixels
+from tests.conftest import sips_or_skip
 
 PACKAGE = Path(_cg.__file__).parent
 
@@ -789,9 +790,31 @@ def test_ctypes_is_confined_to_this_one_module():
         "`importlib`)")
 
 
-def test_the_binding_layer_raises_only_imaging_error(tmp_path):
-    """Every failure leaves as ImagingError, which is what lets the executor
-    catch one type per photo and carry on with the run."""
+def test_three_representative_failures_leave_as_imaging_error(tmp_path):
+    """One case per refusal ROUTE, which is not the universal it sounds like.
+
+    A missing file and a non-image both leave through `_checked`; an indexed
+    source leaves through `bitmap_format`'s refusal by name. Those are the two
+    routes out of this layer, so three cases cover them -- but three cases
+    cannot assert "every failure", and this test does not. What closes the
+    gap between the two is argument rather than assertion, and it is written
+    down here because that is where the reader will look:
+
+      * `_checked` is the single chokepoint for a NULL from any framework
+        CALL, and `_symbol` is the same for a missing exported VARIABLE. Both
+        raise this one type.
+      * `formats.quality_for` is the only producer of the `quality` this
+        layer encodes with, and it returns None or an int in 0-100 or raises
+        ValueError before we are reached, so `c_double(quality / 100.0)`
+        cannot see a TypeError.
+      * An undeclared symbol is not an exception at all -- it is a SEGFAULT,
+        and `test_every_framework_function_called_is_declared` is what
+        catches that.
+
+    WHY THE SEAM CARES. `execute.py` catches `(imaging.ImagingError, OSError)`
+    per photo, so a third exception type does not fail one photograph and
+    carry on -- it ends the RUN, with whatever is left unprocessed.
+    """
     cases = [
         lambda scope: _cg.load(scope, tmp_path / "nope.png"),
         lambda scope: _cg.load(scope, _not_an_image(tmp_path)),
@@ -817,7 +840,7 @@ def test_sips_agrees_about_the_dimensions(tmp_path, photo_fixture):
     in the argtypes that every other test here would read straight past."""
     src = photo_fixture(tmp_path / "wide.png", 320, 180)
     proc = subprocess.run(
-        ["/usr/bin/sips", "-g", "pixelWidth", "-g", "pixelHeight", str(src)],
+        [sips_or_skip(), "-g", "pixelWidth", "-g", "pixelHeight", str(src)],
         capture_output=True, text=True, check=True)
     values = {}
     for line in proc.stdout.splitlines():
@@ -915,7 +938,7 @@ def test_formats_outside_the_corpus_keep_the_names_sips_gave_them(
     probed = _cg.probe_file(target)
     assert probed == (64, 48, expected)
 
-    proc = subprocess.run(["/usr/bin/sips", "-g", "format", str(target)],
+    proc = subprocess.run([sips_or_skip(), "-g", "format", str(target)],
                           capture_output=True, text=True, check=True)
     assert proc.stdout.strip().endswith(expected), (
         f"sips calls this {proc.stdout.strip()!r}, the table calls it "
