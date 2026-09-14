@@ -1,12 +1,26 @@
-"""Compare a `sips` operation against its CoreGraphics replacement.
+"""Compare two implementations of one imaging operation. NO GATE USES THIS.
 
 `compare(old_fn, new_fn, source, tmp_path)` runs both implementations over the
 same source and returns `None` when they agree, or a sentence saying exactly
-how they do not. Six later gates are built on it, so what it compares is a
-decision rather than a detail. Global Constraint 10 records the measurement
-behind that decision; the short version, over all 894 corpus images at a
-common shape -- 859 identical, 10 differing in `IDAT` while every pixel
-agrees, 25 differing in pixels:
+how they do not. Decoding is standard library throughout, so nothing here
+depends on the framework a caller might be testing.
+
+RETAINED, NOT LIVE. This was written to compare each `sips` operation against
+its CoreGraphics replacement, and six gates were built on it. Task 8 retired
+all six when `sips` left the tool, and kept this module and its test file
+deliberately: the harness is generic, the swap-behind-the-interface pattern it
+implements is the one this project intends to reuse, and the next migration
+will want it. So do not go hunting for the six gates -- there are none. The
+only consumers at head are `tests/test_differential.py`, which exercises this
+module against its own failure modes and supplies one side with
+`imaging.resize_and_encode` to do it, and `tests/test_imaging.py`, which
+imports two names, `PNG_SIGNATURE` and `_format_of`.
+
+WHAT IT COMPARES, AND WHY THAT IS A DECISION RATHER THAN A DETAIL. Global
+Constraint 10 recorded the measurement the bar below rests on, over all 894
+corpus images at a common shape -- 859 identical, 10 differing in `IDAT`
+while every pixel agrees, 25 differing in pixels. What follows is that
+measurement, kept as the rationale for the comparison this module makes:
 
   * **Whole files are out, for PNG.** 723 of 894 differ, because `sips`
     synthesises PNG ancillary chunks out of a source's EXIF and XMP that
@@ -44,10 +58,10 @@ the measurement says the pixels are what matter: interlacing, and anything
 outside `IHDR`, `PLTE`, `tRNS` and `IDAT`.
 
 Decoding is done here, in the standard library, and never through ImageIO.
-A gate that decoded with the framework under test would agree with itself
-about a bitmap it had built wrongly.
+A comparison that decoded with the framework under test would agree with
+itself about a bitmap it had built wrongly.
 
-Usage notes for the tasks that call it:
+Usage notes for a future caller:
 
   * `old_fn` and `new_fn` take `(source, out_path)` and write that path.
   * `suffix` names the output extension, `.png` by default. An encode gate

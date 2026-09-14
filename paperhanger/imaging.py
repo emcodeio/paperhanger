@@ -181,9 +181,16 @@ def normalize_to_srgb_png(source, out_path) -> None:
     upscayl-bin emits PNG with no ICC chunk, so without this the encode step
     tags sRGB over unconverted numbers -- a wide-gamut round trip measures
     about 15 dB worse, an order of magnitude larger than the 33.6-36.0 dB
-    spread the upscaler itself was chosen on. The corpus holds 19 Adobe RGB,
-    3 ProPhoto RGB and 96 further non-sRGB profiles among 894 files, all JPEG
-    or PNG, so a format-based condition would never fire for any of them.
+    spread the upscaler itself was chosen on. Of the corpus's 894 files, 19
+    are Adobe RGB and 3 are ProPhoto RGB; a further 109 carry a profile that
+    is not sRGB by name, `c2` being 96 of those, and 21 carry no profile at
+    all. Every one of them is a JPEG or a PNG, so a condition on the FORMAT
+    would fire for none of them -- which is the only thing these counts are
+    here to establish. The full thirteen-bucket census is a comment beside
+    the normalization tests in `tests/test_imaging.py`, and it is not
+    restated here: this docstring quoted "96 further non-sRGB profiles" for
+    two tasks, which is the `c2` bucket alone and not the remainder it
+    read as.
 
     NO `sips`, and no `--matchTo`. `_cg.normalize_to_srgb_png_file` draws the
     source into an sRGB bitmap context, which is where every decision about

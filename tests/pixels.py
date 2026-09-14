@@ -130,8 +130,10 @@ def write_interlaced_png(path, width: int, height: int,
     that differ in `IDAT` while agreeing on every pixel. So the differential
     harness has to decode Adam7 and treat interlacing as a container property
     rather than a difference, and this is the only input in the suite that
-    reaches that code. Without it the seven-pass decoder in
-    `tests/differential.py` would go into six later gates untested.
+    reaches that code. The six gates that depended on that are retired and
+    the harness is retained for the next migration, so without this fixture
+    the seven-pass decoder in `tests/differential.py` would sit there
+    untested until something reached for it.
 
     Takes the same arguments as `write_png` and shares its pixel generator,
     so the pair differs in nothing but the layout.

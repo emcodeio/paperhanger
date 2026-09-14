@@ -63,9 +63,13 @@ Note the asymmetry in the table, because it is the reason the failure is
 silent rather than loud: RGB REJECTS the wrong value with a NULL, and
 monochrome ACCEPTS it and renders the wrong picture.
 
-The grayscale failure only fires when the draw SCALES. At 1:1 the same
+The grayscale failure only fires when the draw REDUCES. At 1:1 the same
 bad pairing round-trips correctly, which is why it survived measurement
-twice before Task 0 caught it. `_resample` does not draw at 1:1 at all
+twice before Task 0 caught it -- and so does an ENLARGEMENT: 40x40 to
+80x80 comes back with the source's values, where every reduction tried
+(150x200, 80x100, 40x40, 20x20 and 8x8 at 0.5x, gradient and flat alike)
+came back all zero. Reduction is the direction this tool uses, in band 1
+and in band 3's reduce step. `_resample` does not draw at 1:1 at all
 -- see the identity case there -- so the pairing is now only reached
 where it is visible. A reducing resample was compared against `sips` for
 each of the four rows a fixture can produce -- monochrome and RGB, each
@@ -135,6 +139,29 @@ _CF = _framework("CoreFoundation")
 _CG_LIB = _framework("CoreGraphics")
 _IO_LIB = _framework("ImageIO")
 
+
+def _symbol(lib, name: str, ctype=c_void_p):
+    """An exported VARIABLE, or an ImagingError naming it.
+
+    `in_dll` raises ValueError for a symbol that is not there, and this
+    layer's contract with `execute` is that it raises one type: `execute`
+    catches `(ImagingError, OSError)`, so a third type ends the RUN rather
+    than the photo it was on.
+
+    Unreachable in practice -- these symbols are exported or the framework
+    would not have loaded -- and that is exactly why it is four lines here
+    rather than a test. It was the one place the layer's two guarantees, one
+    exception type and no NULL handed onward, rested on the linker having
+    cooperated instead of on a check. `_checked` is the same chokepoint for
+    the functions; this is it for the variables.
+    """
+    try:
+        return ctype.in_dll(lib, name)
+    except ValueError as exc:
+        raise ImagingError(
+            f"{name} is not exported by the framework that should carry it; "
+            f"this build of macOS cannot be driven by this module") from exc
+
 kCFStringEncodingUTF8 = 0x08000100
 kCFURLPOSIXPathStyle = 0
 kCFNumberDoubleType = 13
@@ -166,8 +193,10 @@ _OPAQUE_ALPHA = frozenset(
 # The name of the one colour space this module ever ASKS for rather than
 # reads off a source. `normalize_to_srgb_png_file` converts into it.
 #
-# `in_dll` is right here and was wrong for the dictionary callbacks in
-# `_quality_options`, and the difference is what the symbol IS. This one is
+# Reading the symbol AS a pointer is right here and was wrong for the
+# dictionary callbacks in `_quality_options`; both go through `_symbol`, so
+# the difference is in what is done with the result and not in the lookup.
+# The difference is what the symbol IS. This one is
 # a `const CFStringRef` -- a POINTER variable -- so reading it as a c_void_p
 # reads the pointer: CFGetTypeID says CFString and the text is
 # `kCGColorSpaceSRGB`. The callbacks are a STRUCT whose first word is a
@@ -178,7 +207,7 @@ _OPAQUE_ALPHA = frozenset(
 # value IS the literal "kCGColorSpaceSRGB", and both spellings return the
 # same CGColorSpace pointer -- but the literal is Apple's to change and the
 # exported symbol is the documented form.
-_SRGB_NAME = c_void_p.in_dll(_CG_LIB, "kCGColorSpaceSRGB")
+_SRGB_NAME = _symbol(_CG_LIB, "kCGColorSpaceSRGB")
 
 # The four output formats, as the uniform type identifiers ImageIO wants.
 # `formats.EXTENSIONS` has the same four keys and is the layer that decides
@@ -708,12 +737,12 @@ def _quality_options(scope, quality):
     LATENT USE-AFTER-FREE. `kCFTypeDictionaryKeyCallBacks` is a STRUCT
     exported by CoreFoundation, not a pointer to one: its first word is the
     version, 0, followed by five function pointers (retain, release,
-    copyDescription, equal, hash). So `c_void_p.in_dll(...)` reads that
-    first word, `.value` comes back as literally `None`, and
-    CFDictionaryCreate is handed a NULL callbacks table -- a dictionary
-    that does not retain what you put in it. Measured with
-    CFGetRetainCount on the CFNumber: `addressof` takes it 1 -> 2, the
-    `in_dll` spelling leaves it at 1.
+    copyDescription, equal, hash). So reading it as a `c_void_p`, which is
+    what `_symbol` does, reads that first word; `.value` comes back as
+    literally `None`, and CFDictionaryCreate is handed a NULL callbacks
+    table -- a dictionary that does not retain what you put in it. Measured
+    with CFGetRetainCount on the CFNumber: `addressof` takes it 1 -> 2, the
+    `.value` spelling leaves it at 1.
 
     It produces the right bytes anyway, at every format and quality, which
     is the whole problem. The only reason it works is that the `Scope`
@@ -725,7 +754,7 @@ def _quality_options(scope, quality):
     """
     if quality is None:
         return None
-    key = c_void_p.in_dll(_IO_LIB, "kCGImageDestinationLossyCompressionQuality")
+    key = _symbol(_IO_LIB, "kCGImageDestinationLossyCompressionQuality")
     value = c_double(quality / 100.0)
     number = scope.own(_checked(
         _CF.CFNumberCreate(None, kCFNumberDoubleType, ctypes.byref(value)),
@@ -735,8 +764,8 @@ def _quality_options(scope, quality):
     return scope.own(_checked(
         _CF.CFDictionaryCreate(
             None, keys, values, 1,
-            ctypes.addressof(c_void_p.in_dll(_CF, "kCFTypeDictionaryKeyCallBacks")),
-            ctypes.addressof(c_void_p.in_dll(_CF, "kCFTypeDictionaryValueCallBacks"))),
+            ctypes.addressof(_symbol(_CF, "kCFTypeDictionaryKeyCallBacks")),
+            ctypes.addressof(_symbol(_CF, "kCFTypeDictionaryValueCallBacks"))),
         "build the destination options", quality))
 
 
@@ -986,10 +1015,19 @@ def _resample(scope, image, out_width: int, out_height: int, source):
 
           RGBA at alpha 128      120,000 of 480,000    1
           grey+alpha at 128       60,400 of 240,000    1
-          16-bit RGBA            179,600 of 480,000    1
+          16-bit RGBA (*)        179,600 of 480,000    1
           colour-key `tRNS`      120,000 of 480,000  255
 
-        The last row is the one to read. A `tRNS` chunk on a truecolour PNG
+        (*) FIXTURE-DEPENDENT, and the one row here that cannot be rebuilt
+        from this repo: nothing in `tests/pixels.py` writes a 16-bit RGBA
+        PNG. Three different gradients gave 179,600, 180,238 and 179,449 of
+        480,000, all at largest 1, and this is the count from Task 4's own.
+        Read the row for the fact it is here to carry -- the draw loses a
+        unit of precision on a 16-bit alpha source where the skip loses
+        none -- and not for the number. The other three are pinned by repo
+        fixtures and do not move.
+
+        The colour-key row is the one to read. A `tRNS` chunk on a truecolour PNG
         names a COLOUR as transparent, and ImageIO expands that to an alpha
         channel; the draw then composites the keyed pixels onto the
         context's black ground, so what was (255, 0, 255) under a

@@ -1,4 +1,13 @@
-"""The harness six later gates are built on, tested against its own failures.
+"""`tests/differential.py`, tested against its own failure modes.
+
+NO GATE USES THE HARNESS. Six were built on it and Task 8 retired all six
+when `sips` left the tool; the module was kept on purpose, for the next
+migration, and this file is what keeps it trustworthy in the meantime. It and
+`test_imaging.py`'s import of `PNG_SIGNATURE` and `_format_of` are the
+harness's only two consumers at head, so this file is also the only thing
+exercising most of it -- including the Adam7 decoder, which nothing else
+reaches. Read it as the harness's specification rather than as support for a
+gate.
 
 Grouped by the question each group answers:
 
