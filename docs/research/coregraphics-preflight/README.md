@@ -25,6 +25,9 @@ Run them with the project's own interpreter (`python3`, 3.14) from anywhere;
 | `rss.py` | peak RSS of both paths, repeated, so the spread is visible |
 | `chunkmap.py` | what each tool writes into a PNG, against what the source carried |
 | `sourcecensus.py` | corpus JPEG metadata census, and what predicts whole-file identity |
+| `aspect_audit.py` | whether any real crop rect or resample is anisotropic, over every plan |
+| `at_risk.py` | runs the plans that could hit the decode divergence, at their real sizes |
+| `divergence_audit.py` | every source whose pixels differ, split into decode against resampler |
 | `plan_scales.py` | every resampling scale factor the real planner asks for over the corpus |
 
 All of them read the corpus and never write to it, and every one that produces an
@@ -64,10 +67,14 @@ directory from a copy.
 `magick` stamps a `tIME` chunk and three `date:*` `tEXt` chunks carrying the current
 clock, so the file hashes differently on every run and none of these lines could be
 checked. An earlier version of this README omitted it and six of nine hashes were
-unreproducible. `-strip` also removes the source's ICC profile, which changes what both
-tools write into the output — see section 4 of the findings — but it does not touch a
-single pixel, and every pixel-level number in that section was re-derived on these
-stripped fixtures and reproduced exactly.
+unreproducible.
+
+`-strip` also removes an ICC profile where the source has one, which changes what both
+tools write into the output — see section 4 of the findings. It is not what happens to
+`photo.png`: the `-colorspace sRGB` conversion ahead of it leaves no `iCCP` chunk to
+remove, so for that fixture `-strip` takes only the timestamps. Either way it touches no
+pixels, and every pixel-level number in section 4 was re-derived on these stripped
+fixtures and reproduced exactly.
 
 ```
 magick $W/abstract_colorful_clouds_7117.jpg -crop 2000x1500+100+100 +repage \

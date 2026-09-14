@@ -12,8 +12,14 @@ fifth that nobody asked for and that matters more than three of the four.
 | 1. EXIF orientation | Clears the way. `sips` and ImageIO agree on geometry; they disagree on whether the tag survives into the output. |
 | 2. Peak memory at 300 Mpx | Clears the way. CoreGraphics peaks 3% higher on the largest reduction and 2.1x higher on an identity resample, which is what 577 of 2734 production calls are. The pixel cap does not move. |
 | 3. HEIC input | Clears the way. Both corpus HEICs decode, dimensions agree exactly. The corpus holds two, not one. |
-| 4. Interpolation exactness | Clears the path production uses, and **changes the verification plan**. Vertical reduction is exact to 0.994792 and diverges from 0.995000. Enlargement is not reliably exact at any factor. |
+| 4. Interpolation exactness | Clears the path production uses, and **changes the verification plan**. Vertical reduction is exact to 0.994792 and diverges from 0.995000. Enlargement is not reliably exact at any factor. 35 of 894 sources also diverge on a distorting shape, but none of the 69 real plans that could reach that does. |
 | 5. (unasked) Destination colour space | **Changes the design.** Taking the bitmap context's colour space from the source, with `kCGImageAlphaNoneSkipLast`, renders ten real corpus images entirely black, silently. |
+
+**A warning about this document.** Three consecutive reviews found a universal in it that a
+few dozen files supported and several hundred contradicted. Every count here is now taken
+over all 894 corpus images, and where a claim rests on a smaller sample it says so. Treat
+any sentence of the form "always", "never" or "when and only when" that does not name its
+population as unverified.
 
 Everything below was measured on macOS 26.6.2 (build 25G83), arm64, 36 GiB. `python3` is
 3.14.7 at `/run/current-system/sw/bin/python3`; `ctypes.util.find_library` resolves all
@@ -205,13 +211,23 @@ where the source dwarfs the output. The last three rows break it. Two outputs of
 the output. And an identity resample — same dimensions in and out — costs **+292.7 MiB**
 on a 147 MB frame and **+376.2 MiB** on a 191 MB one.
 
-What the identity rows show is that `sips` is doing something CoreGraphics is not. Its peak
-of 163.8 MiB on a 147 MB frame is *below* the size of one decoded copy, so it is streaming
-rather than materialising the image. The CoreGraphics path at 456.5 MiB is holding roughly
-three copies — the decoded source, the bitmap context, and the image
-`CGBitmapContextCreateImage` hands back. Where the source is much larger than the output
-that third copy is small and the gap looks like a constant; where source and output are
-the same size it is the whole frame.
+What the identity rows show is that `sips` holds fewer copies of the frame than
+CoreGraphics does. Counted in whole frames — one 7680 x 4800 frame at 4 bytes a pixel is
+140.6 MiB, one 10000 x 4780 frame is 182.4 MiB:
+
+| identity resample | `sips` peak | in frames | CoreGraphics peak | in frames |
+|---|---|---|---|---|
+| 7680 x 4800 | 163.8 MiB | **1.17** | 456.5 MiB | **3.25** |
+| 10000 x 4780 | 332.9 MiB | **1.83** | 709.2 MiB | **3.89** |
+
+So `sips` holds one to two frames and CoreGraphics three to four. An earlier version of
+this section said `sips` peaks "below one decoded copy, so it is streaming" — that was
+arithmetic done carelessly, and 1.17 frames is not below one. The three to four on the
+CoreGraphics side is consistent with the decoded source, the bitmap context and the image
+`CGBitmapContextCreateImage` returns, but this measurement does not prove which allocations
+they are, and Task 1 should not lean on that reading. Where the source is much larger than
+the output the extra copies are small and the gap looks like a constant; where source and
+output are the same size each one is a whole frame.
 
 **This still clears the way, and the cap does not move — but for a stated reason rather
 than a formula.** At the cap the resampler's real worst cases are:
@@ -307,12 +323,15 @@ stream — and the whole-file difference is one 32-byte `cHRM` chunk `sips` writ
 not.** 110,911 minus 110,867 is 44 bytes, which is that chunk plus its header and CRC.
 
 **Whole-file identity is reachable, and what decides it is the source, not the shape.**
-Two rules, both measured rather than inferred from a handful of fixtures — that mistake
-has now been made three times on this question, twice in earlier drafts of this document.
+Everything below is counted over all 894 corpus images unless it says otherwise; read the
+warning at the end of this subsection before trusting any sentence here that does not carry
+a count.
 
 **What ImageIO writes follows the source's colour space, and nothing else.** With a NULL
 destination-properties dictionary it emits exactly one colour chunk plus a synthesised
-`eXIf`, and which colour chunk depends on the space:
+`eXIf`, and which colour chunk depends on the space. Over the whole corpus there are two
+outcomes and no third: **833 sources produce `sRGB` + `eXIf` and 61 produce `iCCP` + `eXIf`,
+894 of 894.** The shape of it:
 
 | source colour space | ImageIO writes | `sips` writes | whole file |
 |---|---|---|---|
@@ -325,51 +344,73 @@ else. So it is not "always `sRGB`": an sRGB profile is collapsed to the one-byte
 chunk, a non-sRGB profile is carried through as `iCCP`, and even the synthesised `eXIf`
 changes size with it. **ImageIO preserves the colour space and discards everything else.**
 
+**CoreGraphics is not always the sparser of the two.** For **14 sources, all PNG**,
+CoreGraphics writes an `sRGB` chunk that `sips` does not — `abstract_art_hand_face_black_1404.png`,
+`blade_runner_2049_poster_7000.png`, `brush_circle_8107.png` and eleven more. A round-two
+draft said the difference was "always by chunks only `sips` wrote"; it is not, and a
+differential that assumes the new path is a subset of the old will mis-report these.
+
 **What `sips` adds, it synthesises — it is not forwarding chunks the source carried.** A
-JPEG has no PNG chunks to forward, and `sips` writes them anyway. Over a 46-file spread of
-corpus JPEGs (`sourcecensus.py`), pixels were identical in all 46 and the whole file
-differed in 37, always by chunks only `sips` wrote:
+JPEG has no PNG chunks to forward, and `sips` writes them anyway. Counted over all 894
+sources at 800 x 600 (`sourcecensus.py`), the chunks only `sips` wrote:
 
 ```
-20 files: sips writes extra [pHYs],      cg writes extra [(none)], pixels identical
-15 files: sips writes extra [iTXt pHYs], cg writes extra [(none)], pixels identical
- 2 files: sips writes extra [iTXt],      cg writes extra [(none)], pixels identical
+pHYs                 341        cHRM pHYs               6
+iTXt pHYs            337        cHRM gAMA               2
+iTXt                  18        cHRM gAMA pHYs          1
+cHRM gAMA iTXt pHYs   12        cHRM                    1
 ```
 
-Both have an exact trigger:
+**What triggers `pHYs` and `iTXt` was not isolated, and two attempts to state it were
+wrong.** Round two of this document claimed `iTXt` appears "when and only when the source
+carries Exif or XMP", and `pHYs` for every source declaring a real density with JFIF units
+0 the exception. Counted at full size rather than over 46 files, both fail:
 
-| source carries | `sips` writes `pHYs` | `sips` writes `iTXt` |
-|---|---|---|
-| nothing | 0 of 2 | 0 of 2 |
-| JFIF only | 20 of 26 | 0 of 26 |
-| Exif (any) | 15 of 18 | 17 of 18 |
-| XMP (any) | 7 of 10 | 9 of 10 |
-| no Exif and no XMP | 20 of 28 | **0 of 28** |
+| claimed rule | counterexamples over 894 |
+|---|---|
+| `iTXt` iff Exif or XMP | **41** — 3 sources carry neither and get one anyway (all three carry a Photoshop APP13 `8BIM` block), and 38 carry Exif or XMP and get none |
+| no `pHYs` for JFIF units 0 | **151** of 276 units-0 sources do write it, 9 of them carrying the very `(0, 1, 1)` triple the rule was built on |
+| no `pHYs` without JFIF | **93** sources with no JFIF segment at all get one |
 
-`iTXt` appears when and only when the source carries Exif or XMP — `sips` builds an XMP
-packet out of them. `pHYs` appears when the source declares a real physical density, and
-the 6 JFIF-carrying files that produce none are exactly the ones whose APP0 gives an
-aspect ratio rather than a density:
+Density is not the discriminator either way:
 
 ```
-JFIF density (0, 1, 1)     -> sips writes pHYs: False  (6 files)   units 0 = aspect ratio
-JFIF density (1, 72, 72)   -> sips writes pHYs: True  (18 files)   units 1 = dpi
-JFIF density (2, 118, 118) -> sips writes pHYs: True   (2 files)   units 2 = dpcm
-JFIF density None          -> sips writes pHYs: False  (2 files)
+density (0, 1, 1)      pHYs=False  118 files      density (1, 72, 72)   pHYs=True  348 files
+density (0, 1, 1)      pHYs=True     9 files      density (2, 28, 28)   pHYs=True   11 files
+density (0, 72, 72)    pHYs=True   141 files      density None          pHYs=True   93 files
+density (0, 72, 72)    pHYs=False    3 files      density None          pHYs=False  54 files
 ```
 
-**So JFIF density does not predict identity**, and an earlier draft of this document was
-wrong to say every corpus JPEG carries it: 694 of 841 do, and 6 of the 9 files in the
-spread that matched byte for byte were carrying it.
+The honest statement is the count, not a rule: **`sips` wrote `pHYs` for 697 of 894 sources
+and `iTXt` for 367**, both correlated with the source carrying metadata and neither
+predicted by any single field tested here. The mechanism is still synthesis rather than
+forwarding — a JPEG has no PNG chunks to forward — but which metadata `sips` consults, and
+in what precedence, is not settled by this measurement.
+
+**JFIF density does not predict identity**, and a round-one draft was wrong that every
+corpus JPEG carries it: 694 of 841 do.
+
+**This is the third round in which a universal about 894 files rested on a few dozen.**
+Round one: "never produce identical PNG files, on any shape." Round two: "every corpus JPEG
+carries JFIF density." Round three: the two rules above. Each was true of the sample and
+false of the corpus. **No claim in this document of the form "always", "never" or "when and
+only when" should be trusted unless it names the population it was counted over.** Where a
+count is present — 833 plus 61 for the colour chunk, 894 of 894 for depth, 0 of 894 for
+orientation — the claim is a count. Where it is absent, it is a guess.
 
 The chain also does not converge. Handed a PNG carrying the `sRGB` chunk — which is exactly
 what ImageIO writes — `sips` re-expresses it as `gAMA` plus `cHRM` and adds an `iTXt`, so a
 CoreGraphics-written intermediate does not make the next stage agree.
 
-**The conditional statement.** Whole files match when the source carries no Exif, no XMP
-and no physical density — which is every fixture `tests/pixels.write_png` produces, since
-it emits `IHDR`, `IDAT`, `IEND` and nothing else. Confirmed across four shapes including an
-enlargement:
+**The conditional statement, with its count.** Whole files usually match when the source
+carries nothing `sips` can synthesise from — no Exif, no XMP, no density, no Photoshop
+block, and for a PNG no ancillary chunks at all. Over the corpus that describes **29
+sources, of which 28 produce byte-identical files.** One does not, so this is a strong
+tendency rather than a law, and the exception is why the tier-2 gate should not rest on it.
+
+Where it does hold without exception so far is on generated fixtures:
+`tests/pixels.write_png` emits `IHDR`, `IDAT`, `IEND` and nothing else. Confirmed across
+four shapes including an enlargement:
 
 ```
 $ python3 fileid.py fixture.png 1000x700 1600x1200 900x500 333x2000
@@ -553,6 +594,89 @@ diverges between 0.995000 and 1.0.** The disagreement there is small — under 0
 bytes in every shape measured, with a maximum channel delta of 27 — but it is real and
 deterministic, not noise.
 
+### Anisotropy, and the divergence that needs one
+
+Some corpus sources resize to different pixels through the two tools. Counted over all 894
+at 800 x 600 — a shape that distorts the aspect of nearly every corpus image — **25 differ
+in decoded pixels**, the worst by 250,459 bytes at a maximum channel delta of 38
+(`rocky_mountain_range_1569.jpg`). A round-two draft said pixels were identical in all 46
+files it looked at; over the corpus they are not.
+
+**35 differ in the compressed `IDAT` stream, and 25 in the pixels those streams decode to.**
+The ten-file gap is not a pixel difference: it is the two tools choosing different PNG
+colour types for the same image, so the streams differ while the picture does not. A gate
+comparing `IDAT` will flag ten files a gate comparing decoded pixels will not, and neither
+is wrong — they answer different questions. Pick one deliberately.
+
+Splitting the 25 by cause, by re-running each through a lossless PNG intermediate
+(`divergence_audit.py`):
+
+- **22 are a JPEG decode difference.** Through the intermediate they agree exactly, so the
+  disagreement came from reading the container, not from resampling.
+- **3 are a resampler difference**, all PNG sources, all tiny — 12 bytes each at 800 x 600.
+
+And the decode difference needs a distorting shape. At an aspect-preserving half-size
+resize, **all 22 agree byte for byte**; only the 3 PNG sources still differ, by 12 to 36
+bytes.
+
+The obvious reassurance is that `paperhanger` crops to the target aspect before resizing,
+so it never asks for a distorting shape. **That reassurance is false**, and it is worth
+saying why before saying what rescues it.
+
+`geometry.py` rounds the slice dimension **up**:
+
+```python
+slice_height = _ceil_div(width * 10, 16)      # horizontal thirds, 16:10
+slice_width  = _ceil_div(height * 2, 3)       # vertical thirds, 2:3
+```
+
+A 16:10 slice is exactly 16:10 only when `width * 10` divides by 16; otherwise the rect is
+a fraction of a pixel short and the resize that follows is very slightly anisotropic. The
+docstring says as much — rounding up is deliberate, so the slice satisfies its own
+classification — but the consequence for scale factors was never counted. `aspect_audit.py`
+counts it, over every image and every plan the real planner produces:
+
+```
+photos                            : 894
+crop rects planned                : 2562
+crop rects whose aspect != target : 1086
+resamples                         : 2734
+resamples with x scale != y scale : 955
+  ... of those, reading the ORIGINAL file : 69
+  ... of those, reading an original JPEG  : 69
+```
+
+**1086 of 2562 crop rects are not the target's aspect, and 955 of 2734 resamples are
+anisotropic.** The largest crop departure is `1284/803` against `8/5` — 1.599004 against
+1.600000 — and the largest resample anisotropy is a horizontal scale of 0.93847656 against
+a vertical 0.93831451, a difference of 1.6e-4. Small, but not zero, and "not zero" is the
+condition.
+
+So the answer to whether production ever asks for a distorting shape is **yes, 955 times**.
+
+What rescues it is the second condition rather than the first. The divergence needs the
+resampler to read the original container, and 886 of those 955 read a lossless PNG written
+by the crop or by the upscaler. Only **69 read the original file**, all of them JPEG. Those
+69 are the entire population at risk, and they can simply be run:
+
+```
+$ python3 at_risk.py ~/Pictures/wallpaper
+plans that are anisotropic AND read an original JPEG: 69
+...
+0 of 69 diverge
+```
+
+**None of them diverges.** Every one of the 69 was run at its exact planned dimensions
+against its real file, and all 69 matched byte for byte. The production anisotropies are
+four orders of magnitude smaller than the ones that provoke the divergence at 800 x 600,
+and they do not reach it.
+
+**So Task 4's gate can be green on the corpus, and no image needs pinning for this.** But
+the margin is the size of the anisotropy, not a structural guarantee, and two edits would
+narrow it: changing `_ceil_div` to round differently, or changing `bands.output_size`, which
+derives the second axis with `round(height * target.ideal / width)`. A test that asserts
+these 69 shapes still agree is worth more than a comment saying they do.
+
 ### What this means for the design
 
 **The path production actually uses is exact.** `execute._refuse_to_enlarge` raises before
@@ -600,13 +724,19 @@ catch drift — a target table edited, or an upscale factor changed, could walk 
 it — but nothing in the corpus reaches it today, and the equivalence bar is reachable as
 written.
 
-Two things change.
+Three things change.
 
 **How the gate compares depends on the tier.** Tier 1, on `tests/pixels.write_png`
-fixtures, may compare whole files: those sources carry no metadata and the two tools
-produce identical SHA-256. Tier 2, on corpus images, must compare decoded pixels or the
-`IDAT` stream, because `sips` forwards source metadata that ImageIO drops. See the top of
-this section.
+fixtures, may compare whole files: those sources carry nothing `sips` can synthesise from
+and the two tools produce identical SHA-256. Tier 2, on corpus images, must compare decoded
+pixels or the `IDAT` stream, because `sips` synthesises chunks ImageIO does not — and
+because for 14 PNG sources CoreGraphics writes a chunk `sips` does not, so the difference
+is not one-sided. See the top of this section.
+
+**The tier-2 sample should include an anisotropic plan reading an original JPEG.** All 69
+of them agree today, but they agree by a margin of about 1.6e-4 in the scale factors rather
+than by construction, and both `geometry._ceil_div` and `bands.output_size` could widen
+that with a one-line edit.
 
 **The gate must not assert exactness on enlargement.** A fixture that enlarges will pass
 or fail depending on where its vertical scale lands, and the safe factors differ from one
