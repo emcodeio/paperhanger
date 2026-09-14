@@ -24,11 +24,22 @@ Run them with the project's own interpreter (`python3`, 3.14) from anywhere;
 | `decode_scan.py` | colour space model after a real decode, for the palette question |
 | `rss.py` | peak RSS of both paths, repeated, so the spread is visible |
 | `chunkmap.py` | what each tool writes into a PNG, against what the source carried |
-| `sourcecensus.py` | corpus JPEG metadata census, and what predicts whole-file identity |
+| `sourcecensus.py` | corpus metadata census; `IDAT` against decoded pixels, and what predicts whole-file identity |
 | `aspect_audit.py` | whether any real crop rect or resample is anisotropic, over every plan |
-| `at_risk.py` | runs the plans that could hit the decode divergence, at their real sizes |
-| `divergence_audit.py` | every source whose pixels differ, split into decode against resampler |
+| `at_risk.py` | runs every plan that resamples straight from an original file, at its real size |
+| `alpha_audit.py` | what each tool does with an alpha channel, over every corpus PNG |
+| `determinism.py` | whether either tool writes the same bytes twice, over every corpus source |
+| `divergence_audit.py` | every source whose decoded pixels differ, and whether a lossless intermediate settles it |
 | `plan_scales.py` | every resampling scale factor the real planner asks for over the corpus |
+
+**Every pixel comparison goes through `cgbase.raw_pixels`, which checks the length of
+what it decoded.** These instruments all compare `magick ... RGB:-` output, and `magick`
+writes nothing to stdout when it cannot read a file — so two failed decodes used to
+compare equal and report SAME, which is agreement claimed where nothing was measured. The
+expected length is known from the shape, so it is checked, and a short decode raises
+`DecodeFailed`. For the same reason `at_risk.py` and `divergence_audit.py` raise rather
+than returning a sentinel when either tool produces no output, and `at_risk.py` counts
+only the jobs that ran in `N of M diverge`.
 
 All of them read the corpus and never write to it, and every one that produces an
 intermediate writes it to a temporary directory removed at exit, never beside itself:
@@ -69,12 +80,16 @@ clock, so the file hashes differently on every run and none of these lines could
 checked. An earlier version of this README omitted it and six of nine hashes were
 unreproducible.
 
-`-strip` also removes an ICC profile where the source has one, which changes what both
-tools write into the output — see section 4 of the findings. It is not what happens to
-`photo.png`: the `-colorspace sRGB` conversion ahead of it leaves no `iCCP` chunk to
-remove, so for that fixture `-strip` takes only the timestamps. Either way it touches no
-pixels, and every pixel-level number in section 4 was re-derived on these stripped
-fixtures and reproduced exactly.
+`-strip` removes a great deal more than timestamps, and an earlier version of this
+paragraph said it took "only the timestamps" from `photo.png`. Counted: building that
+fixture with and without `-strip` and diffing the chunk lists, **`-strip` removes 25
+chunks** — `sRGB`, `gAMA`, `eXIf` (4778 bytes of it), `bKGD`, `pHYs`, `tIME` and 19
+`tEXt` — of which four are timestamps (`tIME` and the three `date:*` `tEXt` chunks). The
+half of the old claim that was right is that there is no `iCCP` to remove: the
+`-colorspace sRGB` conversion ahead of it leaves the profile as `icc:*` `tEXt` chunks
+rather than an embedded profile. What `-strip` never touches is pixels, and every
+pixel-level number in section 4 was re-derived on these stripped fixtures and reproduced
+exactly.
 
 ```
 magick $W/abstract_colorful_clouds_7117.jpg -crop 2000x1500+100+100 +repage \

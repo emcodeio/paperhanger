@@ -17,6 +17,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 # public and these files are derived from corpus photographs.
 SCRATCH = tempfile.mkdtemp(prefix="cg-preflight-")
 atexit.register(shutil.rmtree, SCRATCH, ignore_errors=True)
+sys.path.insert(0, HERE)
+from cgbase import raw_rgb                                   # noqa: E402
 SHAPES = [
     (1000, 700, "downscale, both axes"),
     (3000, 2100, "enlargement, both axes"),
@@ -56,12 +58,6 @@ def chunk_names(path):
     return out
 
 
-def raw(path):
-    out = subprocess.run(["magick", path, "-depth", "8", "RGB:-"],
-                         capture_output=True)
-    return out.stdout
-
-
 def main(source, label):
     print("source: %s  (%s)" % (source, label))
     print("%-14s %-28s %-9s %-9s %-9s %s"
@@ -77,7 +73,8 @@ def main(source, label):
                        capture_output=True)
         subprocess.run([sys.executable, os.path.join(HERE, "resize.py"),
                         source, c_out, str(w), str(h), "3"], check=True)
-        pix = "SAME" if raw(s_out) == raw(c_out) else "DIFFER"
+        pix = ("SAME" if raw_rgb(s_out, w, h) == raw_rgb(c_out, w, h)
+               else "DIFFER")
         idt = "SAME" if idat(s_out) == idat(c_out) else "DIFFER"
         whole = "SAME" if (open(s_out, "rb").read()
                            == open(c_out, "rb").read()) else "DIFFER"

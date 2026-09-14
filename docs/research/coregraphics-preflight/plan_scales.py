@@ -16,7 +16,7 @@ REPO = os.path.abspath(os.path.join(HERE, "..", "..", ".."))
 sys.path.insert(0, REPO)
 sys.path.insert(0, HERE)
 
-from paperhanger import plan, sizes                       # noqa: E402
+from paperhanger import bands, plan, sizes                # noqa: E402
 from cgbase import cf, io, cfurl, dict_get, cfnumber_int  # noqa: E402
 
 BOUNDARY = 4775 / 4800  # largest vertical reduction measured exact
@@ -46,7 +46,7 @@ opts = plan.OutputSettings(processing_dir=Path("/tmp/unused"), fmt="heic",
                            quality=80)
 devices = list(sizes.DEVICES)
 
-resamples = []   # (name, in_w, in_h, out_w, out_h)
+resamples = []   # (name, in_w, in_h, out_w, out_h, feeds, band)
 photos = 0
 plans = 0
 
@@ -66,12 +66,20 @@ for name in sorted(os.listdir(root)):
         if p.crop is not None:
             rect = p.crop if scale == 1 else p.crop.scaled(scale)
             in_w, in_h = rect.width, rect.height
+            feeds = "png-crop"
         else:
             in_w, in_h = width * scale, height * scale
+            feeds = "png-4x-frame" if scale == 4 else "original"
+        # `render`: resize = target.needs_resize or scale != 1. The second
+        # half is why band 4 resamples at all -- it needs no resize OF THE
+        # SOURCE, but it is handed the 4x frame, and 4x of a slice that is
+        # already the planned size is the planned size. Hence an identity
+        # draw.
         resizes = p.needs_resize or scale != 1
         if not resizes:
             continue
-        resamples.append((name, in_w, in_h, p.out_width, p.out_height))
+        resamples.append((name, in_w, in_h, p.out_width, p.out_height, feeds,
+                          p.band))
 
 print("photos planned        : %d" % photos)
 print("output plans          : %d" % plans)
@@ -92,6 +100,19 @@ if identity:
     big = max(identity, key=lambda r: r[1] * r[2])
     print("  largest identity resample: %dx%d (%.0f MB as a bitmap)  %s"
           % (big[1], big[2], big[1] * big[2] * 4 / 1e6, big[0]))
+    by_feed = {}
+    for r in identity:
+        key = (r[5], r[6])
+        by_feed[key] = by_feed.get(key, 0) + 1
+    print("  where the identity draw's input comes from:")
+    for (feeds, band), count in sorted(by_feed.items()):
+        print("    %-14s band %d (%-14s) : %d"
+              % (feeds, band, bands.NAMES[band], count))
+    from_original = [r for r in identity if r[5] == "original"]
+    if from_original:
+        print("  the identity draws that read an ORIGINAL file:")
+        for r in sorted(from_original):
+            print("    %-52s %dx%d" % (r[0][:52], r[1], r[2]))
 print("vertical scale  > 1   : %d" % len(y_enl))
 print("horizontal scale > 1  : %d" % len([1 for s, _ in xs if s > 1.0]))
 

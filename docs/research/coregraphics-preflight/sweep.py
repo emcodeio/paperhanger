@@ -11,11 +11,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 # public and these files are derived from corpus photographs.
 SCRATCH = tempfile.mkdtemp(prefix="cg-preflight-")
 atexit.register(shutil.rmtree, SCRATCH, ignore_errors=True)
-
-
-def raw(path):
-    return subprocess.run(["magick", path, "-depth", "8", "RGB:-"],
-                          capture_output=True).stdout
+sys.path.insert(0, HERE)
+from cgbase import raw_rgb                                   # noqa: E402
 
 
 def compare(source, w, h):
@@ -29,7 +26,7 @@ def compare(source, w, h):
                    capture_output=True)
     subprocess.run([sys.executable, os.path.join(HERE, "resize.py"), source,
                     c_out, str(w), str(h), "3"], check=True)
-    a, b = raw(s_out), raw(c_out)
+    a, b = raw_rgb(s_out, w, h), raw_rgb(c_out, w, h)
     if a == b:
         return "SAME", 0, 0
     n = sum(1 for i in range(len(a)) if a[i] != b[i])

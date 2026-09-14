@@ -11,14 +11,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 # public and these files are derived from corpus photographs.
 SCRATCH = tempfile.mkdtemp(prefix="cg-preflight-")
 atexit.register(shutil.rmtree, SCRATCH, ignore_errors=True)
-
-
-def raw(path, w, h):
-    out = subprocess.run(["magick", path, "-depth", "8", "RGB:-"],
-                         capture_output=True)
-    d = out.stdout
-    assert len(d) == w * h * 3, (len(d), w * h * 3)
-    return d
+sys.path.insert(0, HERE)
+from cgbase import raw_rgb                                   # noqa: E402
 
 
 def run(source, w, h, tag):
@@ -29,7 +23,7 @@ def run(source, w, h, tag):
                    capture_output=True)
     subprocess.run([sys.executable, os.path.join(HERE, "resize.py"), source,
                     c_out, str(w), str(h), "3"], check=True)
-    return raw(s_out, w, h), raw(c_out, w, h)
+    return raw_rgb(s_out, w, h), raw_rgb(c_out, w, h)
 
 
 def report(a, b, w, h, label):

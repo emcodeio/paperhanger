@@ -135,9 +135,25 @@ def main(root):
                   % (n[:40], i[0], i[1], o[0], o[1], float(xs), float(ys),
                      abs(float(xs) - float(ys)), feeds, uti))
 
+    if anisotropic:
+        worst = max(anisotropic, key=lambda r: abs(float(r[3]) - float(r[4])))
+        print("\nlargest anisotropy ANYWHERE          : %.2e   [%s]"
+              % (abs(float(worst[3]) - float(worst[4])), worst[5]))
+        from_original = [r for r in anisotropic if r[5] == "original"]
+        if from_original:
+            worst_o = max(from_original,
+                          key=lambda r: abs(float(r[3]) - float(r[4])))
+            print("largest anisotropy READING AN ORIGINAL: %.2e   %s "
+                  "(%dx%d -> %dx%d)"
+                  % (abs(float(worst_o[3]) - float(worst_o[4])), worst_o[0][:40],
+                     worst_o[1][0], worst_o[1][1], worst_o[2][0], worst_o[2][1]))
+        print("(the two are different plans: the headline figure belongs to a "
+              "crop-fed PNG resample, which no decode divergence can reach)")
+
     if aniso_from_original_jpeg:
         print("\nanisotropic AND reading an original JPEG "
-              "(the only shape the decode divergence needs):")
+              "(a subset of the 159 plans that read an original -- the other "
+              "90 are isotropic and were once left out):")
         for n, i, o, xs, ys, feeds, uti in aniso_from_original_jpeg[:20]:
             print("  %-46s %dx%d -> %dx%d" % (n[:46], i[0], i[1], o[0], o[1]))
         print("  (%d in total)" % len(aniso_from_original_jpeg))

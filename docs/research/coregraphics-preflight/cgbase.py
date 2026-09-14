@@ -4,6 +4,7 @@ Measuring instrument for paperhanger Task 0. Not a deliverable.
 """
 import ctypes
 import ctypes.util
+import subprocess
 from ctypes import (c_void_p, c_long, c_ulong, c_bool, c_char_p, c_uint32,
                     c_int32, c_double, c_size_t, byref, Structure)
 
@@ -86,6 +87,39 @@ INTERP = {"default": 0, "none": 1, "low": 2, "high": 3, "medium": 4}
 COLORSPACE_MODEL = {-1: "Unknown", 0: "Monochrome", 1: "RGB", 2: "CMYK",
                     3: "Lab", 4: "DeviceN", 5: "Indexed", 6: "Pattern",
                     7: "XYZ"}
+
+
+class DecodeFailed(RuntimeError):
+    """A decode that produced the wrong number of bytes, or no bytes."""
+
+
+def raw_pixels(path, width, height, channels="RGB"):
+    """Decode to raw 8-bit samples, and refuse to return anything else.
+
+    Every comparison in these instruments is `raw_pixels(a) == raw_pixels(b)`,
+    so a decode that fails must not come back as bytes that can compare equal
+    to another failure. `magick` writes nothing to stdout when it cannot read
+    a file, and two empty buffers are equal, which reads as SAME -- agreement
+    reported where there was no measurement at all. The expected length is
+    known from the shape, so check it: this raises rather than returning
+    short.
+    """
+    done = subprocess.run(["magick", path, "-depth", "8", "%s:-" % channels],
+                          capture_output=True)
+    want = width * height * len(channels)
+    if done.returncode != 0 or len(done.stdout) != want:
+        raise DecodeFailed(
+            "magick %s: rc=%d, %d bytes, expected %d (%dx%d %s)%s"
+            % (path, done.returncode, len(done.stdout), want, width, height,
+               channels,
+               ": " + done.stderr.decode("utf-8", "replace").strip()
+               if done.stderr else ""))
+    return done.stdout
+
+
+def raw_rgb(path, width, height):
+    """The three-channel case, which is what most of these instruments want."""
+    return raw_pixels(path, width, height, "RGB")
 
 
 def cfstr(s):

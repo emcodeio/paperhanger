@@ -11,25 +11,22 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 # public and these files are derived from corpus photographs.
 SCRATCH = tempfile.mkdtemp(prefix="cg-preflight-")
 atexit.register(shutil.rmtree, SCRATCH, ignore_errors=True)
+sys.path.insert(0, HERE)
+from cgbase import raw_rgb                                   # noqa: E402
 LEVELS = [(0, "Default"), (1, "None"), (2, "Low"), (3, "High"), (4, "Medium")]
-
-
-def raw(path):
-    return subprocess.run(["magick", path, "-depth", "8", "RGB:-"],
-                          capture_output=True).stdout
 
 
 src, w, h = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
 s_out = os.path.join(SCRATCH, "lv_s.png")
 subprocess.run(["/usr/bin/sips", "--resampleHeightWidth", str(h), str(w), src,
                 "-s", "format", "png", "--out", s_out], capture_output=True)
-ref = raw(s_out)
+ref = raw_rgb(s_out, w, h)
 print("shape %dx%d from %s" % (w, h, src))
 for code, name in LEVELS:
     c_out = os.path.join(SCRATCH, "lv_c%d.png" % code)
     subprocess.run([sys.executable, os.path.join(HERE, "resize.py"), src,
                     c_out, str(w), str(h), str(code)], check=True)
-    got = raw(c_out)
+    got = raw_rgb(c_out, w, h)
     if got == ref:
         print("  interp %d (%-7s): SAME as sips" % (code, name))
     else:
