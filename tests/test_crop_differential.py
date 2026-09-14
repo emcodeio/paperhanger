@@ -367,7 +367,7 @@ def test_a_region_decode_of_a_big_baseline_jpeg_is_not_the_frame_decode(
     to it. Measured, not imagined -- a one-row origin error keyed on
     `Path(source).suffix != ".png"` was injected against this suite:
 
-        uv run pytest -m corpus -k crop     1 passed  (5m31s)  -- GREEN
+        uv run pytest -m corpus -k crop     2 passed  (5m39s)  -- GREEN
         uv run pytest                       1 failed of 647    -- RED
 
     and the single failure is this test at `expect_agreement=True`. Nothing

@@ -77,7 +77,9 @@ Each operation is swapped behind the unchanged `imaging.py` interface, one at a 
 
 The bounds check stays. It is the guard that has to survive, because `execute.py` crops the 4x frame using `rect.scaled(4)`, and an enlargement that comes back a pixel short would overrun and produce a black-edged wallpaper with nothing raising.
 
-Its gate carries one deliberate exception. Old and new are byte-identical on the corpus, every file of which is 8-bit. They do not match on a 16-bit source, where the old path downconverts and the new one does not. That difference is intended, so it is pinned as a named exception with its justification rather than passing quietly.
+Its gate carries one deliberate exception, on a 16-bit source, where `sips` downconverts and the new path does not. That difference is intended, so it is pinned as a named exception with its justification rather than passing quietly.
+
+*Corrected during Task 3.* This paragraph opened "Old and new are byte-identical on the corpus, every file of which is 8-bit." **They are not, and no binding could have made them so.** ImageIO decodes a *region* of a baseline JPEG differently from the whole frame above 1,000,000 pixels, and `sips` shows it as plainly as CoreGraphics does — so the retained reference is itself a region decode, and an implementation matching the frame decode would sit *further* from it. 14 of the 27 sample images differ. The gate accounts for each difference rather than tolerating it: given the same decoded pixels the two implementations agree exactly. See §5 and `tests/test_crop_differential.py`.
 
 **2. The resample**, at `kCGInterpolationHigh`. Proven byte-identical. The gate should be clean with no exceptions; a red gate means the binding is wrong, not the plan.
 
@@ -97,7 +99,9 @@ Steps 2 and 3 are the two halves of one existing function. `resize_and_encode` k
 
 ## 5. Verification
 
-**The bar is byte-identical output**, and it is achievable rather than aspirational. Resize and encode were measured byte-identical during design, and crop is identical on every file in the corpus. The one known departure is crop on a 16-bit source, where the new path is correct and the old one is not; §4 pins it as an exception rather than lowering the bar to accommodate it.
+**The bar is byte-identical output** wherever byte-identity is reachable. Resize and encode were measured byte-identical during design. The known departures for crop are a 16-bit source, where the new path is correct and the old one is not, and §4's region decode; §4 pins the first as an exception rather than lowering the bar to accommodate it.
+
+*Corrected during Task 3.* This paragraph said the bar was "achievable rather than aspirational" and that "crop is identical on every file in the corpus". For crop that is false on any baseline JPEG over 1,000,000 pixels, which is most of the corpus — **and it is false for a reason no implementation choice could remove**, since the `sips` reference is itself a region decode and differs from `sips`' own frame decode by the same kind of margin. Both sides depart; neither is the better decode. Task 3's gate therefore asks a question that *is* answerable — hand both implementations the same decoded pixels and require exact agreement — and it fails on anything that control cannot account for. The bar stands unchanged for the four operations still to move.
 
 **The old implementation survives the migration as a test-only reference.** That is what makes a differential bar workable without keeping two production paths. Each gate compares the new output against the `sips` reference over the 27-image sample; the reference is deleted at the final swap. Any difference either fails the build or is pinned as a named exception carrying its justification.
 
@@ -121,7 +125,7 @@ Four things are unknown. They are listed here rather than left to be discovered 
 
 ## 7. Documentation
 
-§7 of the design spec records seven measured `sips` constraints. They stop describing our code, but they remain true statements about `sips`, and they are the reason this change exists. They move to `docs/research/` as findings rather than being deleted. The eighth, the 16-bit downconversion in the pad path, joins them.
+§7 of the design spec records seven measured `sips` constraints. They stop describing our code, but they remain true statements about `sips`, and they are the reason this change exists. They move to `docs/research/` as findings rather than being deleted. The 16-bit downconversion joins them — `sips` does it on every path that touches pixels, as §2 records, not the pad path this line used to name. Task 3 added a further one, the region decode above 1,000,000 pixels, which is ImageIO's rather than `sips`' and applies to both implementations.
 
 ## 8. Done
 

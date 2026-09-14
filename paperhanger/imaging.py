@@ -99,9 +99,23 @@ because nothing in this module depends on it any more:
      worst case by a wide margin. On four corpus photographs at a 400x300
      region the mean absolute error against each tool's own frame decode is
      1.038 / 0.314 / 1.383 / 0.351 out of 255 for `sips` and 0.934 / 0.332 /
-     1.256 / 0.417 for CoreGraphics. Progressive JPEGs show none of it, and
-     nor does the corpus's single-component greyscale JPEG at the rect the
-     gate uses.
+     1.256 / 0.417 for CoreGraphics. Progressive JPEGs show none of it.
+     CHROMA SUBSAMPLING AMPLIFIES THIS; IT IS NOT WHERE IT LIVES. Identical
+     pixels at 1250x801, encoded three ways, samples differing of 90,000
+     over the 200x150 region as (sips, CoreGraphics) with the largest
+     delta:
+
+       4:2:0      (39723, 86387)   max 1 / 88
+       4:4:4      (23297, 27042)   max 2 /  4
+       greyscale  (    0,  2190)   max 0 /  1
+
+     So it survives with no subsampling at all and survives with no chroma
+     at all; 4:2:0 multiplies the count about threefold and the amplitude
+     about twentyfold. Four of the eight greyscale baseline corpus JPEGs
+     over the threshold differ at their own gate rect, every sample by 1.
+     ON GREYSCALE THE RESIDUAL IS OURS ALONE: measured at an interior rect
+     on all four, `sips` matches the frame decode exactly and CoreGraphics
+     is the side that is off by one.
      A crop that removes NOTHING is not enough to provoke it: a full-frame
      `--cropOffset 0 0` is byte-identical to a plain decode. The rect has to
      be strictly smaller. Measured on acrylic_7049.JPG (1284x2778), 400x300
