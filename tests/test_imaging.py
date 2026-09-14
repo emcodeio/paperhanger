@@ -429,38 +429,14 @@ def test_every_output_format_writes(tmp_path, fmt, quality, suffix):
     assert imaging.probe(out)[:2] == (320, 240)
 
 
-def _captured_argv(monkeypatch):
-    """Collect the argv of the next _run, instead of running it."""
-    calls = []
-    monkeypatch.setattr(imaging, "_run", lambda argv, **kwargs: calls.append(argv))
-    return calls
-
-
-def test_png_omits_format_options_entirely(tmp_path, monkeypatch):
-    """png takes no quality, and sips will not tell you if you send one anyway.
-
-    Measured: `sips -s format png -s formatOptions None` prints `Warning:
-    Unknown format option None`, exits 0, and writes a perfectly valid PNG. So
-    no assertion about the output file can distinguish omitting the flag from
-    passing junk in it -- the argv is the only place this is observable, which
-    is why this one test looks at the command rather than the result.
-    """
-    calls = _captured_argv(monkeypatch)
-    source = write_png(tmp_path / "s.png", 32, 24)
-    imaging.resize_and_encode(source, 32, 24, "png", None, tmp_path / "o.png",
-                              resize=True)
-    assert "formatOptions" not in calls[0]
-    assert "None" not in calls[0]
-
-
-def test_a_lossy_format_does_pass_its_quality(tmp_path, monkeypatch):
-    """The other half of the above: omission must be specific to png."""
-    calls = _captured_argv(monkeypatch)
-    source = write_png(tmp_path / "s.png", 32, 24)
-    imaging.resize_and_encode(source, 32, 24, "heic", 80, tmp_path / "o.heic",
-                              resize=False)
-    assert "formatOptions" in calls[0]
-    assert calls[0][calls[0].index("formatOptions") + 1] == "80"
+# The two argv tests that stood here -- that `png` omits `-s formatOptions`
+# and that a lossy format passes it -- went with the `sips` encode. The thing
+# they pinned is unchanged and still unobservable in the output (ImageIO
+# ignores a quality key for PNG exactly as `sips` ignored the flag), so it is
+# still asserted at the call rather than in the file:
+# `test_encode_differential.test_no_options_dictionary_is_built_for_a_lossless_write`
+# and its lossy counterpart watch the options argument of
+# CGImageDestinationAddImage.
 
 
 def test_normalize_converts_to_srgb_png(tmp_path, corpus):
@@ -551,72 +527,74 @@ def test_cropping_before_normalizing_is_the_same_picture(tmp_path):
     assert raw != one
 
 
-def test_failure_raises_with_stderr(tmp_path):
-    """Fact 4. sips does not fail here -- it exits 0, warns on stderr, and
-    writes nothing. Measured: `sips -s format png missing.png --out x.png`
-    exits 0 and no x.png appears. Only the post-condition catches it.
+@pytest.mark.parametrize("resize", [False, True])
+@pytest.mark.parametrize("kind", ["missing", "directory"])
+def test_an_unreadable_source_fails_in_the_binding_layer(tmp_path, kind,
+                                                         resize):
+    """Both branches now fail the same way, which they did not before.
 
-    resize=False, because that is now the branch `sips` still runs. The
-    resizing branch fails earlier and in CoreGraphics, which is the test
-    below; this one is about the encode, and the encode is still a
-    subprocess whose exit status means nothing.
+    `sips` answered these two with fact 4 -- exit 0, a warning on stderr, and
+    no file -- so the encode branch used to be caught by `_run`'s
+    post-condition and the resample branch by ImageIO. With the encode on
+    ImageIO too there is one answer: an ImagingError naming the path, before
+    anything is written. The guarantee the executor depends on is what had to
+    survive, and it is asserted here rather than the wording that changed:
+    one exception type per photo, and no output left behind.
+
+    A directory is the case an input-side `exists()` check waves through, and
+    it is why the check is on the artifact rather than on the input.
     """
-    missing = tmp_path / "nope.png"
+    source = tmp_path / "nope.png" if kind == "missing" else tmp_path
     out = tmp_path / "x.png"
     with pytest.raises(imaging.ImagingError) as caught:
-        imaging.resize_and_encode(missing, 100, 100, "png", None,
-                                  out, resize=False)
-    assert "not a valid file" in str(caught.value)   # sips's own stderr
-    assert not out.exists()
-
-
-def test_the_resize_branch_fails_in_the_binding_layer_instead(tmp_path):
-    """The same unreadable source, through the branch that now resamples.
-
-    Nothing reaches `sips` at all: ImageIO refuses to open the file and `_cg`
-    raises the one exception type this layer has, naming the path. The
-    guarantee that survives the change is the one the executor depends on --
-    one exception type per photo, and no output file left behind.
-    """
-    missing = tmp_path / "nope.png"
-    out = tmp_path / "x.png"
-    with pytest.raises(imaging.ImagingError) as caught:
-        imaging.resize_and_encode(missing, 100, 100, "png", None,
-                                  out, resize=True)
+        imaging.resize_and_encode(source, 100, 100, "png", None, out,
+                                  resize=resize)
     assert "could not open" in str(caught.value)
-    assert str(missing) in str(caught.value)
+    assert str(source) in str(caught.value)
     assert not out.exists()
 
 
-def test_a_directory_input_is_also_a_silent_skip(tmp_path):
-    """The other exit-0 skip: a directory exists, so an input-side exists()
-    check would wave it through. Uses resize_and_encode rather than crop
-    because crop now rejects an unreadable source at its bounds probe, which
-    would take a different path and leave the post-condition uncovered."""
-    out = tmp_path / "out.png"
-    with pytest.raises(imaging.ImagingError) as caught:
-        imaging.resize_and_encode(tmp_path, 10, 10, "png", None, out,
-                                  resize=False)
-    assert "without writing" in str(caught.value)
-    assert not out.exists()
+def test_fact_4_still_has_a_live_caller(tmp_path):
+    """A write that `sips` SKIPS still exits 0, and one call still runs it.
+
+    `normalize_to_srgb_png` is the last `sips` invocation that WRITES a file,
+    so it is where the post-condition still earns its place: measured here,
+    `sips --matchTo ... missing.png --out x.png` exits 0, warns on stderr and
+    writes nothing, and a directory input does the same. Without `produces=`
+    the caller would be handed a success and no file.
+
+    It is here rather than on `resize_and_encode` because that function no
+    longer runs a subprocess at all; when Task 6 moves this one, fact 4 keeps
+    only `upscale` and the fact itself can be retired with `probe`.
+    """
+    for source in (tmp_path / "nope.png", tmp_path):
+        out = tmp_path / "x.png"
+        with pytest.raises(imaging.ImagingError) as caught:
+            imaging.normalize_to_srgb_png(source, out)
+        assert "exited 0 without writing" in str(caught.value)
+        assert not out.exists()
 
 
 def test_a_stale_destination_cannot_stand_in_for_output(tmp_path):
-    """The post-condition asks "is the file there?", so a leftover file from an
-    earlier run would answer yes for a run that wrote nothing. Clearing the
-    destination first is what makes the question mean what it looks like.
+    """A leftover file from an earlier run must not be able to answer for a
+    run that wrote nothing.
 
-    On this branch `_run` is never reached -- the resample fails first -- so
-    `produces=` is no longer what clears it. `resize_and_encode` clears the
-    destination itself before resampling, and this is the test that says so.
+    `_run(produces=...)` used to clear the destination and no subprocess runs
+    any more, so `resize_and_encode` clears it itself. Not the unlink-first
+    `_cg._write` argues against -- that one is about destinations ImageIO
+    refuses, which it refuses before touching a file. This is about a failure
+    BEFORE the write, and an unreadable source is the whole of it.
     """
     missing = tmp_path / "nope.png"
     out = tmp_path / "out.png"
     write_png(out, 64, 64)                      # stale output from an earlier run
-    with pytest.raises(imaging.ImagingError):
-        imaging.resize_and_encode(missing, 10, 10, "png", None, out,
-                                  resize=True)
-    assert not out.exists(), "the stale file was left to be mistaken for output"
+    for resize in (True, False):
+        write_png(out, 64, 64)
+        with pytest.raises(imaging.ImagingError):
+            imaging.resize_and_encode(missing, 10, 10, "png", None, out,
+                                      resize=resize)
+        assert not out.exists(), (
+            f"resize={resize} left the stale file to be mistaken for output")
 
 
 def test_a_missing_binary_raises_imaging_error(tmp_path):
@@ -643,27 +621,30 @@ def test_a_nonzero_exit_raises_with_stderr(tmp_path):
     """The other branch of _run: a real non-image exits 13 rather than
     skipping, so the status check is still doing work.
 
-    resize=False for the same reason as above -- a resizing call never gets
-    as far as the subprocess now, and this test is about the subprocess.
+    Through `normalize_to_srgb_png`, which is the `sips` call that is still
+    here. `resize_and_encode` no longer reaches a subprocess on any branch,
+    and this test is about the subprocess.
     """
     junk = tmp_path / "note.txt"
     junk.write_bytes(b"this is not an image\n")
     with pytest.raises(imaging.ImagingError) as caught:
-        imaging.resize_and_encode(junk, 100, 100, "png", None,
-                                  tmp_path / "x.png", resize=False)
+        imaging.normalize_to_srgb_png(junk, tmp_path / "x.png")
     message = str(caught.value)
     assert "exited 13" in message
     assert "Cannot extract image" in message         # sips's own stderr
 
 
-def test_a_non_image_is_refused_on_the_resize_branch_too(tmp_path):
+@pytest.mark.parametrize("resize", [False, True])
+def test_a_non_image_is_refused_on_both_branches(tmp_path, resize):
     """A file that exists and is not an image. ImageIO opens the source --
     `CGImageSourceCreateWithURL` succeeds for anything readable -- and fails
     at the decode, so this reaches a different `_checked` than the missing
     file above and must still be the one exception type."""
     junk = tmp_path / "note.txt"
     junk.write_bytes(b"this is not an image\n")
+    out = tmp_path / "x.png"
     with pytest.raises(imaging.ImagingError) as caught:
-        imaging.resize_and_encode(junk, 100, 100, "png", None,
-                                  tmp_path / "x.png", resize=True)
+        imaging.resize_and_encode(junk, 100, 100, "png", None, out,
+                                  resize=resize)
     assert "could not decode" in str(caught.value)
+    assert not out.exists()

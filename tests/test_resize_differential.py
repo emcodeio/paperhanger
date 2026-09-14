@@ -15,7 +15,9 @@ colour type, channel count and bit depth that give those pixels their
 meaning. Not whole files -- `sips` synthesises PNG ancillary chunks ImageIO
 does not emit, and both tools stamp the current second into an ICC profile
 header, so a whole-file gate would be partly measuring a clock. Global
-Constraint 10 has the counts.
+Constraint 10 has the counts. Since Task 5 the PNG on our side of every
+comparison here is ImageIO's encode as well as its resample, so what these
+tests hold constant is only the pixels, which is what they were always for.
 
 WHAT HAPPENS AT IDENTITY, which is a fifth of the production resamples and
 was where the two implementations were furthest apart. `render` asks for the
@@ -51,7 +53,7 @@ from pathlib import Path
 
 import pytest
 
-from paperhanger import _cg, execute, imaging
+from paperhanger import _cg, imaging
 from tests import pixels
 from tests.differential import compare
 
@@ -384,7 +386,18 @@ def test_the_same_source_resizes_at_identity(tmp_path, cmyk_fixture, name,
 
 
 # ---------------------------------------------------------------------------
-# The pinned divergence, and the staging file.
+# The pinned divergence.
+#
+# The four staging-file tests that used to close this file are gone with the
+# staging file: Task 5 put the encode in the same pass as the resample, so
+# there is no intermediate to leave behind, no `.partial` name to coordinate
+# with `execute.sweep_partials`, and no second implementation to fail between
+# the two halves. What they were protecting -- that a failing call leaves the
+# output directory as it found it -- is now
+# `test_encode_differential.test_a_failing_encode_leaves_no_output_behind`
+# and `test_imaging.test_a_stale_destination_cannot_stand_in_for_output`,
+# and that the call writes exactly one file is
+# `test_encode_differential.test_nothing_intermediate_is_written_at_all`.
 # ---------------------------------------------------------------------------
 
 
@@ -404,82 +417,6 @@ def test_a_sixteen_bit_source_keeps_its_depth(tmp_path, png16_fixture):
     _sips_resize(source, 200, 150, reference)
     assert pixels.read_ihdr(reference)[2] == 8, (
         "sips kept 16 bits, so the pinned exception no longer describes it")
-
-
-def test_the_staging_file_does_not_survive_the_call(tmp_path, photo_fixture):
-    """It lands in a directory the executor later scans for outputs."""
-    source = photo_fixture(tmp_path / "s.png", 400, 300)
-    out = tmp_path / "out" / "o.heic"
-    out.parent.mkdir()
-    imaging.resize_and_encode(source, 200, 150, "heic", 80, out, resize=True)
-    assert [p.name for p in out.parent.iterdir()] == ["o.heic"]
-
-
-def test_the_staging_file_does_not_survive_a_failing_resample(tmp_path,
-                                                              photo_fixture,
-                                                              monkeypatch):
-    """A resample that raises with its output already written.
-
-    Nothing in `_cg.resize_to_file` does that today -- `write_png` is its
-    last statement and it unlinks its own destination on a refused Finalize
-    -- so this substitutes a resample that does. The guarantee under test
-    belongs to THIS function rather than to the layer below it: the
-    directory is left as it was found, whatever the resample did before it
-    raised. Taking the staged NAME outside the `try` and doing the WRITING
-    inside it is what makes that structural instead of incidental.
-    """
-    def writes_then_raises(source, out_width, out_height, out_path):
-        Path(out_path).write_bytes(b"half a frame")
-        raise imaging.ImagingError("the resample failed after writing")
-
-    monkeypatch.setattr(_cg, "resize_to_file", writes_then_raises)
-    source = photo_fixture(tmp_path / "s.png", 400, 300)
-    out = tmp_path / "out" / "o.png"
-    out.parent.mkdir()
-    with pytest.raises(imaging.ImagingError):
-        imaging.resize_and_encode(source, 200, 150, "png", None, out,
-                                  resize=True)
-    assert list(out.parent.iterdir()) == []
-
-
-def test_the_staging_name_is_one_the_executor_already_sweeps(tmp_path,
-                                                             photo_fixture,
-                                                             monkeypatch):
-    """The exit no `finally` covers: a kill between resample and encode.
-
-    `execute.sweep_partials` globs `*{PARTIAL_SUFFIX}` over the processing
-    tree at the start of every run, and the staged resample lands inside that
-    tree. Ending its name with the same suffix is what makes an interrupted
-    run's leftovers get tidied instead of standing in the output directory as
-    a PNG the size of the frame. The two modules cannot share the constant --
-    `execute` imports `imaging` -- so this test is the coupling.
-    """
-    seen = []
-    real = _cg.resize_to_file
-    monkeypatch.setattr(_cg, "resize_to_file",
-                        lambda source, w, h, out: seen.append(Path(out))
-                        or real(source, w, h, out))
-    source = photo_fixture(tmp_path / "s.png", 400, 300)
-    imaging.resize_and_encode(source, 200, 150, "png", None, tmp_path / "o.png",
-                              resize=True)
-    assert seen, "nothing was staged"
-    assert seen[0].name.endswith(execute.PARTIAL_SUFFIX), seen[0].name
-    assert seen[0].name.startswith("o.png"), (
-        f"{seen[0].name} does not append to its destination's name, so it "
-        f"could collide with another plan's output")
-
-
-def test_the_staging_file_does_not_survive_a_failing_encode(tmp_path,
-                                                            photo_fixture):
-    """The finally, not the happy path. `sips` exits 13 on an unknown format,
-    and the intermediate must not be left behind for the executor to find."""
-    source = photo_fixture(tmp_path / "s.png", 400, 300)
-    out = tmp_path / "out" / "o.nope"
-    out.parent.mkdir()
-    with pytest.raises(imaging.ImagingError):
-        imaging.resize_and_encode(source, 200, 150, "nosuchformat", None, out,
-                                  resize=True)
-    assert list(out.parent.iterdir()) == []
 
 
 # ---------------------------------------------------------------------------

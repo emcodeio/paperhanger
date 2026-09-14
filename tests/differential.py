@@ -24,9 +24,20 @@ agrees, 25 differing in pixels:
     alongside the pixels. A gate that passed while the alpha went would be
     worse than no gate.
 
-Lossy output keeps the whole-file comparison: heic, jpeg and avif encodes
-were measured byte-identical during design, and none of the PNG ancillary
-divergence applies to them.
+Lossy output keeps the whole-file comparison, and Task 5 measured what that
+rests on rather than inheriting it. It holds for everything this harness is
+handed at tier 1: an untagged fixture and an ICC-tagged one are byte-identical
+to `sips` at jpeg 80 and 90, heic 80, 85 and 90, and avif 85, whatever the
+profile. It does NOT hold over real photographs, and the reason is not the
+ICC clock that rules whole files out for PNG -- it is that `sips` copies a
+source's EXIF into its output and `CGImageDestinationAddImage` writes only
+the picture. 21 of the 27 coverage images differ for heic and avif on that
+alone, with the coded picture identical underneath; four progressive JPEG
+sources differ because `sips` inherits the progressive scan and ImageIO
+writes baseline. So a caller comparing lossy output over the corpus has to
+account for the container, which `tests/test_encode_differential.py` does
+per file; this harness stays the whole-file bar it was, and every fixture
+that reaches it meets that bar.
 
 Two things the harness deliberately does NOT treat as differences, because
 the measurement says the pixels are what matter: interlacing, and anything

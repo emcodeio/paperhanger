@@ -510,10 +510,13 @@ def test_both_implementations_are_run_on_the_source(tmp_path, png_fixture):
 
 
 def test_the_two_sides_write_into_separate_directories(tmp_path, png_fixture):
-    """`resize_and_encode` stages a sibling file next to its output.
+    """An implementation may write beside its output, and one did.
 
-    Sharing a directory would let one implementation's staging file land on
-    the other's, which is a difference the gate would never see.
+    `resize_and_encode` staged a sibling PNG until the encode moved to
+    ImageIO, and `sips` writes temporary files of its own. Sharing a
+    directory would let one side's leavings land on the other's, which is a
+    difference the gate would never see -- and the cost of keeping them
+    apart is one `mkdir`.
     """
     src = png_fixture(tmp_path / "a.png", 16, 16)
     seen = []

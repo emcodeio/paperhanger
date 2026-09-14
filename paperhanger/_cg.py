@@ -55,8 +55,8 @@ monochrome ACCEPTS it and renders the wrong picture.
 
 The grayscale failure only fires when the draw SCALES. At 1:1 the same
 bad pairing round-trips correctly, which is why it survived measurement
-twice before Task 0 caught it. `resize_to_file` does not draw at 1:1 at
-all -- see the identity case there -- so the pairing is now only reached
+twice before Task 0 caught it. `_resample` does not draw at 1:1 at all
+-- see the identity case there -- so the pairing is now only reached
 where it is visible, and `tests/test_resize_differential.py` compares a
 REDUCING resample against `sips` for each of the four rows a fixture can
 produce: monochrome and RGB, each with and without alpha. The Indexed
@@ -140,6 +140,14 @@ COLOUR_MODELS = {
 # enum carries one, whether premultiplied, straight, or alpha-only.
 _OPAQUE_ALPHA = frozenset(
     {kCGImageAlphaNone, kCGImageAlphaNoneSkipLast, kCGImageAlphaNoneSkipFirst})
+
+# The four output formats, as the uniform type identifiers ImageIO wants.
+# `formats.EXTENSIONS` has the same four keys and is the layer that decides
+# which of them a run uses; this is only the translation, and a format that
+# is not here is refused by name rather than reaching CoreFoundation as a
+# CFString nothing recognises.
+UTI = {"heic": "public.heic", "jpeg": "public.jpeg",
+       "avif": "public.avif", "png": "public.png"}
 
 
 class CGPoint(Structure):
@@ -427,15 +435,58 @@ def bitmap_context(scope, image, width: int, height: int, path):
         f"create a {width}x{height} bitmap context", path), kind="context")
 
 
-def _png_destination(scope, out_path):
+def _destination(scope, out_path, uti: str, what: str):
     return scope.own(_checked(
         _IO_LIB.CGImageDestinationCreateWithURL(
-            _cfurl(scope, out_path), _cfstr(scope, "public.png"), 1, None),
-        "create a PNG destination", out_path))
+            _cfurl(scope, out_path), _cfstr(scope, uti), 1, None),
+        f"create a {what} destination", out_path))
 
 
-def write_png(scope, image, out_path, options=None):
-    """Encode `image` as PNG, or raise.
+def _quality_options(scope, quality):
+    """A CFDictionary carrying the lossy quality, or None for lossless.
+
+    `sips -s formatOptions N` IS this key at N/100. Both tools are ImageIO
+    underneath, and the equality is measured rather than assumed: on a
+    400x300 noise PNG, `sips` and this agree byte for byte at jpeg 80 and
+    90, heic 80, 85 and 90, and avif 85 -- including heic 85 reproducing
+    heic 80's file exactly, which is the quantization `formats.py` records
+    as the reason heic's default is 80. So the four defaults in
+    `formats.DEFAULT_QUALITY` transfer with nothing re-derived.
+
+    None means no key at all, which is not the same as 100: PNG carries no
+    lossy quality, and an options dictionary holding one for it would be a
+    number with no meaning riding along with every lossless write.
+
+    THE CALLBACKS ARE PASSED BY ADDRESS. `kCFTypeDictionaryKeyCallBacks` is
+    a STRUCT exported by CoreFoundation, not a pointer to one, so
+    `c_void_p.in_dll(...)` reads its first field -- the version, which is 0
+    -- and hands CFDictionaryCreate a NULL callbacks table. That dictionary
+    retains nothing and compares keys by pointer identity, and it still
+    produces the right bytes here, because the scope holds the CFNumber
+    alive until after Finalize and the key is the framework's own constant.
+    It is wrong in a way no output can show, which is why it is spelled out:
+    `addressof` is the address OF the struct, and that is what the parameter
+    wants.
+    """
+    if quality is None:
+        return None
+    key = c_void_p.in_dll(_IO_LIB, "kCGImageDestinationLossyCompressionQuality")
+    value = c_double(quality / 100.0)
+    number = scope.own(_checked(
+        _CF.CFNumberCreate(None, kCFNumberDoubleType, ctypes.byref(value)),
+        "build a quality number", quality))
+    keys = (c_void_p * 1)(key.value)
+    values = (c_void_p * 1)(number)
+    return scope.own(_checked(
+        _CF.CFDictionaryCreate(
+            None, keys, values, 1,
+            ctypes.addressof(c_void_p.in_dll(_CF, "kCFTypeDictionaryKeyCallBacks")),
+            ctypes.addressof(c_void_p.in_dll(_CF, "kCFTypeDictionaryValueCallBacks"))),
+        "build the destination options", quality))
+
+
+def _write(scope, image, out_path, uti: str, what: str, options=None):
+    """Encode `image` to `out_path` in `uti`, or raise.
 
     NO UNLINK-FIRST, unlike `imaging._run`'s `produces=`, but an unlink ON
     FAILURE, which is not the same thing and took two rounds to separate.
@@ -458,8 +509,29 @@ def write_png(scope, image, out_path, options=None):
     produced the false Finalize: a directory turned read-only mid-write
     refuses the delete too. Best effort, then -- the ImagingError is the
     report either way, and it says so when the old file is still there.
+
+    NO METADATA TRAVELS. `CGImageDestinationAddImage` writes the image and
+    the colour space the CGImage carries, and nothing else -- where `sips`
+    copies the source's EXIF into the output. Measured on a 400x300 PNG
+    tagged AdobeRGB1998 by `sips --matchTo`, which writes both an `iCCP`
+    and an `eXIf` chunk; each variable separated by rebuilding the file
+    with one chunk removed:
+
+      source chunks        jpeg 90     heic 80             avif 85
+      neither              identical   identical           identical
+      iCCP only            identical   identical           identical
+      eXIf only            identical   127 bytes smaller   127 smaller
+      both                 identical   127 bytes smaller   127 smaller
+
+    So the ICC profile is NOT the variable -- ImageIO writes the same
+    `colr` box `sips` does, byte for byte, for AdobeRGB, Display P3, ROMM
+    RGB and ITU-2020 alike. The EXIF is. In the HEIF family `sips` adds a
+    second item (an `Exif` item, an `iref cdsc` pointing at the picture,
+    and 66 bytes in `mdat`); the coded picture is identical, and ours is
+    the same bytes without the metadata item. Both halves of that are
+    pinned in `tests/test_encode_differential.py`.
     """
-    dest = _png_destination(scope, out_path)
+    dest = _destination(scope, out_path, uti, what)
     _IO_LIB.CGImageDestinationAddImage(dest, image, options)
     if not _IO_LIB.CGImageDestinationFinalize(dest):
         try:
@@ -469,6 +541,16 @@ def write_png(scope, image, out_path, options=None):
             left_behind = (f"; an earlier file is still there and could not "
                            f"be removed ({exc.strerror})")
         raise ImagingError(f"could not write {out_path}{left_behind}")
+
+
+def write_png(scope, image, out_path):
+    """Encode `image` as PNG, or raise. The lossless half of `_write`.
+
+    Its own name because `crop_to_file` writes PNG and nothing else -- the
+    format is a property of that operation rather than a parameter of it,
+    and `imaging.crop` refuses an out_path that says otherwise.
+    """
+    _write(scope, image, out_path, UTI["png"], "PNG")
 
 
 def crop_to_file(source, x: int, y: int, width: int, height: int,
@@ -517,8 +599,8 @@ def crop_to_file(source, x: int, y: int, width: int, height: int,
         write_png(scope, cut, out_path)
 
 
-def resize_to_file(source, out_width: int, out_height: int, out_path) -> None:
-    """Resample to exactly out_width x out_height and write PNG.
+def _resample(scope, image, out_width: int, out_height: int, source):
+    """`image` at exactly out_width x out_height, owned by `scope`.
 
     Both axes are always explicit; nothing here derives one from the other.
 
@@ -534,12 +616,12 @@ def resize_to_file(source, out_width: int, out_height: int, out_path) -> None:
     fixtures carry noise.)
 
     AT IDENTITY THE DRAW IS SKIPPED, and that is not an optimisation with a
-    neutral output. `render` asks this function for the source's own
-    dimensions on 577 of the 2734 resamples a full corpus run performs --
-    band 4 renders the 4x frame at scale 4, so `resize = needs_resize or
-    scale != 1` computes True for a resample that changes nothing -- and
-    those calls are where CoreGraphics is furthest from `sips` in both
-    memory and pixels. Measured here, on this machine:
+    neutral output. `render` asks for the source's own dimensions on 577 of
+    the 2734 resamples a full corpus run performs -- band 4 renders the 4x
+    frame at scale 4, so `resize = needs_resize or scale != 1` computes True
+    for a resample that changes nothing -- and those calls are where
+    CoreGraphics is furthest from `sips` in both memory and pixels. Measured
+    here, on this machine:
 
       * PIXELS. Over 63 corpus photographs at their own dimensions, the
         concatenated `IDAT` of the skip equals `sips`' on 63 of 63; the draw
@@ -607,21 +689,71 @@ def resize_to_file(source, out_width: int, out_height: int, out_path) -> None:
         thing; `sips` keeps the depth. Measured on a 1-bit greyscale PNG:
         draw and skip are byte-identical to each other and both differ from
         `sips` in depth alone. Skipping neither causes nor cures it.
+
+    RETURNS THE SOURCE IMAGE ITSELF at identity, already owned by the
+    scope its caller passed in. The caller must not release it separately,
+    and must not assume the handle it gets back is a new one.
     """
+    if dimensions(image) == (out_width, out_height):
+        return image
+
+    ctx = bitmap_context(scope, image, out_width, out_height, source)
+    _CG_LIB.CGContextSetInterpolationQuality(ctx, kCGInterpolationHigh)
+    _CG_LIB.CGContextDrawImage(
+        ctx, CGRect(CGPoint(0.0, 0.0),
+                    CGSize(float(out_width), float(out_height))), image)
+    return scope.own(_checked(
+        _CG_LIB.CGBitmapContextCreateImage(ctx),
+        f"read back the {out_width}x{out_height} resample", source),
+        kind="image")
+
+
+def resize_and_encode_to_file(source, out_width: int, out_height: int,
+                              fmt: str, quality, out_path,
+                              resize: bool) -> None:
+    """Resample if asked, then encode. One decode, one frame, no staging.
+
+    The whole of `imaging.resize_and_encode`'s work, in one scope. Task 4
+    left a lossless PNG between the CoreGraphics resample and the `sips`
+    encode; the intermediate existed only because the two halves were in
+    two processes, and with the encode here it is gone. It cost a full
+    extra encode and decode of the frame, and it bought a lower peak.
+    Measured on a 7680x5120 noise PNG reduced to 3840x2160 heic 80, two
+    runs each, as peak RSS of the process doing the work:
+
+      this, one pass          454.1 MiB   no child, no intermediate
+      Task 4, staged          385.0 MiB   plus a 135.0 MiB `sips` child
+                                          and a 22.1 MB PNG on disk
+      pre-Task 4, one `sips`   18.6 MiB   plus a 408.4 MiB `sips` child
+
+    So the fused pass holds the decoded frame, the resampled bitmap and
+    the encoder's buffers at once where the staged shape released the
+    first two before `sips` started: 69 MiB more than Task 4's in-process
+    peak, and 46 more than the `sips` this all replaces. That is the trade
+    -- one process and one file against a higher high-water mark -- and it
+    is worth knowing which way it goes before a bigger frame than the
+    corpus holds turns up.
+
+    THE FORMAT IS REFUSED BY NAME. Handing an unknown one to `_cfstr`
+    would build a CFString CoreFoundation is happy with and ImageIO is not,
+    and `CGImageDestinationCreateWithURL` would return NULL -- an error
+    reading "could not create a nosuchformat destination for <path>",
+    which describes the symptom. `sips` used to exit 13 here; this is the
+    same refusal with the format named as the cause.
+
+    `quality` is the caller's, unchanged, and None for PNG -- see
+    `_quality_options`. The value is not clamped or defaulted here:
+    `formats.quality_for` is the layer that decides what a format's
+    quality is, and a second opinion at this depth could only disagree
+    with it silently.
+    """
+    if fmt not in UTI:
+        raise ImagingError(
+            f"cannot encode {out_path}: {fmt!r} is not an output format; "
+            f"expected one of {', '.join(UTI)}")
     with Scope() as scope:
         image = load(scope, source)
-
-        if dimensions(image) == (out_width, out_height):
-            write_png(scope, image, out_path)
-            return
-
-        ctx = bitmap_context(scope, image, out_width, out_height, source)
-        _CG_LIB.CGContextSetInterpolationQuality(ctx, kCGInterpolationHigh)
-        _CG_LIB.CGContextDrawImage(
-            ctx, CGRect(CGPoint(0.0, 0.0),
-                        CGSize(float(out_width), float(out_height))), image)
-        scaled = scope.own(_checked(
-            _CG_LIB.CGBitmapContextCreateImage(ctx),
-            f"read back the {out_width}x{out_height} resample", source),
-            kind="image")
-        write_png(scope, scaled, out_path)
+        if resize:
+            image = _resample(scope, image, out_width, out_height, source)
+        _write(scope, image, out_path, UTI[fmt], fmt,
+               _quality_options(scope, quality))
