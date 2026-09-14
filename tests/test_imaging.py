@@ -554,28 +554,46 @@ def test_an_unreadable_source_fails_in_the_binding_layer(tmp_path, kind,
     assert not out.exists()
 
 
-def test_a_stale_destination_cannot_stand_in_for_a_skipped_sips_write(tmp_path):
+def _stub_binary(path, body: str):
+    """A shell script standing in for upscayl-bin, doing one wrong thing.
+
+    `upscale` is the only `_run(produces=...)` caller left, so the two
+    branches below cannot be reached with a real tool: the ones that used to
+    reach them were `sips --matchTo` invocations, and Task 6 replaced the
+    last of those with a CoreGraphics conversion. The failure SHAPES are
+    real -- an exit 0 that wrote nothing, and a nonzero exit with a message
+    on stderr -- and they belong to a binary this project does not control,
+    which is the argument for still checking them.
+    """
+    path.write_text(f"#!/bin/sh\n{body}\n")
+    path.chmod(0o755)
+    return path
+
+
+def test_a_stale_destination_cannot_stand_in_for_a_skipped_write(tmp_path):
     """`_run`'s own unlink-first, which nothing else reaches any more.
 
-    The post-condition asks "is the file there?", and fact 4 is `sips`
+    The post-condition asks "is the file there?", and fact 4 is a tool
     answering a write it skipped with exit 0 and no file. Put an earlier
     run's output at the destination and the question answers yes for a run
-    that wrote nothing -- so `_run` removes the destination before starting,
-    and this is the only test that reaches that line now that
-    `resize_and_encode` runs no subprocess.
+    that wrote nothing -- so `_run` removes the destination before starting.
 
-    Through `normalize_to_srgb_png` because it is the `sips` call that still
-    writes. When Task 6 moves it, `upscale` is the last `produces=` caller
-    and this test should follow it there rather than be deleted.
+    Through `upscale` since Task 6, as the test this replaces said it should
+    be: `normalize_to_srgb_png` used to be the `sips` call that still wrote,
+    and it no longer runs a subprocess at all.
     """
+    binary = _stub_binary(tmp_path / "stub-upscayl", "exit 0")
+    source = write_png(tmp_path / "s.png", 32, 24)
     stale = tmp_path / "out.png"
     write_png(stale, 64, 64)
+
     with pytest.raises(imaging.ImagingError) as caught:
-        imaging.normalize_to_srgb_png(tmp_path / "nope.png", stale)
+        imaging.upscale(source, stale, binary, tmp_path / "models")
     assert "exited 0 without writing" in str(caught.value)
     assert not stale.exists(), (
-        "sips skipped the write and an earlier run's file is still standing "
-        "at the destination, which the post-condition reads as success")
+        "the tool skipped the write and an earlier run's file is still "
+        "standing at the destination, which the post-condition reads as "
+        "success")
 
 
 def test_an_unremovable_stale_output_still_raises_imaging_error(tmp_path):
@@ -617,24 +635,26 @@ def test_an_unremovable_stale_output_still_raises_imaging_error(tmp_path):
 
 
 def test_fact_4_still_has_a_live_caller(tmp_path):
-    """A write that `sips` SKIPS still exits 0, and one call still runs it.
+    """An exit-0 no-op is still refused, on the one call that can produce one.
 
-    `normalize_to_srgb_png` is the last `sips` invocation that WRITES a file,
-    so it is where the post-condition still earns its place: measured here,
-    `sips --matchTo ... missing.png --out x.png` exits 0, warns on stderr and
-    writes nothing, and a directory input does the same. Without `produces=`
-    the caller would be handed a success and no file.
+    Fact 4 was measured on `sips`: given a path it cannot read it exits 0,
+    warns on stderr and writes nothing, so the exit status is not the signal
+    and the artifact has to be checked. No `sips` invocation here writes any
+    more -- Task 6 took the last one -- and the fact's ANSWER outlives its
+    subject, because `upscale` runs a binary this project does not control
+    and an exit-0 no-op from that one would be believed the same way.
 
-    It is here rather than on `resize_and_encode` because that function no
-    longer runs a subprocess at all; when Task 6 moves this one, fact 4 keeps
-    only `upscale` and the fact itself can be retired with `probe`.
+    Nothing stale at the destination, unlike the test above: this is the
+    post-condition on its own, with no file for it to have removed first.
     """
-    for source in (tmp_path / "nope.png", tmp_path):
-        out = tmp_path / "x.png"
-        with pytest.raises(imaging.ImagingError) as caught:
-            imaging.normalize_to_srgb_png(source, out)
-        assert "exited 0 without writing" in str(caught.value)
-        assert not out.exists()
+    binary = _stub_binary(tmp_path / "stub-upscayl", "exit 0")
+    source = write_png(tmp_path / "s.png", 32, 24)
+    out = tmp_path / "x.png"
+
+    with pytest.raises(imaging.ImagingError) as caught:
+        imaging.upscale(source, out, binary, tmp_path / "models")
+    assert "exited 0 without writing" in str(caught.value)
+    assert not out.exists()
 
 
 def test_a_stale_destination_cannot_stand_in_for_output(tmp_path):
@@ -680,20 +700,25 @@ def test_a_timeout_raises_imaging_error():
 
 
 def test_a_nonzero_exit_raises_with_stderr(tmp_path):
-    """The other branch of _run: a real non-image exits 13 rather than
-    skipping, so the status check is still doing work.
+    """The other branch of _run: a nonzero exit, reported with what the tool
+    said about it.
 
-    Through `normalize_to_srgb_png`, which is the `sips` call that is still
-    here. `resize_and_encode` no longer reaches a subprocess on any branch,
-    and this test is about the subprocess.
+    Through `upscale` since Task 6. It used to be a real `sips --matchTo` on
+    a text file, which exits 13 with `Cannot extract image` on stderr; that
+    invocation is gone, and the branch now belongs to upscayl-bin -- which
+    the tier-1 suite does not have, hence a stub. The status and the message
+    are what `execute` puts in its report for a failed photo, so both are
+    asserted rather than only the exception type.
     """
-    junk = tmp_path / "note.txt"
-    junk.write_bytes(b"this is not an image\n")
+    binary = _stub_binary(
+        tmp_path / "stub-upscayl",
+        'echo "stub: cannot extract image" >&2\nexit 13')
+    source = write_png(tmp_path / "s.png", 32, 24)
     with pytest.raises(imaging.ImagingError) as caught:
-        imaging.normalize_to_srgb_png(junk, tmp_path / "x.png")
+        imaging.upscale(source, tmp_path / "x.png", binary, tmp_path / "models")
     message = str(caught.value)
     assert "exited 13" in message
-    assert "Cannot extract image" in message         # sips's own stderr
+    assert "cannot extract image" in message         # the tool's own stderr
 
 
 @pytest.mark.parametrize("resize", [False, True])

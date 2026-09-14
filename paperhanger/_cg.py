@@ -63,6 +63,15 @@ produce: monochrome and RGB, each with and without alpha. The Indexed
 row is a refusal rather than a picture and has its own test; nothing in
 `tests/pixels.py` writes a 32-bit float PNG, so that row is measured in
 the preflight instruments and nowhere else.
+
+HALF OF THAT TABLE APPLIES WHERE THE DESTINATION IS OURS INSTEAD.
+`normalize_to_srgb_png_file` converts INTO sRGB, so the colour model of
+its destination is decided before the source is looked at and only the
+alpha column is still a question -- `_rgb_alpha_info` is the rule both
+callers share. The rest of the table inverts there: a colour model this
+one refuses as a DESTINATION, indexed and CMYK included, is a perfectly
+ordinary SOURCE for a draw into sRGB, and the depth is ours to pick
+rather than the source's to keep.
 """
 
 import ctypes
@@ -77,10 +86,11 @@ class ImagingError(RuntimeError):
 
     Anything this layer refuses -- a file ImageIO will not decode, a colour
     space or bit depth no bitmap context accepts, a destination that cannot
-    be written -- and, through `imaging`, a `sips` or `upscayl-bin`
-    invocation that did not succeed. This layer raises this and nothing else
-    on purpose, so `execute` still catches ONE type per photo, reports that
-    photo failed, and carries on with the run.
+    be written -- and, through `imaging`, an `upscayl-bin` invocation that
+    did not succeed. `sips` used to be in that list; since Task 6 nothing
+    here asks it to write, and `probe` reads without raising. This layer
+    raises this and nothing else on purpose, so `execute` still catches ONE
+    type per photo, reports that photo failed, and carries on with the run.
 
     It LIVES here rather than in `imaging` because `imaging` now imports this
     module: crop is a CoreGraphics call, so the arrow between the two
@@ -140,6 +150,23 @@ COLOUR_MODELS = {
 # enum carries one, whether premultiplied, straight, or alpha-only.
 _OPAQUE_ALPHA = frozenset(
     {kCGImageAlphaNone, kCGImageAlphaNoneSkipLast, kCGImageAlphaNoneSkipFirst})
+
+# The name of the one colour space this module ever ASKS for rather than
+# reads off a source. `normalize_to_srgb_png_file` converts into it.
+#
+# `in_dll` is right here and was wrong for the dictionary callbacks in
+# `_quality_options`, and the difference is what the symbol IS. This one is
+# a `const CFStringRef` -- a POINTER variable -- so reading it as a c_void_p
+# reads the pointer: CFGetTypeID says CFString and the text is
+# `kCGColorSpaceSRGB`. The callbacks are a STRUCT whose first word is a
+# version number, so the same spelling there read 0 and handed
+# CFDictionaryCreate a NULL table. Checked rather than assumed both times.
+#
+# Building the same CFString ourselves happens to work -- the constant's
+# value IS the literal "kCGColorSpaceSRGB", and both spellings return the
+# same CGColorSpace pointer -- but the literal is Apple's to change and the
+# exported symbol is the documented form.
+_SRGB_NAME = c_void_p.in_dll(_CG_LIB, "kCGColorSpaceSRGB")
 
 # The four output formats, as the uniform type identifiers ImageIO wants.
 # `formats.EXTENSIONS` has the same four keys and is the layer that decides
@@ -340,6 +367,22 @@ def has_alpha(image) -> bool:
     return alpha not in _OPAQUE_ALPHA
 
 
+def _rgb_alpha_info(image) -> int:
+    """The alpha info an RGB destination must take for this source.
+
+    Stated once because two callers need it and they arrive from opposite
+    directions: `bitmap_format` derives an RGB destination when the SOURCE
+    is RGB, and `normalize_to_srgb_png_file` builds one for every source
+    there is, because sRGB is an RGB space whatever came in. The
+    measurements are in `bitmap_format`; the short version is that
+    NoneSkipLast composites an alpha-bearing source onto the context's
+    black ground and drops the channel, which twelve corpus PNGs would
+    notice and `sips` does not do.
+    """
+    return (kCGImageAlphaPremultipliedLast if has_alpha(image)
+            else kCGImageAlphaNoneSkipLast)
+
+
 def bitmap_format(image, path):
     """(colour space, bits per component, bitmap info) to receive `image`.
 
@@ -402,8 +445,7 @@ def bitmap_format(image, path):
     if model == kCGColorSpaceModelMonochrome:
         info = kCGImageAlphaPremultipliedLast if alpha else kCGImageAlphaNone
     elif model == kCGColorSpaceModelRGB:
-        info = (kCGImageAlphaPremultipliedLast if alpha
-                else kCGImageAlphaNoneSkipLast)
+        info = _rgb_alpha_info(image)
     else:
         raise ImagingError(
             f"cannot build a bitmap context for the "
@@ -621,6 +663,82 @@ def crop_to_file(source, x: int, y: int, width: int, height: int,
             )
 
         write_png(scope, cut, out_path)
+
+
+def normalize_to_srgb_png_file(source, out_path) -> None:
+    """Convert `source` into sRGB and write it as PNG.
+
+    THE DRAW IS THE CONVERSION, AND IT IS UNCONDITIONAL. `_resample` skips
+    its draw when the source already has the requested dimensions, and that
+    is correct THERE because `bitmap_context` builds the destination out of
+    the source's own colour space, so the draw converts nothing and the skip
+    deletes no work. Here the destination is a space of our choosing and the
+    draw is the whole point. Nothing about this function resizes, so the
+    dimensions ALWAYS match: a skip on them would fire on every source there
+    is and stop converting, at no error, with a plausible PNG of the right
+    size coming back. Measured against `sips --matchTo`, what that would
+    cost on a 600x400 noise PNG: Adobe RGB 661,630 of 720,000 samples,
+    largest difference 144; ROMM RGB 713,202 and 167; Display P3 675,884 and
+    116. `tests/test_normalize_differential.py` watches the call and the
+    pixels both.
+
+    A skip on the SOURCE's colour space is refused for the same reason and
+    would be more tempting -- 714 of the 895 corpus entries are tagged sRGB.
+    The draw converts four things at once: colour space, colour MODEL, bit
+    depth and alpha. Passing an already-sRGB source through would leave a
+    monochrome source monochrome, an indexed one indexed and a 16-bit one at
+    16 bits, none of which `sips --matchTo` does. "Tagged sRGB" is three
+    different profile descriptions in that corpus and not one colour space
+    object either.
+
+    NO INTERPOLATION QUALITY IS SET, unlike `_resample`, which pins High by
+    asserting the call because no output can tell it from Default. The draw
+    here is 1:1 by construction, so nothing is interpolated: measured on a
+    600x400 noise PNG, Default, None, Low and High each produce the same
+    721,292 bytes. A call that cannot change the answer would be a line no
+    test could check.
+
+    THE DESTINATION IS EIGHT BITS PER COMPONENT, where `crop` and
+    `resize_and_encode` keep a 16-bit source at 16. It is not an
+    inconsistency: `sips --matchTo` drops it too, so this agrees with the
+    reference, and the only reader of this file is upscayl-bin, which emits
+    8-bit PNG -- a 16-bit intermediate would be discarded one step later at
+    best. No corpus file is 16-bit.
+
+    EVERY COLOUR MODEL IS ACCEPTED, including the ones `bitmap_format`
+    refuses. Indexed, CMYK and Lab cannot be a DESTINATION; they are only a
+    source here, and sRGB is the destination, so they convert like anything
+    else. Measured against `sips` on a CMYK JPEG and a palettised PNG:
+    identical pixels, identical colour type. Refusing them would be a
+    regression on a path `sips` handled.
+
+    IT COSTS NOTHING IN MEMORY, which is not obvious: this runs on the
+    ORIGINAL on the whole-frame path, the largest image the pipeline ever
+    holds, and it holds the decoded frame and a second bitmap of the same
+    dimensions at once where `sips` had a process to itself. Peak RSS on
+    green_leaf_closeup_2463.jpg (7680x5120), two runs each, `/usr/bin/time
+    -l` per route: this 494.6 MiB, `sips --matchTo` 479.2. 21.5 MiB of ours
+    is the Python interpreter and these bindings, which the `sips` route
+    does not pay, so the imaging itself is 473.1 against 479.2 -- and one
+    subprocess fewer per photo.
+    """
+    with Scope() as scope:
+        image = load(scope, source)
+        width, height = dimensions(image)
+        space = scope.own(_checked(
+            _CG_LIB.CGColorSpaceCreateWithName(_SRGB_NAME),
+            "create the sRGB colour space", source))
+        ctx = scope.own(_checked(
+            _CG_LIB.CGBitmapContextCreate(None, width, height, 8, 0, space,
+                                          _rgb_alpha_info(image)),
+            f"create a {width}x{height} sRGB context", source), kind="context")
+        _CG_LIB.CGContextDrawImage(
+            ctx, CGRect(CGPoint(0.0, 0.0),
+                        CGSize(float(width), float(height))), image)
+        converted = scope.own(_checked(
+            _CG_LIB.CGBitmapContextCreateImage(ctx),
+            "read back the sRGB conversion", source), kind="image")
+        write_png(scope, converted, out_path)
 
 
 def _resample(scope, image, out_width: int, out_height: int, source):

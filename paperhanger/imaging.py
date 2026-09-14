@@ -11,9 +11,15 @@ body as its differential reference, which depends on every one of them.
 anything here any more, so facts 3 and 7 have stopped describing calls in
 this file; the rule fact 3 justifies -- that the caller's two numbers are
 both used and neither is derived -- is now enforced inside
-`_cg.resize_and_encode_to_file`. What is left of `sips` here is `probe`,
-`normalize_to_srgb_png` until Task 6, and `upscale`'s post-condition, so
-facts 1 and 4 remain live.
+`_cg.resize_and_encode_to_file`.
+
+`normalize_to_srgb_png` went too, and with it the last `sips` invocation
+that WRITES anything: no `--matchTo`, and nothing here passes an ICC
+profile to a subprocess. What is left of `sips` is `probe`, which reads,
+so fact 1 is live and fact 4 no longer describes a `sips` call at all.
+Fact 4's post-condition is not retired with it -- `upscale` still passes
+`produces=`, and it is the whole of what stands between an upscayl-bin run
+that exits 0 having written nothing and a caller that believes it.
 
 Seven measured facts shape this file. Each fails SILENTLY if ignored:
 
@@ -37,6 +43,10 @@ Seven measured facts shape this file. Each fails SILENTLY if ignored:
      exit-0 no-op, whatever its wording. A corrupt file, an unwritable
      destination and an unknown format all exit 13 and are caught by the
      status check; this is only for the ones that do not.
+     No `sips` call here writes anything any more, so the fact is now a
+     statement about a tool this file only reads with. The POST-CONDITION it
+     produced outlives it: `upscale` runs a binary nobody here controls, and
+     an exit-0 no-op from that one would be believed exactly the same way.
   5. An out-of-bounds crop PADS WITH BLACK. sips neither clamps nor errors:
      a 400x200 source cropped at x=900,y=900 returns a 120x80 image that is
      entirely black, at exit 0, with the requested dimensions and a valid
@@ -84,9 +94,11 @@ Seven measured facts shape this file. Each fails SILENTLY if ignored:
      the --out suffix says, so a .png filename proves nothing about the bytes.
      Nothing here relies on that any more -- `resize_and_encode` names its
      format to ImageIO as a uniform type identifier -- but it is why `crop`
-     REFUSES an out_path that names anything but .png: the name is what every
-     reader downstream goes by, and it is still `sips` that reads it in
-     `normalize_to_srgb_png`.
+     REFUSES an out_path that names anything but .png: the name is what a
+     reader downstream goes by. Not `normalize_to_srgb_png` any more, which
+     reads a crop through ImageIO and goes by the bytes; `upscale` is the
+     one that still goes by the name, because upscayl-bin takes jpg, png and
+     webp and nothing here can make it look inside first.
 
 An eighth fact, which is about `sips` and is NOT one of the seven above
 because nothing in this module depends on it any more:
@@ -152,7 +164,6 @@ from . import _cg
 from ._cg import ImagingError                              # noqa: F401
 
 SIPS = "/usr/bin/sips"
-SRGB_PROFILE = "/System/Library/ColorSync/Profiles/sRGB Profile.icc"
 
 
 def _tail(stream) -> str:
@@ -202,6 +213,46 @@ def _run(argv, timeout=1800, produces=None):
             f"{tool} exited 0 without writing {produces}: {output}"
         )
     return proc.stdout
+
+
+def _cleared(out_path) -> str:
+    """Remove an earlier run's output; say so if it could not be removed.
+
+    `_run(produces=...)` did this for every write in this module, and none of
+    the three writes runs a subprocess any more. The reason is unchanged: a
+    failure BEFORE anything is written -- an unreadable source above all --
+    would otherwise leave an earlier run's file standing at the path this
+    run was asked to produce, where anything checking for a file reads it as
+    this run's.
+
+    `resize_and_encode` and `normalize_to_srgb_png` call it. `crop` does
+    NOT, and measured, it leaves a stale destination: an 8x8 PNG put at the
+    out_path of a crop whose source cannot be read is still there, all 74
+    bytes of it, after the raise. That is defence in depth rather than a
+    live defect -- both callers in `execute` register the crop intermediate
+    for deletion BEFORE calling, under a per-plan name inside a per-photo
+    workdir, so no stale file of an earlier run can be at that path -- and
+    it is recorded here rather than fixed on the way past, because `crop` is
+    not this task's function.
+
+    It is NOT the unlink-first `_cg._write` argues against. That one is
+    about a destination ImageIO refuses, and ImageIO fails those before
+    touching a file.
+
+    AND IT IS GUARDED. A stale output inside a directory turned read-only
+    raises PermissionError, which is not ImagingError and so breaks the
+    one-exception-type-per-photo contract the executor is built on --
+    measured, `[Errno 13] Permission denied` escaping `resize_and_encode`.
+    Returns the sentence to append to whatever error follows, so the report
+    says the old file survived rather than losing the reason; the empty
+    string means there is nothing to add.
+    """
+    try:
+        Path(out_path).unlink(missing_ok=True)
+        return ""
+    except OSError as exc:
+        return (f"; an earlier file is still there and could not be "
+                f"removed ({exc.strerror})")
 
 
 def _properties(stdout: str) -> dict:
@@ -255,9 +306,40 @@ def normalize_to_srgb_png(source, out_path) -> None:
     spread the upscaler itself was chosen on. The corpus holds 19 Adobe RGB,
     3 ProPhoto RGB and 96 further non-sRGB profiles among 894 files, all JPEG
     or PNG, so a format-based condition would never fire for any of them.
+
+    NO `sips`, and no `--matchTo`. `_cg.normalize_to_srgb_png_file` draws the
+    source into an sRGB bitmap context, which is where every decision about
+    the destination lives and what the divergences below are measured from.
+
+    Four behaviours changed, all measured against the `--matchTo` reference
+    in `tests/test_normalize_differential.py`:
+
+      * A 16-BIT SOURCE COMES BACK 8-BIT, which is what `sips` did here too.
+        This is the one place in the pipeline that narrows depth -- `crop`
+        and `resize_and_encode` keep it -- because the only reader of this
+        file is upscayl-bin, which emits 8-bit PNG.
+      * EVERY COLOUR MODEL CONVERTS, including the indexed and CMYK sources
+        a resample refuses. The destination space is ours, so the source's
+        model is not a constraint here.
+      * THE TWO ITU VIDEO PROFILES DIVERGE, and there this is right and
+        `sips` is not: `ITU-2020.icc` and `ITU-709.icc` carry the BT.709
+        OETF as a parametric rTRC, CoreGraphics follows it and `sips`
+        applies a pure gamma 2.4 instead -- 15 to 18 levels out of 255 on
+        the neutral axis. LittleCMS agrees with CoreGraphics. No corpus file
+        carries either profile.
+      * AN UNREADABLE SOURCE FAILS DIFFERENTLY. It used to be `sips` exiting
+        0 with `not a valid file` on stderr, or exiting 13; it is now an
+        ImagingError out of ImageIO naming the file. Same exception type,
+        same guarantee that no output is left behind -- which is what the
+        clearing below is for, since `_run(produces=...)` no longer runs.
     """
-    _run([SIPS, "--matchTo", SRGB_PROFILE, "-s", "format", "png",
-          str(source), "--out", str(out_path)], produces=out_path)
+    left_behind = _cleared(out_path)
+    try:
+        _cg.normalize_to_srgb_png_file(source, out_path)
+    except ImagingError as exc:
+        if not left_behind:
+            raise
+        raise ImagingError(f"{exc}{left_behind}") from exc
 
 
 def crop(source, rect, out_path) -> None:
@@ -348,26 +430,13 @@ def resize_and_encode(source, out_width: int, out_height: int, fmt: str,
     427.0. `_cg.resize_and_encode_to_file` has all three routes measured.
 
     THE DESTINATION IS CLEARED FIRST, which `_run(produces=...)` used to do
-    and no longer can, because no subprocess runs. It is not the unlink
-    `_cg._write` argues against -- that one is about a destination ImageIO
-    refuses, and ImageIO fails those before touching a file. This one is
-    about a failure BEFORE the write, an unreadable source above all: without
-    it, a raise leaves an earlier run's output standing at the path this run
-    was asked to produce, where anything that checks for a file would read it
-    as this run's.
-
-    AND IT IS GUARDED, WITHOUT LOSING THE REASON. A stale output inside a
-    directory turned read-only raises PermissionError, which is not
-    ImagingError and so breaks the one-exception-type-per-photo contract the
-    executor is built on -- measured, `[Errno 13] Permission denied` escaping
-    this function. That is Task 1's `write_png` bug arriving in a second
-    place and it takes the same answer, including the half a first attempt
-    here dropped: a bare `except OSError: pass` left the caller with
-    `could not create a heic destination for <path>` and no mention of the
-    permission or of the earlier file still standing at that path. So the
-    failure is carried and appended, exactly as `_cg._write` does it -- best
-    effort on the removal, one exception type out, and the message says the
-    old file survived.
+    and no longer can, because no subprocess runs. `_cleared` has the whole
+    argument, including why the removal is guarded and why the guard carries
+    its reason forward instead of swallowing it; `normalize_to_srgb_png`
+    reached the same place in Task 6 and calls the same helper. A bare
+    `except OSError: pass` here once left the caller with `could not create a
+    heic destination for <path>` and no mention of the permission or of the
+    earlier file still standing at that path.
 
     Five behaviours changed, all measured:
 
@@ -405,12 +474,7 @@ def resize_and_encode(source, out_width: int, out_height: int, fmt: str,
         `tests/test_encode_differential.py` pins all of it.
     """
     out_path = Path(out_path)
-    try:
-        out_path.unlink(missing_ok=True)
-        left_behind = ""
-    except OSError as exc:
-        left_behind = (f"; an earlier file is still there and could not be "
-                       f"removed ({exc.strerror})")
+    left_behind = _cleared(out_path)
     try:
         _cg.resize_and_encode_to_file(source, out_width, out_height, fmt,
                                       quality, out_path, resize)
