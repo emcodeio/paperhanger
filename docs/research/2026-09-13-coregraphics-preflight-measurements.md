@@ -1296,7 +1296,13 @@ and NULL.
 ## Incidental findings
 
 **Every corpus file is 8-bit.** `depths: {8: 894}` across all 894. The design's eighth
-`sips` defect, the 16-bit downconversion in the pad path, stays latent as §2 says.
+`sips` defect, the 16-bit downconversion, stays latent as §2 says.
+
+> *Corrected during Task 3.* This line used to say "in the pad path", following the
+> design. It is not the pad's: measured on a 16-bit 200x200 PNG, `sips` returns 8 bits
+> from the direct crop, the crop at 0,0, the pad alone, the pad-then-crop pair and a
+> plain resample, and only a format convert keeps 16. The defect is Apple's rather than
+> ours, and it is on every path that touches pixels.
 
 **`sips -g orientation` cannot be trusted** to report an orientation tag that is present.
 See §1.

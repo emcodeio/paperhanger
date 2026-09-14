@@ -21,17 +21,26 @@ regression:
     format convert with no pixel operation keeps 16. So the pad was not the
     cause, the defect was never ours, and the pin below names `sips` rather
     than the workaround.
-  * A BASELINE JPEG OF A MEGAPIXEL OR MORE. This one was not predicted, and it
-    is not about cropping at all -- it is about DECODING. ImageIO decodes a
-    REGION of such a file differently from the whole frame, and `sips` shows
-    it as plainly as we do: a `sips` crop that removes nothing comes back
-    different from a plain `sips -s format png` of the same file. Both
-    implementations depart from the whole-frame decode, by comparable
+  * A BASELINE JPEG OF MORE THAN 1,000,000 PIXELS. This one was not
+    predicted, and it is not about cropping at all -- it is about DECODING.
+    ImageIO decodes a REGION of such a file differently from the whole frame,
+    and `sips` shows it as plainly as we do: `sips` cropping 400x300 at
+    (40, 30) out of acrylic_7049.JPG differs from a plain `sips -s format
+    png` of the same file in 212,413 of 360,000 samples, mean absolute error
+    1.0592 out of 255, with no CoreGraphics anywhere in the measurement. The
+    rect has to be strictly smaller than the frame -- a full-frame
+    `--cropOffset 0 0` is byte-identical to a plain decode.
+    Both implementations depart from the whole-frame decode, by comparable
     margins and not in the same direction. Measured on four corpus
     photographs at a 400x300 region, against each tool's own full decode:
     `sips` mean absolute error 1.038 / 0.314 / 1.383 / 0.351 out of 255,
     ours 0.934 / 0.332 / 1.256 / 0.417. Neither is the better decode; they
     are two region decodes of the same bytes.
+
+    So BYTE-IDENTITY WAS NEVER REACHABLE on these files, and the design's
+    bar could not have been met by a better binding. The reference is itself
+    a region decode, so an implementation that matched the frame decode
+    would sit FURTHER from `sips` than this one does.
 
     The corpus gate below measures it per file rather than tolerating it.
     Where the two sides differ, the control hands BOTH implementations the
@@ -72,10 +81,15 @@ PINNED = {
         "preserves the depth.",
 }
 
-# The threshold measured for fact 8, in pixels. Below it, `sips --cropOffset`
-# and `sips -s format png` agree about a baseline JPEG; at it and above, they
-# do not. 1152x864 (995,328 px) agrees; 1024x1024 (1,048,576 px) does not.
-MEGAPIXEL = 1024 * 1024
+# The threshold measured for fact 8, in pixels. At it and below, a region
+# decode of a baseline JPEG equals the whole-frame decode; above it, it does
+# not. Both implementations turn at the same place.
+#
+# A ROUND DECIMAL NUMBER, not a power of two, which is not the guess anyone
+# makes -- this constant said 1024 * 1024 until the space between 10**6 and
+# 2**20 was sampled. 1000x1000 and 1250x800 are both exactly 1,000,000 and
+# both agree; 1250x801 (1,001,250) and 1000x1002 (1,002,000) do not.
+ONE_MILLION_PIXELS = 1_000_000
 
 
 # ---------------------------------------------------------------------------
@@ -313,26 +327,54 @@ def _sips_crop_to(jpeg, x, y, w, h, out_path):
 
 
 @pytest.mark.parametrize("width,height,expect_agreement", [
-    (1152, 864, True),      #   995,328 px -- under the line
-    (1024, 1024, False),    # 1,048,576 px -- on it
+    (1000, 1000, True),     # 1,000,000 px exactly -- at the line
+    (1250, 801, False),     # 1,001,250 px -- 1,250 px past it
 ])
 @pytest.mark.parametrize("who", ["sips", "CoreGraphics"])
 def test_a_region_decode_of_a_big_baseline_jpeg_is_not_the_frame_decode(
         tmp_path, photo_fixture, who, width, height, expect_agreement):
     """ImageIO decodes a REGION of a baseline JPEG differently from the whole
-    frame, once the file reaches a megapixel. Both implementations show it.
+    frame, once the file passes a million pixels. Both sides show it.
 
     This is the difference that cost the corpus gate its clean run, and it is
     not about cropping: the region really is the one that was asked for, and
     only the last bit or two of each sample moves. It is parametrised over
-    both sides on purpose -- pinning it as a `sips` defect alone would be
-    wrong, and would leave the reader thinking the replacement escaped it.
+    both implementations on purpose -- pinning it as a `sips` defect alone
+    would be wrong, and would leave the reader thinking the replacement
+    escaped it.
 
-    Measured at 1024x1024 on this noise fixture, over the 200x150 region:
-    `sips` 70,202 of 90,000 samples differ from its own full decode,
-    CoreGraphics 86,167. At 1152x864, neither differs at all. Noise is the
-    worst case by a wide margin; on real corpus photographs the same
-    comparison is a mean absolute error under 1.4 out of 255 for both.
+    The two sizes bracket the threshold within 1,250 pixels of area, and that
+    tightness is the point: the constant read 1024 * 1024 until the space
+    between 10**6 and 2**20 was sampled, and every measurement taken before
+    that reproduced digit for digit while naming the wrong number. Measured
+    over the 200x150 region, samples differing of 90,000:
+
+        1000x1000  1,000,000 px   sips 0,      CoreGraphics 0
+        1250x801   1,001,250 px   sips 39,868, CoreGraphics 86,423
+
+    Noise is the worst case by a wide margin; on real corpus photographs the
+    same comparison is a mean absolute error under 1.4 out of 255 for both.
+
+    DO NOT DELETE THE `expect_agreement=True` CASE AS REDUNDANT COVERAGE.
+    It is the backstop under the corpus gate, and it is the only test in this
+    suite that makes an ABSOLUTE claim about a crop below the threshold --
+    everything else about JPEG crops is relative, comparing the two
+    implementations to each other.
+
+    That matters because the corpus gate's control is conditional by
+    construction: when the two sides differ it re-runs them against a decoded
+    PNG, so a crop bug that fires ONLY on the un-decoded source is invisible
+    to it. Measured, not imagined -- a one-row origin error keyed on
+    `Path(source).suffix != ".png"` was injected against this suite:
+
+        uv run pytest -m corpus -k crop     1 passed  (5m31s)  -- GREEN
+        uv run pytest                       1 failed of 647    -- RED
+
+    and the single failure is this test at `expect_agreement=True`. Nothing
+    else in 647 tests notices. It catches what the control cannot because
+    here the two implementations must agree with a frame decode they cannot
+    both be wrong about, on a source that is not already a PNG. Remove it and
+    that hole reopens silently.
     """
     jpeg = _baseline_jpeg(tmp_path, photo_fixture, width, height)
     whole = _decode_to_png(jpeg, tmp_path / "whole.png")
@@ -351,15 +393,19 @@ def test_a_region_decode_of_a_big_baseline_jpeg_is_not_the_frame_decode(
 
     if expect_agreement:
         assert count == 0, (
-            f"{width}x{height} is {width * height} px, under {MEGAPIXEL}, "
-            f"where {who} was measured to agree with the frame decode -- "
-            f"{count} samples differ, largest {largest}")
+            f"{width}x{height} is {width * height:,} px, not over "
+            f"{ONE_MILLION_PIXELS:,}, where {who} was measured to agree with "
+            f"the frame decode -- {count} samples differ, largest {largest}. "
+            f"This is the backstop under the corpus gate, whose control "
+            f"cannot see a crop bug that fires only on an un-decoded source; "
+            f"read it as a crop failure before reading it as a threshold "
+            f"that moved")
     else:
         assert count > 0, (
-            f"{width}x{height} is {width * height} px, at or over "
-            f"{MEGAPIXEL}, where {who} was measured to disagree with the "
-            f"frame decode. It now agrees, so fact 8 has changed and the "
-            f"corpus gate's control is accounting for something else")
+            f"{width}x{height} is {width * height:,} px, over "
+            f"{ONE_MILLION_PIXELS:,}, where {who} was measured to disagree "
+            f"with the frame decode. It now agrees, so fact 8 has changed and "
+            f"the corpus gate's control is accounting for something else")
 
 
 def test_the_two_crops_agree_once_the_decode_is_out_of_the_way(

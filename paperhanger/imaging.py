@@ -81,22 +81,39 @@ An eighth fact, which is about `sips` and is NOT one of the seven above
 because nothing in this module depends on it any more:
 
   8. A REGION DECODE OF A BASELINE JPEG IS NOT THE WHOLE-FRAME DECODE, once
-     the file reaches 1024*1024 == 1,048,576 pixels. This is ImageIO, not
-     `sips`: `sips --cropOffset` and a plain `sips -s format png` disagree
-     about the same file, and so do `_cg.crop_to_file` and `_cg.load` --
-     both, by comparable margins, and not in the same direction. Measured on
-     a synthetic 1024x1024 noise JPEG over a 200x150 region: `sips` differs
-     from its own frame decode in 70,202 of 90,000 samples, CoreGraphics in
-     86,167; at 1152x864 (995,328 px) neither differs at all. Noise is the
-     worst case. On four corpus photographs at a 400x300 region the mean
-     absolute error against each tool's own frame decode is 1.038 / 0.314 /
-     1.383 / 0.351 out of 255 for `sips` and 0.934 / 0.332 / 1.256 / 0.417
-     for CoreGraphics. Progressive JPEGs show none of it.
+     the file passes 1,000,000 pixels. This is ImageIO, not `sips`: `sips
+     --cropOffset` and a plain `sips -s format png` disagree about the same
+     file, and so do `_cg.crop_to_file` and `_cg.load` -- both, by comparable
+     margins, and not in the same direction.
+     THE THRESHOLD IS A ROUND DECIMAL NUMBER, NOT A POWER OF TWO, which is
+     not the guess anyone makes. Measured over a 200x150 region of synthetic
+     noise JPEGs, as (sips, CoreGraphics) samples differing of 90,000:
+
+       1000x1000  1,000,000 px   (0, 0)          1000x999    999,000 px  (0, 0)
+       1250x800   1,000,000 px   (0, 0)          1024x976    999,424 px  (0, 0)
+       1250x801   1,001,250 px   (39868, 86423)  1152x864    995,328 px  (0, 0)
+       1000x1002  1,002,000 px   (70166, 86252)
+       1024x1024  1,048,576 px   (70202, 86167)
+
+     Exactly a million agrees; a million and change does not. Noise is the
+     worst case by a wide margin. On four corpus photographs at a 400x300
+     region the mean absolute error against each tool's own frame decode is
+     1.038 / 0.314 / 1.383 / 0.351 out of 255 for `sips` and 0.934 / 0.332 /
+     1.256 / 0.417 for CoreGraphics. Progressive JPEGs show none of it, and
+     nor does the corpus's single-component greyscale JPEG at the rect the
+     gate uses.
+     A crop that removes NOTHING is not enough to provoke it: a full-frame
+     `--cropOffset 0 0` is byte-identical to a plain decode. The rect has to
+     be strictly smaller. Measured on acrylic_7049.JPG (1284x2778), 400x300
+     at (40, 30): 212,413 of 360,000 samples differ, mean absolute error
+     1.0592.
      So the old and new crops differ on most real JPEG sources, and neither
-     is the better decode. It cost the crop differential its clean run over
-     the corpus sample; test_crop_differential.py accounts for it per file
-     -- given the same DECODED pixels the two implementations agree exactly
-     -- rather than assuming it.
+     is the better decode. Byte-identity was never reachable here, because
+     the `sips` reference is itself a region decode -- matching the frame
+     decode would move us FURTHER from it. It cost the crop differential its
+     clean run over the corpus sample; test_crop_differential.py accounts for
+     it per file -- given the same DECODED pixels the two implementations
+     agree exactly -- rather than assuming it.
 """
 
 import subprocess

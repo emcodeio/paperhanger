@@ -25,7 +25,7 @@ All figures below were measured on macOS 26.6.2 during design. Nothing here is i
 | encode JPEG at quality 80 and 90 | **byte-identical** |
 | encode HEIC at quality 80, 85 and 90 | **byte-identical** |
 | Adobe RGB and sRGB profiles | preserved; the `sips` pad path converts |
-| 16-bit sources | preserved; the `sips` pad path drops them to 8-bit |
+| 16-bit sources | preserved; `sips` drops them to 8-bit on every path that touches pixels |
 | 96 Mpx frame, 8000x12000 to 8000x4000 | 0.85 s against 1.35 s |
 | 24 Mpx noisy frame, 6000x4000 to 6000x1333 | 1.68 s against 3.06 s |
 
@@ -33,7 +33,9 @@ Two consequences worth stating plainly.
 
 **The quality defaults transfer unchanged.** `sips` is built on ImageIO, and quality 80 there is `kCGImageDestinationLossyCompressionQuality` 0.80 here — byte-for-byte, on both JPEG and HEIC. The reasoning behind the current defaults survives intact, including the finding that HEIC 85 produces a file byte-identical to 80, which reproduces through ImageIO as well. ImageIO can write `public.heic`, `public.avif`, `public.jpeg` and `public.png`, so every format the tool offers is available.
 
-**The current pad path has an eighth silent defect, and it is ours.** It downconverts 16-bit sources to 8-bit. Every PNG and TIFF in the corpus is 8-bit, so nothing is affected today; it is latent rather than active. It belongs on the list regardless, because unlike the other seven it was introduced by our workaround rather than by Apple.
+**`sips` has an eighth silent defect: it downconverts 16-bit sources to 8-bit.** Every PNG and TIFF in the corpus is 8-bit, so nothing is affected today; it is latent rather than active.
+
+*Corrected during Task 3.* This paragraph used to say the defect was the pad path's, and therefore ours rather than Apple's. Measured on a 16-bit 200x200 PNG, `sips` returns 8 bits from the direct crop, from the crop at 0,0, from the pad alone, from the pad-then-crop pair, and from a plain resample; only a format convert with no pixel operation keeps 16. So it belongs with the other seven: Apple's, on every path that touches pixels, and removing the workaround does not remove it. It was found by mutation — switching the retained reference to its direct branch left the depth assertion green, which it should not have done if the pad were the cause.
 
 ### 2.1 Alternatives ruled out
 
