@@ -27,10 +27,25 @@ what such a skip costs against `sips`:
 
 and, structurally, a greyscale source stays colour type 0 where `sips`
 writes type 2, an indexed source stays type 3, and an alpha-bearing source
-keeps a premultiplied round trip it should not have. An UNTAGGED source
-cannot see any of it -- the skip agrees with `sips` byte for byte there --
-so every test below that would catch a skip uses a tagged source, and the
-corpus sample carries one Adobe RGB and one ProPhoto RGB file.
+keeps a premultiplied round trip it should not have. Those structural rows
+are UNTAGGED fixtures and they catch the skip anyway, because what they
+have to convert is the colour model rather than the colour space.
+
+So a skip is caught by a tagged source OR by a structural difference, and
+exactly three fixture shapes catch it neither way: a plain untagged 8-bit
+RGB image, the same image interlaced, and -- for a different reason -- a
+CMYK JPEG, where the PNG encoder converts to sRGB by itself. The skip is
+byte-identical to `sips` on those three. No assertion below that a skip
+must fail rests on one of them, and
+`test_an_untagged_source_cannot_catch_a_skip` states the blindness outright
+rather than leaving it to be rediscovered.
+
+The same two routes show up in the corpus sample, where 13 of the 27 images
+catch the skip: `moss_with_pine_needles_5324.jpg` (ProPhoto RGB) by colour,
+at 71,296,904 of 72,000,000 samples and a largest difference of 132, and
+`katana_with_tag_2369.jpg` structurally, colour type 0 against `sips`'
+type 2. The other 14 are sRGB or untagged photographs, which is the
+population fact behind the fixture choice rather than a fixture artefact.
 
 A SECOND SKIP IS REFUSED FOR THE SAME REASON and is more tempting, because
 it would fire on 714 of the 895 corpus entries: "the source is already
@@ -444,12 +459,26 @@ def test_the_itu_profiles_follow_the_curve_in_the_profile(tmp_path, profile):
     """Where this diverges from `sips`, with an instrument that is neither.
 
     Both profiles carry the BT.709 OETF as a parametric type-3 rTRC.
-    CoreGraphics follows it; `sips` applies a pure gamma 2.4 instead, which
-    on the neutral axis is a difference of 15 to 18 levels out of 255 --
-    mean absolute error 20.8 over a noise image for ITU-2020 and 16.7 for
-    ITU-709. ImageMagick's LittleCMS agrees with CoreGraphics to the byte,
-    and the arithmetic below agrees with both, so `sips` is the odd one out
-    and byte-identity with it is not something to reach for here.
+    CoreGraphics follows it; `sips` applies a pure gamma 2.4 instead. The
+    gap is not a constant and is largest in the shadows -- measured at the
+    four levels below, both profiles alike, as (device value in the tagged
+    file, what this writes, what `sips` writes):
+
+      28 -> 44 against 15      74 -> 89 against 64
+      135 -> 146 against 128   203 -> 208 against 200
+
+    which is 29, 25, 18 and 8 levels out of 255. Over a 200x150 noise image
+    the mean absolute difference between the two outputs is 20.83 for
+    ITU-2020 and 16.73 for ITU-709. ImageMagick's LittleCMS agrees with
+    CoreGraphics to the byte, and the arithmetic below agrees with both, so
+    `sips` is the odd one out and byte-identity with it is not something to
+    reach for here.
+
+    Read the right-hand column of those four rows against the levels the
+    loop asks for -- 16, 64, 128, 200 -- and `sips` is handing back the
+    numbers the file was built from. Its two legs are mutual inverses, which
+    is exactly why a round trip cannot arbitrate this and the profile's own
+    parameters have to.
 
     No corpus file carries either profile: this is latent, and it is pinned
     so that a future attempt to close the ITU gap against `sips` has to

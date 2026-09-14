@@ -324,9 +324,12 @@ def normalize_to_srgb_png(source, out_path) -> None:
       * THE TWO ITU VIDEO PROFILES DIVERGE, and there this is right and
         `sips` is not: `ITU-2020.icc` and `ITU-709.icc` carry the BT.709
         OETF as a parametric rTRC, CoreGraphics follows it and `sips`
-        applies a pure gamma 2.4 instead -- 15 to 18 levels out of 255 on
-        the neutral axis. LittleCMS agrees with CoreGraphics. No corpus file
-        carries either profile.
+        applies a pure gamma 2.4 instead. On the neutral axis that is 29,
+        25, 18 and 8 levels out of 255 at device 28, 74, 135 and 203 --
+        largest in the shadows, not a constant -- and a mean absolute
+        difference of 20.83 (ITU-2020) and 16.73 (ITU-709) over a noise
+        image. LittleCMS agrees with CoreGraphics. No corpus file carries
+        either profile.
       * AN UNREADABLE SOURCE FAILS DIFFERENTLY. It used to be `sips` exiting
         0 with `not a valid file` on stderr, or exiting 13; it is now an
         ImagingError out of ImageIO naming the file. Same exception type,
