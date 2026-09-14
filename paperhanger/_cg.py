@@ -24,15 +24,22 @@ wrong. Measured on this machine, on a 150x200 gradient reduced to 75x100:
 
   source model   alpha info          result
   Monochrome     kCGImageAlphaNone   correct, byte-identical to sips
-  Monochrome     NoneSkipLast        context created, output ALL BLACK
-  Mono + alpha   kCGImageAlphaNone   accepted; composited onto black
+  Monochrome     NoneSkipLast        accepted; output ALL BLACK
+  Mono + alpha   NoneSkipLast        accepted; composited, NOT black
+  Mono + alpha   kCGImageAlphaNone   accepted; composited, channel gone
   Mono + alpha   PremultipliedLast   alpha preserved
   RGB            kCGImageAlphaNone   NULL context
   RGB            NoneSkipLast        correct
   RGB + alpha    NoneSkipLast        opaque; source composited onto black
   RGB + alpha    PremultipliedLast   alpha preserved
   Indexed        every combination   NULL context
-  32-bit float   every combination   NULL context, at 8, 16 and 32 bpc
+  32-bit float   every INTEGER one   NULL context, at 8, 16 and 32 bpc
+  32-bit float   32 bpc + FloatComponents   accepted, both alpha values
+
+"All black" is the OPAQUE grey case only. The same context given a
+grey+alpha source returns a composited picture instead -- 0, 33, 66, 98
+where the source says roughly 0, 64, 128, 191 at alpha 128 -- which is
+wrong in a way that looks far more plausible than black does.
 
 So a single hardcoded alpha value is wrong whichever one is picked: the
 plan's `kCGImageAlphaNoneSkipLast` blackens the ten grayscale wallpapers
@@ -308,15 +315,22 @@ def bitmap_format(image, path):
     Three rules:
 
       * MONOCHROME takes PremultipliedLast when the source has an alpha
-        channel and kCGImageAlphaNone when it does not. NoneSkipLast is
-        accepted by CGBitmapContextCreate and renders the whole frame
-        black on any scaling draw. AlphaNone on a grey+ALPHA source is
-        accepted too, and composites it onto the context's black ground:
-        measured on an 8-bit colour-type-4 PNG, values 0, 6, 12, 18 at
-        alpha 128 came back 0, 3, 6, 9 with the channel gone. Ten of the
-        894 corpus photographs are monochrome and none of them carries
-        alpha, which is why this branch has to be right by construction
-        rather than by the corpus happening not to exercise it.
+        channel and kCGImageAlphaNone when it does not. Both of the other
+        pairings are ACCEPTED by CGBitmapContextCreate and both are
+        wrong, in two different ways that depend on the source:
+
+          NoneSkipLast, OPAQUE grey source -- the whole frame comes back
+          black. Measured, a 150x200 gradient reduced to 75x100: column 0
+          all zeros against sips' 0, 26, 52, 77.
+          NoneSkipLast, grey+ALPHA source -- NOT black, composited.
+          Same reduction: 0, 33, 66, 98 where the source says roughly
+          0, 64, 128, 191 at alpha 128.
+          AlphaNone, grey+ALPHA source -- composited too, channel gone:
+          values 0, 6, 12, 18 at alpha 128 came back 0, 3, 6, 9.
+
+        Ten of the 894 corpus photographs are monochrome and none of them
+        carries alpha, which is why this branch has to be right by
+        construction rather than by the corpus happening not to reach it.
       * RGB takes PremultipliedLast when the source has an alpha channel
         and NoneSkipLast when it does not. NoneSkipLast on an
         alpha-bearing source composites it onto the context's black ground
@@ -334,11 +348,15 @@ def bitmap_format(image, path):
     design already pins for crop. No corpus file is 16-bit, so that part is
     latent rather than live.
 
-    Deeper than 16 is refused by name. A 32-bit float source decodes into a
-    colour space that accepts NO integer context -- 8, 16 and 32 bits per
-    component all return NULL -- so the alternative is a failure whose
-    message says only that a context could not be made, rather than one
-    that says the depth is why.
+    Deeper than 16 is refused by name. A 32-bit float source decodes into
+    a colour space that accepts no INTEGER context at all -- 8, 16 and 32
+    bits per component all return NULL -- so the alternative is a failure
+    whose message says only that a context could not be made, rather than
+    one that says the depth is why. It is not that no context exists: at
+    32 bits with kCGBitmapFloatComponents the same space accepts both
+    PremultipliedLast and NoneSkipLast. Supporting that is a float
+    pipeline end to end, which no corpus file asks for, so this refuses
+    rather than pretending the depth away.
     """
     space = _checked(_CG_LIB.CGImageGetColorSpace(image),
                      "read the colour space", path)   # a Get: not ours
@@ -391,21 +409,35 @@ def _png_destination(scope, out_path):
 def write_png(scope, image, out_path, options=None):
     """Encode `image` as PNG, or raise.
 
-    NO UNLINK-FIRST here, unlike `imaging._run`'s `produces=`. It was in an
-    earlier draft, on the reasoning that a stale file must not stand in for
-    output this run never produced, and measuring it found it changed no
-    observable outcome: ImageIO truncates an existing destination, and
-    replaces a read-only one, whether or not the file is removed first.
-    Where the write fails it fails at CGImageDestinationCreateWithURL, and
-    a stale file survives identically either way -- with the unlink in
-    place the message was WORSE, since the unlink's own errno replaced the
-    more specific "could not create a PNG destination for ...".
+    NO UNLINK-FIRST, unlike `imaging._run`'s `produces=`, but an unlink ON
+    FAILURE, which is not the same thing and took two rounds to separate.
 
-    Finalize is checked because ImageIO reports a refused write there and
-    nowhere else: discarding the return value is a silent success with no
-    file behind it.
+    Removing the destination BEFORE the write buys nothing. ImageIO
+    truncates an existing destination and replaces a read-only one, and
+    every bad-destination route measured -- a missing directory, a parent
+    that is a file, a destination that is a directory, an unwritable
+    directory -- fails at CGImageDestinationCreateWithURL, before any file
+    is touched.
+
+    Removing it AFTER a refused write is a different case and a real one.
+    ImageIO writes the bytes at Finalize, so a Finalize that returns false
+    leaves whatever was already at the destination exactly where it was:
+    measured, a 62-byte stale file still present and still stale after the
+    raise. That is an earlier run's output standing where this run's
+    result should be, which is the failure `produces=` exists to prevent.
+
+    The recovery unlink can itself fail, and in the very case that
+    produced the false Finalize: a directory turned read-only mid-write
+    refuses the delete too. Best effort, then -- the ImagingError is the
+    report either way, and it says so when the old file is still there.
     """
     dest = _png_destination(scope, out_path)
     _IO_LIB.CGImageDestinationAddImage(dest, image, options)
     if not _IO_LIB.CGImageDestinationFinalize(dest):
-        raise ImagingError(f"could not write {out_path}")
+        try:
+            Path(out_path).unlink(missing_ok=True)
+            left_behind = ""
+        except OSError as exc:
+            left_behind = (f"; an earlier file is still there and could not "
+                           f"be removed ({exc.strerror})")
+        raise ImagingError(f"could not write {out_path}{left_behind}")

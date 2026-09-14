@@ -539,6 +539,11 @@ def test_write_png_refuses_an_unwritable_destination(tmp_path, png_fixture,
         if kind == "unwritable directory":
             out.parent.chmod(0o700)
     assert "out.png" in str(exc.value) or str(out) in str(exc.value)
+    assert "create a PNG destination" in str(exc.value), (
+        "the docstring's claim, asserted: all four of these fail at "
+        "CGImageDestinationCreateWithURL rather than at Finalize, which is "
+        "why the Finalize branch needs a test of its own"
+    )
 
 
 def test_write_png_raises_when_finalize_refuses(tmp_path, png_fixture,
@@ -560,6 +565,66 @@ def test_write_png_raises_when_finalize_refuses(tmp_path, png_fixture,
         with pytest.raises(ImagingError) as exc:
             _cg.write_png(scope, _cg.load(scope, src), out)
     assert str(out) in str(exc.value)
+
+
+def test_a_refused_write_does_not_leave_the_previous_file_standing(
+        tmp_path, png_fixture, monkeypatch):
+    """The case the unlink-first argument got backwards.
+
+    ImageIO writes the bytes at Finalize, so removing the destination
+    BEFORE the write buys nothing -- every bad-destination route fails at
+    create, before any file is touched. Removing it AFTER a refused write
+    is the case that matters: without it the stale file survives the raise,
+    measured at 62 bytes still present and still stale, which is an earlier
+    run's output standing where this run's result should be.
+    """
+    src = png_fixture(tmp_path / "in.png", 48, 32)
+    out = tmp_path / "out.png"
+    png_fixture(out, 8, 8)
+    stale = out.read_bytes()
+
+    monkeypatch.setattr(_cg._IO_LIB, "CGImageDestinationFinalize",
+                        lambda dest: False)
+    with _cg.Scope() as scope:
+        with pytest.raises(ImagingError):
+            _cg.write_png(scope, _cg.load(scope, src), out)
+
+    assert not out.exists(), (
+        f"the write was refused and {out.name} is still there with "
+        f"{len(stale)} bytes of the previous run's output in it"
+    )
+
+
+def test_a_refused_write_says_so_when_it_cannot_clear_the_destination(
+        tmp_path, png_fixture, monkeypatch):
+    """The recovery unlink can fail in the case that caused the failure.
+
+    A directory turned read-only mid-write is exactly what makes Finalize
+    return false, and it refuses the delete too. Best effort, then -- but
+    the error has to say the old file is still there rather than implying
+    a clean destination.
+    """
+    src = png_fixture(tmp_path / "in.png", 48, 32)
+    parent = tmp_path / "dir"
+    parent.mkdir()
+    out = parent / "out.png"
+    png_fixture(out, 8, 8)
+
+    def refuse_and_lock(dest):
+        parent.chmod(0o500)          # what made the write fail, mid-write
+        return False
+
+    monkeypatch.setattr(_cg._IO_LIB, "CGImageDestinationFinalize",
+                        refuse_and_lock)
+    try:
+        with _cg.Scope() as scope:
+            with pytest.raises(ImagingError) as exc:
+                _cg.write_png(scope, _cg.load(scope, src), out)
+    finally:
+        parent.chmod(0o700)
+
+    assert out.exists(), "the premise: the unlink could not remove it"
+    assert "still there" in str(exc.value)
 
 
 def test_write_png_replaces_whatever_was_at_the_destination(tmp_path,
