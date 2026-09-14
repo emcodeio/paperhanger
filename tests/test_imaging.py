@@ -227,10 +227,13 @@ def _crop_lands_on_the_marker(tmp_path, source_w, source_h, rect, tag):
 def test_every_real_geometry_slice_crops_the_region_it_asked_for(tmp_path, slicer):
     """Fact 6, against the actual producer of rects rather than rects invented
     to suit the code. Two of the three horizontal slices and one of the three
-    vertical ones sit on a --cropOffset shape sips silently ignores, so before
-    the padding workaround this failed for slices 0 and 2 horizontally and
-    slice 0 vertically -- each returning a plausible image of the right size
-    from the wrong part of the picture."""
+    vertical ones sit on a --cropOffset shape sips silently ignores, so with a
+    raw sips crop this fails for slices 0 and 2 horizontally and slice 0
+    vertically -- each returning a plausible image of the right size from the
+    wrong part of the picture. It passed under the pad and it passes under
+    CGImageCreateWithImageInRect, which is the point of testing the rects the
+    geometry really produces rather than the ones an implementation finds
+    convenient."""
     width, height = 1600, 1200
     for index, rect in enumerate(getattr(geometry, slicer)(width, height)):
         assert _crop_lands_on_the_marker(tmp_path, width, height, rect,
@@ -243,11 +246,12 @@ def test_every_real_geometry_slice_crops_the_region_it_asked_for(tmp_path, slice
     Rect(x=0, y=120, width=300, height=80),    # flush bottom -> no crop at all
     Rect(x=0, y=120, width=400, height=80),    # flush bottom, full width
     Rect(x=0, y=40, width=300, height=80),     # the shape sips gets right
-    Rect(x=1, y=120, width=300, height=80),    # x=1 rescues the flush case
+    Rect(x=1, y=120, width=300, height=80),    # x=1 rescued the flush case
 ])
 def test_crop_is_region_exact_on_and_off_the_bad_offsets(tmp_path, rect):
-    """The boundary either side of fact 6, so the workaround is shown to fix
-    the broken shapes without disturbing the ones that already worked."""
+    """The boundary either side of fact 6, kept because the boundary is what a
+    replacement has to clear: the three shapes sips gets wrong must now be
+    right, and the two it already got right must not have moved."""
     assert _crop_lands_on_the_marker(tmp_path, 400, 200, rect, "b")
 
 
