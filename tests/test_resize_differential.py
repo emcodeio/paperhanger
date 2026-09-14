@@ -28,7 +28,10 @@ not a no-op:
     equals `sips`' on 63 of 63 and the draw's on 11 of 63;
   * a 400x300 RGBA source at alpha 128 comes back from the draw differing
     from `sips` on 120,000 of 480,000 samples, every one by 1, because the
-    destination bitmap is premultiplied and the encode has to undo it;
+    destination bitmap is premultiplied and the encode has to undo it --
+    and a colour-key `tRNS` source differs on the same count at a largest
+    difference of **255**, because the draw composites the keyed pixels onto
+    the context's black ground;
   * peak RSS on a 7680x5120 frame: `sips` 332.1 MiB, the draw 499.2, the
     skip 351.0.
 
@@ -248,48 +251,136 @@ def test_every_colour_shape_matches_sips(tmp_path, out_width, out_height,
     assert not differences, "\n".join(differences)
 
 
-@pytest.mark.parametrize("name,writer,differing", [
-    ("rgba", pixels.write_rgba_png, 120000),
-    ("grey+alpha", pixels.write_grey_alpha_png, 60400),
-])
+def _sample_difference(one, two):
+    """(samples differing, largest difference) between two PNG files.
+
+    Computed from the decoded samples rather than read out of the
+    differential harness's sentence, so the numbers below are a property of
+    the two files and not of `_describe_pixels`' wording. Raises if the two
+    files are not the same shape, because a count over mismatched layouts
+    would be a number that means nothing.
+    """
+    width, height, depth, colour, first = pixels.read_png_samples(one)
+    other_shape = pixels.read_png_samples(two)
+    if (width, height, depth, colour) != other_shape[:4]:
+        raise AssertionError(
+            f"{one.name} is {width}x{height} depth {depth} type {colour}, "
+            f"{two.name} is {other_shape[0]}x{other_shape[1]} depth "
+            f"{other_shape[2]} type {other_shape[3]}")
+    second = other_shape[4]
+    deltas = [abs(a - b) for a, b in zip(first, second) if a != b]
+    return len(deltas), (max(deltas) if deltas else 0)
+
+
+# What a 1:1 draw costs, per source, as (samples differing, largest
+# difference) out of the whole frame. Measured on this machine; each row is
+# a source the corpus could hold and the pipeline would hand to the
+# resampler unchanged.
+DRAW_DAMAGE = [
+    # The premultiply round trip: alpha 128 in, one unit out.
+    ("rgba", pixels.write_rgba_png, 120000, 480000, 1),
+    ("grey+alpha", pixels.write_grey_alpha_png, 60400, 240000, 1),
+    # And the one that is not a rounding error. A `tRNS` colour key is
+    # expanded to alpha on decode, the draw composites the keyed pixels onto
+    # the context's black ground, and magenta comes back black at the same
+    # colour type and dimensions as a correct answer.
+    ("colour-key", pixels.write_colour_key_png, 120000, 480000, 255),
+]
+
+
+@pytest.mark.parametrize("name,writer,differing,total,largest", DRAW_DAMAGE)
 def test_drawing_at_identity_is_what_diverged(tmp_path, monkeypatch, name,
-                                              writer, differing):
+                                              writer, differing, total,
+                                              largest):
     """The measurement the skip rests on, run as a test.
 
     Forces the draw by lying to the identity check -- the target dimensions
     are unchanged, so this is the same 1:1 draw the implementation used to
-    perform -- and requires that it DISAGREE with `sips`. If a future
-    CoreGraphics makes the 1:1 draw exact, this test fails and the skip
-    becomes an optimisation rather than a correction; that is worth being
-    told about, because the docstrings claim otherwise.
+    perform -- and requires that it DISAGREE with `sips`, by the measured
+    amount. If a future CoreGraphics makes the 1:1 draw exact, this fails and
+    the skip becomes an optimisation rather than a correction; that is worth
+    being told about, because the docstrings claim otherwise.
 
-    Alpha-bearing sources only: the draw's damage here is the premultiply
-    round trip, and an opaque source has none.
+    Alpha-bearing sources only, in all three senses the format has: a real
+    alpha channel, a greyscale one, and a colour key. The draw's damage is
+    to the alpha handling, and an opaque source has none.
     """
+    source = writer(tmp_path / f"{name}.png", 400, 300)
+    reference = tmp_path / "sips.png"
+    _sips_resize(source, 400, 300, reference)
+
     monkeypatch.setattr(_cg, "dimensions", lambda image: (-1, -1))
-    source = writer(tmp_path / f"{name.replace('+', '-')}.png", 400, 300)
-    result = compare(_reference(400, 300), _replacement(400, 300), source,
-                     tmp_path)
-    assert result is not None, (
-        "a 1:1 draw agreed with sips on an alpha-bearing source, so the "
-        "skip is no longer correcting anything")
-    assert f"{differing} of" in result, result
+    drawn = tmp_path / "drawn.png"
+    imaging.resize_and_encode(source, 400, 300, "png", None, drawn,
+                              resize=True)
+
+    assert _sample_difference(reference, drawn) == (differing, largest), (
+        f"a 1:1 draw of a {name} source no longer diverges from sips the way "
+        f"every docstring about the skip says it does")
+    assert differing < total, "the row claims the whole frame differs"
 
 
-def test_an_indexed_source_is_refused_when_it_has_to_be_drawn(tmp_path):
-    """The asymmetry the skip introduces, stated rather than discovered.
+def test_the_colour_key_survives_the_pass_through(tmp_path):
+    """The other side of the row above, and the one that matters.
 
-    `CGBitmapContextCreate` returns NULL for an indexed colour space under
-    every alpha setting, so a resample that draws refuses one. A resample
-    that does not draw has no context to build and writes the file -- which
-    the test above measures as byte-identical to `sips`. Both halves are
-    pinned so that neither reads as an accident.
+    The keyed pixels must still be magenta. `compare` already says our output
+    equals `sips`' exactly, but that is an agreement between two tools; this
+    says what they agree ON, so the test still means something if `sips`
+    itself ever starts compositing.
     """
-    source = pixels.write_indexed_png(tmp_path / "idx.png", 400, 300)
+    source = pixels.write_colour_key_png(tmp_path / "keyed.png", 400, 300)
+    assert compare(_reference(400, 300), _replacement(400, 300), source,
+                   tmp_path) is None
+
+    out = tmp_path / "o.png"
+    imaging.resize_and_encode(source, 400, 300, "png", None, out, resize=True)
+    _, _, _, colour, samples = pixels.read_png_samples(out)
+    assert colour == 6, "ImageIO expands a colour key to an alpha channel"
+    assert samples[:4] == [255, 0, 255, 0], (
+        f"the keyed pixel came back {samples[:4]} rather than magenta at "
+        f"alpha 0 -- it was composited")
+
+
+# The two members of "what `bitmap_format` refuses" a fixture can build, as
+# (name, how to build one, what the refusal must say). Lab and >16bpc are the
+# other members; nothing here can write either.
+REFUSED_SOURCES = [
+    ("indexed",
+     lambda room, cmyk: pixels.write_indexed_png(room / "idx.png", 400, 300),
+     "indexed"),
+    ("CMYK", lambda room, cmyk: cmyk(room / "cmyk.jpg", 400, 300), "CMYK"),
+]
+
+
+@pytest.mark.parametrize("name,build,refused", REFUSED_SOURCES)
+def test_a_source_no_context_accepts_is_refused_when_it_must_be_drawn(
+        tmp_path, cmyk_fixture, name, build, refused):
+    """The asymmetry the skip introduces, as a class rather than one case.
+
+    `bitmap_format` refuses indexed, CMYK, Lab and anything above 16 bits
+    per component, and the identity path never asks it -- so those sources
+    resize at 1:1 and raise at every other shape. CMYK is the member that
+    could turn up in a real folder: four-channel JPEGs come out of print
+    workflows, and `sips` resampled one without complaint.
+
+    Both halves are pinned, here and in the identity comparison, so that
+    neither reads as an accident.
+    """
+    source = build(tmp_path, cmyk_fixture)
     with pytest.raises(imaging.ImagingError) as caught:
         imaging.resize_and_encode(source, 200, 150, "png", None,
                                   tmp_path / "o.png", resize=True)
-    assert "indexed" in str(caught.value)
+    assert refused in str(caught.value)
+
+
+@pytest.mark.parametrize("name,build,refused", REFUSED_SOURCES)
+def test_the_same_source_resizes_at_identity(tmp_path, cmyk_fixture, name,
+                                             build, refused):
+    """And comes back matching `sips`, which is why the refusal above is an
+    asymmetry rather than a second wrong answer."""
+    source = build(tmp_path, cmyk_fixture)
+    assert compare(_reference(400, 300), _replacement(400, 300), source,
+                   tmp_path) is None
 
 
 # ---------------------------------------------------------------------------
@@ -322,6 +413,33 @@ def test_the_staging_file_does_not_survive_the_call(tmp_path, photo_fixture):
     out.parent.mkdir()
     imaging.resize_and_encode(source, 200, 150, "heic", 80, out, resize=True)
     assert [p.name for p in out.parent.iterdir()] == ["o.heic"]
+
+
+def test_the_staging_file_does_not_survive_a_failing_resample(tmp_path,
+                                                              photo_fixture,
+                                                              monkeypatch):
+    """A resample that raises with its output already written.
+
+    Nothing in `_cg.resize_to_file` does that today -- `write_png` is its
+    last statement and it unlinks its own destination on a refused Finalize
+    -- so this substitutes a resample that does. The guarantee under test
+    belongs to THIS function rather than to the layer below it: the
+    directory is left as it was found, whatever the resample did before it
+    raised. Taking the staged NAME outside the `try` and doing the WRITING
+    inside it is what makes that structural instead of incidental.
+    """
+    def writes_then_raises(source, out_width, out_height, out_path):
+        Path(out_path).write_bytes(b"half a frame")
+        raise imaging.ImagingError("the resample failed after writing")
+
+    monkeypatch.setattr(_cg, "resize_to_file", writes_then_raises)
+    source = photo_fixture(tmp_path / "s.png", 400, 300)
+    out = tmp_path / "out" / "o.png"
+    out.parent.mkdir()
+    with pytest.raises(imaging.ImagingError):
+        imaging.resize_and_encode(source, 200, 150, "png", None, out,
+                                  resize=True)
+    assert list(out.parent.iterdir()) == []
 
 
 def test_the_staging_name_is_one_the_executor_already_sweeps(tmp_path,

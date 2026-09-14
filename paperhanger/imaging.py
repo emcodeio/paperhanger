@@ -374,7 +374,6 @@ def resize_and_encode(source, out_width: int, out_height: int, fmt: str,
         from an earlier run must not be able to stand in for output.
     """
     out_path = Path(out_path)
-    source_for_encode = source
     staged = None
 
     if resize:
@@ -382,14 +381,23 @@ def resize_and_encode(source, out_width: int, out_height: int, fmt: str,
         # destination, and the resample now runs before it.
         out_path.unlink(missing_ok=True)
         staged = out_path.with_name(out_path.name + STAGED_RESIZE_SUFFIX)
-        _cg.resize_to_file(source, out_width, out_height, staged)
-        source_for_encode = staged
 
+    # The NAME is taken above and the FILE is written below, inside the try,
+    # so the cleanup covers a resample that raised halfway. Nothing in
+    # `_cg.resize_to_file` can currently raise with the file already written
+    # -- `write_png` is its last statement and it unlinks its own destination
+    # on a refused Finalize -- but that is a fact about today's binding layer
+    # rather than a property of this function, and this is the function that
+    # promises the directory is left as it was found.
     try:
+        if staged is not None:
+            _cg.resize_to_file(source, out_width, out_height, staged)
+
         argv = [SIPS, "-s", "format", fmt]
         if quality is not None:
             argv += ["-s", "formatOptions", str(quality)]
-        argv += [str(source_for_encode), "--out", str(out_path)]
+        argv += [str(staged if staged is not None else source),
+                 "--out", str(out_path)]
         _run(argv, produces=out_path)
     finally:
         if staged is not None:

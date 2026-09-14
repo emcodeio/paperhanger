@@ -549,11 +549,24 @@ def resize_to_file(source, out_width: int, out_height: int, out_path) -> None:
         the draw alters, at 31.8-46.8% of bytes and a maximum channel delta
         of 61-97. So the draw INTRODUCES the divergence and skipping it
         removes it; there is nothing to pin.
-      * ALPHA. A 400x300 RGBA source at alpha 128 comes back from the draw
-        differing from `sips` on 120,000 of 480,000 samples, every one of
-        them by 1, because the destination bitmap is PremultipliedLast and
-        the encode has to undo the premultiply. Grey+alpha: 60,400 of
-        240,000. The skip is byte-identical to `sips` on both.
+      * ALPHA. The destination bitmap for an alpha-bearing source is
+        PremultipliedLast and the encode has to undo the premultiply, so the
+        draw loses to the round trip where the skip does not. All 400x300,
+        as (samples differing of the total, largest difference), the skip
+        byte-identical to `sips` in every row:
+
+          RGBA at alpha 128      120,000 of 480,000    1
+          grey+alpha at 128       60,400 of 240,000    1
+          16-bit RGBA            179,600 of 480,000    1
+          colour-key `tRNS`      120,000 of 480,000  255
+
+        The last row is the one to read. A `tRNS` chunk on a truecolour PNG
+        names a COLOUR as transparent, and ImageIO expands that to an alpha
+        channel; the draw then composites the keyed pixels onto the
+        context's black ground, so what was (255, 0, 255) under a
+        transparent pixel comes back (0, 0, 0). Same colour type, same
+        dimensions, a plausible file -- and the largest difference the draw
+        produces anywhere. The skip is byte-identical to `sips`.
       * MEMORY. 7680x5120, peak RSS of a child process per route, three runs
         each: `sips` 332.1 MiB, the draw 499.2, the skip 351.0. The draw
         holds the decoded frame and a second bitmap of the same dimensions
@@ -570,11 +583,25 @@ def resize_to_file(source, out_width: int, out_height: int, out_path) -> None:
 
     Two consequences of skipping, both measured and neither a defect:
 
-      * An INDEXED source resizes at identity and is refused at every other
-        shape, because `bitmap_format` is what refuses it and the identity
-        path does not build a context. The skip's output is byte-identical
-        to `sips`' for that source, so the asymmetry is between raising and
-        succeeding correctly, not between two answers.
+      * EVERY SOURCE `bitmap_format` REFUSES now resizes at identity and
+        raises at every other shape, because the identity path builds no
+        context and `bitmap_format` is what refuses. That is the whole class
+        -- indexed, CMYK, Lab, and anything above 16 bits per component --
+        not the indexed case alone, and CMYK is the member that matters:
+        four-channel JPEGs come out of print workflows, `sips` resampled one
+        without complaint, and a photo folder is likelier to hold one than a
+        palettised PNG. Measured on a CMYK JPEG (`sips --matchTo` the
+        Generic CMYK profile, `sips -g space` confirming CMYK,
+        `colour_model` agreeing): at identity the skip's `IDAT` is identical
+        to `sips`', and at 200x150 the draw raises naming the colour space.
+        So the asymmetry is between raising and succeeding correctly, not
+        between two answers.
+
+        Both members are latent in this corpus, and only our own classifier
+        can say so: all 894 files through `colour_model` are 872 RGB, 12 RGB
+        with alpha and 10 monochrome, every one at 8 bits per component,
+        none unreadable. A `sips -g space` sweep could not establish it --
+        `sips` reports a palettised PNG as `RGB`.
       * A source shallower than 8 bits per component still comes back at 8,
         because ImageIO's decode is what promotes it. The draw does the same
         thing; `sips` keeps the depth. Measured on a 1-bit greyscale PNG:

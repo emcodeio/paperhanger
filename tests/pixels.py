@@ -15,6 +15,11 @@ Writing was the first of them and the file kept the name through the rest.
     builds a different destination bitmap for it, and hands back a wrong
     file -- black, flattened, or NULL -- when it is not told them apart.
     See each writer's docstring for which.
+  * `write_colour_key_png` emits the third kind of transparency: a `tRNS`
+    chunk naming a COLOUR, on a file whose colour type says it has no alpha
+    at all. It is the input a 1:1 draw damages worst -- the keyed pixels
+    composite to black at the same colour type and dimensions as a correct
+    answer -- and nothing else here can build it.
   * `write_interlaced_png` emits `write_png`'s pixels in Adam7 order, the one
     container property the differential harness must decode through rather
     than report -- one corpus source is interlaced and its pixels match ours
@@ -23,6 +28,9 @@ Writing was the first of them and the file kept the name through the rest.
     a greyscale source that returns as colour type 2 has been converted,
     and no comparison of RGB values would say so.
   * `read_png_grey` is `read_png_rgb` for a monochrome result.
+  * `read_png_samples` reads any of the four non-palettised colour types at
+    8 or 16 bits, for the tests that must look INSIDE an alpha-bearing
+    output rather than assert its shape.
   * `read_png_rgb` reads the result back. Checking dimensions alone cannot
     tell a correct crop from one with its arguments transposed, and sips takes
     both of its crop arguments backwards from the usual convention (-c is
@@ -355,6 +363,54 @@ def write_indexed_png(path, width: int, height: int, colours=None) -> Path:
     return path
 
 
+def write_colour_key_png(path, width: int, height: int,
+                         key=(255, 0, 255), colour=(120, 140, 110)) -> Path:
+    """A truecolour PNG whose transparency is a COLOUR, not a channel.
+
+    IHDR colour type 2 plus a `tRNS` chunk naming one RGB triple fully
+    transparent -- the third way a PNG can carry transparency, and the only
+    one where the transparent pixels still hold a colour on disk. ImageIO
+    expands it to an alpha channel on decode, which is what makes it
+    dangerous: a destination bitmap that composites sees (255, 0, 255) at
+    alpha 0 and writes (0, 0, 0), at the same colour type and the same
+    dimensions as a correct answer.
+
+    That is the largest difference a 1:1 draw produces anywhere -- a full
+    255 on two channels, against the 1 that a premultiplied round trip costs
+    an ordinary RGBA source -- and no other writer here can build the input.
+
+    The left half is keyed and the right half opaque, so a composite shows
+    up as exactly half the frame rather than as a file that is wrong
+    everywhere or nowhere. `key` is magenta by default because it is a
+    colour no photograph contains and no composite produces.
+    """
+    if width < 1 or height < 1:
+        raise ValueError("width and height must be >= 1")
+    for name, value in (("key", key), ("colour", colour)):
+        if len(value) != 3 or not all(0 <= v <= 255 for v in value):
+            raise ValueError(f"{name} must be three values within 0-255")
+    if tuple(key) == tuple(colour):
+        raise ValueError("the keyed colour and the opaque one must differ, "
+                         "or the whole frame is transparent")
+
+    keyed, opaque = bytes(tuple(key)), bytes(tuple(colour))
+    split = width // 2
+    rows = bytearray()
+    for _ in range(height):
+        rows.append(0)  # filter type 0 (None)
+        rows.extend(keyed * split + opaque * (width - split))
+
+    path = Path(path)
+    path.write_bytes(
+        b"\x89PNG\r\n\x1a\n"
+        + _chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+        + _chunk(b"tRNS", struct.pack(">HHH", *key))
+        + _chunk(b"IDAT", zlib.compress(bytes(rows), 6))
+        + _chunk(b"IEND", b"")
+    )
+    return path
+
+
 def read_ihdr(path):
     """(width, height, bit depth, colour type, interlace) from the header.
 
@@ -509,3 +565,86 @@ def read_png_grey(path):
         rows.append(list(line))
         previous = bytes(line)
     return width, height, rows
+
+
+# Samples per pixel by IHDR colour type, for the reader below. Type 3
+# (palettised) is absent on purpose: its samples are indices, and a reader
+# that returned them alongside real colours would be comparing two different
+# kinds of number.
+_CHANNELS = {0: 1, 2: 3, 4: 2, 6: 4}
+
+
+def read_png_samples(path):
+    """(width, height, depth, colour type, samples) for one PNG.
+
+    Every sample in scanline order as plain ints, 16-bit ones assembled from
+    their two bytes. The two readers above each refuse everything but one
+    colour type, which is the right bar for a test asserting that a source
+    came back UNCONVERTED. This one is for the tests that have to look
+    INSIDE an alpha-bearing output, where the colour type is not in question
+    and what sits under a transparent pixel is.
+
+    It exists because that is where the 1:1 draw does its worst: a colour-key
+    `tRNS` source composited onto black is the same colour type, the same
+    depth and the same dimensions as a correct answer, and only the numbers
+    say which one it is.
+
+    Palettised and interlaced files raise rather than returning something
+    plausible. Nothing in this pipeline writes either, and this project has
+    already caught six assertions that passed against the wrong thing.
+    """
+    data = Path(path).read_bytes()
+    if data[:8] != b"\x89PNG\r\n\x1a\n":
+        raise ValueError(f"{path} is not a PNG")
+
+    width = height = depth = colour = None
+    compressed = bytearray()
+    offset = 8
+    while offset + 8 <= len(data):
+        length = struct.unpack(">I", data[offset:offset + 4])[0]
+        kind = data[offset + 4:offset + 8]
+        payload = data[offset + 8:offset + 8 + length]
+        if kind == b"IHDR":
+            width, height, depth, colour, _, _, interlace = struct.unpack(
+                ">IIBBBBB", payload)
+            if interlace:
+                raise ValueError(f"{path}: interlaced, and this reader lays "
+                                 f"scanlines out in file order")
+            if colour not in _CHANNELS:
+                raise ValueError(f"{path}: colour type {colour} is not one "
+                                 f"whose samples are colours")
+            if depth not in (8, 16):
+                raise ValueError(f"{path}: bit depth {depth}, and this "
+                                 f"reader unpacks 8 and 16")
+        elif kind == b"IDAT":
+            compressed += payload
+        elif kind == b"IEND":
+            break
+        offset += 12 + length
+
+    if width is None:
+        raise ValueError(f"{path} has no IHDR")
+
+    channels = _CHANNELS[colour]
+    bpp = channels * depth // 8              # bytes per pixel, and the filter's
+    stride = width * bpp                     # offset to the pixel on the left
+    raw = zlib.decompress(bytes(compressed))
+    expected = height * (stride + 1)
+    if len(raw) != expected:
+        raise ValueError(f"{path}: got {len(raw)} bytes of pixel data, "
+                         f"want {expected}")
+
+    samples = []
+    previous = bytes(stride)
+    position = 0
+    for _ in range(height):
+        filter_type = raw[position]
+        line = bytearray(raw[position + 1:position + 1 + stride])
+        position += 1 + stride
+        _unfilter(filter_type, line, previous, bpp)
+        if depth == 8:
+            samples.extend(line)
+        else:
+            samples.extend(struct.unpack(f">{stride // 2}H", bytes(line)))
+        previous = bytes(line)
+    return width, height, depth, colour, samples

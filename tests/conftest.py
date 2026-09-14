@@ -148,6 +148,49 @@ def profiled_fixture(tmp_path):
 
 
 @pytest.fixture
+def cmyk_fixture(tmp_path):
+    """A four-channel CMYK JPEG: a colour model no bitmap context accepts.
+
+    `bitmap_format` refuses indexed, CMYK, Lab and anything above 16 bits per
+    component, and CMYK is the member of that class a real photo folder could
+    plausibly hold -- four-channel JPEGs come out of print workflows, and
+    `sips` resampled one without complaint. No corpus file is CMYK today, so
+    this is the only way to reach that branch with a realistic input.
+
+    Shells out to `sips --matchTo` for the same reason `profiled_fixture`
+    does: making a genuinely CMYK file needs a real colour-management
+    implementation, and nothing in the standard library has one. JPEG rather
+    than PNG because PNG cannot carry CMYK at all.
+
+    It then ASSERTS that what came back really is CMYK. A fixture that
+    quietly produced RGB would leave every test using it passing while
+    testing nothing, which is this project's signature failure.
+    """
+    def make(path, width, height):
+        icc = COLORSYNC_PROFILES / "Generic CMYK Profile.icc"
+        if not icc.is_file():
+            pytest.skip(f"colour profile not installed: {icc}")
+        path = Path(path)
+        base = pixels.write_png(tmp_path / f"cmyk-source-{path.name}.png",
+                                width, height, noise=True)
+        subprocess.run(
+            ["/usr/bin/sips", "--matchTo", str(icc), "-s", "format", "jpeg",
+             str(base), "--out", str(path)],
+            check=True, capture_output=True,
+        )
+        probe = subprocess.run(
+            ["/usr/bin/sips", "-g", "space", "-g", "samplesPerPixel", str(path)],
+            capture_output=True, text=True,
+        )
+        assert "CMYK" in probe.stdout and "samplesPerPixel: 4" in probe.stdout, (
+            f"the CMYK fixture came back as {probe.stdout.strip()!r}; every "
+            f"test using it would pass against an RGB file"
+        )
+        return path
+    return make
+
+
+@pytest.fixture
 def webp_fixture(tmp_path):
     """A real WebP written under whatever name the caller gives it.
 
