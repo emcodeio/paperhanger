@@ -26,17 +26,19 @@ def processing_dir(tmp_path):
 # ---------------------------------------------------------------------------
 # Image fixtures.
 #
-# Seven factories, each `(path, width, height) -> path`, so a test says the
+# Eight factories, each `(path, width, height) -> path`, so a test says the
 # SHAPE of input it needs rather than the writer call that produces it. They
 # live here rather than in the one test file that first wanted them because
 # six tasks of the CoreGraphics migration use them and a second copy would
 # drift.
 #
-# Two of the seven are not conveniences. `grayscale_fixture` is the only way
+# Three of the eight are not conveniences. `grayscale_fixture` is the only way
 # in this suite to construct the input that renders entirely black through a
-# naively-built bitmap context, and `gradient_fixture` is the only way to
-# tell a correct crop from a centred one, since both come back at the right
-# dimensions and only the pixels disagree.
+# naively-built bitmap context; `gradient_fixture` is the only way to tell a
+# correct crop from a centred one, since both come back at the right
+# dimensions and only the pixels disagree; and `interlaced_fixture` is the
+# only input that reaches the differential harness's Adam7 decoder, which
+# six later gates depend on and no other fixture can exercise.
 # ---------------------------------------------------------------------------
 
 
@@ -95,6 +97,21 @@ def png16_fixture():
     """A 16-bit RGB PNG, the depth the `sips` path silently drops."""
     def make(path, width, height):
         return pixels.write_png16(path, width, height)
+    return make
+
+
+@pytest.fixture
+def interlaced_fixture():
+    """An Adam7 PNG carrying exactly `png_fixture`'s pixels.
+
+    The differential harness has to decode interlacing and then say the
+    pixels agree, because one corpus source is interlaced, `sips` preserves
+    that and CoreGraphics does not. Pairing this with `png_fixture` at the
+    same arguments is what makes "the container differs and the image does
+    not" a thing a test can state.
+    """
+    def make(path, width, height, noise=False):
+        return pixels.write_interlaced_png(path, width, height, noise=noise)
     return make
 
 

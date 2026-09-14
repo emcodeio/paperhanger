@@ -15,6 +15,10 @@ Writing was the first of them and the file kept the name through the rest.
     builds a different destination bitmap for it, and hands back a wrong
     file -- black, flattened, or NULL -- when it is not told them apart.
     See each writer's docstring for which.
+  * `write_interlaced_png` emits `write_png`'s pixels in Adam7 order, the one
+    container property the differential harness must decode through rather
+    than report -- one corpus source is interlaced and its pixels match ours
+    exactly.
   * `read_ihdr` reads a header back, which is where several of them differ:
     a greyscale source that returns as colour type 2 has been converted,
     and no comparison of RGB values would say so.
@@ -61,30 +65,91 @@ def _png_bytes(width: int, height: int, rows: bytes,
     )
 
 
-def write_png(path, width: int, height: int, colour=(120, 140, 110), noise=False) -> Path:
-    """Write an 8-bit RGB PNG of exactly width x height pixels."""
-    if width < 1 or height < 1:
-        raise ValueError("width and height must be >= 1")
+def _rgb_rows(width: int, height: int, colour, noise: bool) -> list:
+    """The pixel grid, one `bytes` of RGB triples per row.
 
+    Separate from `write_png` so `write_interlaced_png` can lay out the SAME
+    pixels in Adam7 order. The pair is only worth having if the two files are
+    provably the same image in two containers, and sharing the generator is
+    what makes that provable rather than asserted.
+    """
     red, green, blue = colour
-    rows = bytearray()
+    rows = []
     seed = 0x9E3779B9
     for y in range(height):
-        rows.append(0)  # filter type 0 (None) for this scanline
         if not noise:
-            rows.extend(bytes((red, green, blue)) * width)
+            rows.append(bytes((red, green, blue)) * width)
             continue
+        row = bytearray()
         for x in range(width):
             # xorshift-ish mix: deterministic, and varied enough that an
             # encoder has real high-frequency detail to work on.
             seed ^= (x * 0x85EBCA6B + y * 0xC2B2AE35) & 0xFFFFFFFF
             seed = (seed * 0x27D4EB2F + 0x165667B1) & 0xFFFFFFFF
-            rows.append((red + (seed >> 8)) & 0xFF)
-            rows.append((green + (seed >> 16)) & 0xFF)
-            rows.append((blue + (seed >> 24)) & 0xFF)
+            row.append((red + (seed >> 8)) & 0xFF)
+            row.append((green + (seed >> 16)) & 0xFF)
+            row.append((blue + (seed >> 24)) & 0xFF)
+        rows.append(bytes(row))
+    return rows
+
+
+def write_png(path, width: int, height: int, colour=(120, 140, 110), noise=False) -> Path:
+    """Write an 8-bit RGB PNG of exactly width x height pixels."""
+    if width < 1 or height < 1:
+        raise ValueError("width and height must be >= 1")
+
+    rows = bytearray()
+    for row in _rgb_rows(width, height, colour, noise):
+        rows.append(0)  # filter type 0 (None) for this scanline
+        rows.extend(row)
 
     path = Path(path)
     path.write_bytes(_png_bytes(width, height, bytes(rows)))
+    return path
+
+
+# Adam7, as (x origin, y origin, x step, y step) per pass. RFC 2083 section 2.6.
+ADAM7 = ((0, 0, 8, 8), (4, 0, 8, 8), (0, 4, 4, 8), (2, 0, 4, 4),
+         (0, 2, 2, 4), (1, 0, 2, 2), (0, 1, 1, 2))
+
+
+def write_interlaced_png(path, width: int, height: int,
+                         colour=(120, 140, 110), noise=False) -> Path:
+    """The SAME pixels as `write_png`, laid out in Adam7 interlaced order.
+
+    One corpus source is interlaced, `sips` preserves that and CoreGraphics
+    does not, and the two files' pixels are identical -- it is one of the ten
+    that differ in `IDAT` while agreeing on every pixel. So the differential
+    harness has to decode Adam7 and treat interlacing as a container property
+    rather than a difference, and this is the only input in the suite that
+    reaches that code. Without it the seven-pass decoder in
+    `tests/differential.py` would go into six later gates untested.
+
+    Takes the same arguments as `write_png` and shares its pixel generator,
+    so the pair differs in nothing but the layout.
+    """
+    if width < 1 or height < 1:
+        raise ValueError("width and height must be >= 1")
+
+    grid = _rgb_rows(width, height, colour, noise)
+    stream = bytearray()
+    for x_origin, y_origin, x_step, y_step in ADAM7:
+        columns = range(x_origin, width, x_step)
+        if not columns:
+            continue          # this pass holds no pixels at this width
+        for y in range(y_origin, height, y_step):
+            stream.append(0)  # filter type 0 (None) for this scanline
+            row = grid[y]
+            for x in columns:
+                stream.extend(row[x * 3:x * 3 + 3])
+
+    path = Path(path)
+    path.write_bytes(
+        b"\x89PNG\r\n\x1a\n"
+        + _chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 1))
+        + _chunk(b"IDAT", zlib.compress(bytes(stream), 6))
+        + _chunk(b"IEND", b"")
+    )
     return path
 
 
