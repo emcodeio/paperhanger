@@ -21,11 +21,15 @@
 7. **`crop` always writes PNG and refuses a non-`.png` name.** Unchanged contract.
 8. **`crop` keeps its bounds check.** `execute.py` crops the 4x frame with `rect.scaled(4)`; an enlargement a pixel short must raise, not produce a black edge.
 9. **`upscale` stays a subprocess.** `upscayl-bin` is untouched.
-10. **The differential bar is byte-identical PIXELS**, compared as decoded pixel data or the `IDAT` stream. Identical pixels is stricter than any perceptual threshold; this is not a relaxation.
+10. **The differential bar is byte-identical DECODED PIXELS**, and the comparison must also assert colour type and channel count.
 
-    **Whole-file comparison is deliberately NOT part of the gate.** `sips` translates a source's EXIF and XMP into PNG ancillary chunks that ImageIO does not emit, so two files with identical pixels routinely differ in bytes: measured at 36 of 46 corpus JPEGs. Whole-file identity does happen, and where it does it is worth noting in a report, but it is not a pass condition and a file-level difference is not a finding.
+    Measured over all 894 corpus images at a common shape: 859 identical, 10 differing in `IDAT` while their pixels are identical, 25 differing in pixels. So the three candidate comparisons are not interchangeable and the gate names one.
 
-    This constraint has been wrong twice. It first read "never identical", refuted by corpus JPEGs matching by SHA-256; then "identity holds for most sources, and differences are ancillary PNG chunks in the source", refuted by the 36-of-46 spread and by the cause being `sips` *synthesising* chunks rather than forwarding them. Both errors came from generalising a handful of fixtures. Compare pixels.
+    - **Whole files are out.** 723 of 894 differ, because `sips` synthesises PNG ancillary chunks from a source's EXIF and XMP that ImageIO does not emit.
+    - **`IDAT` is out as the primary check.** It fires on ten files whose pixels are identical, for two container reasons the CoreGraphics writer will never match: nine are `sips` writing colour type 6 against CoreGraphics' type 2, and one is an Adam7 interlaced source that `sips` preserves and CoreGraphics does not.
+    - **Decoded pixels are the bar** — but an RGB-only comparison silently hides that `kCGImageAlphaNoneSkipLast` drops alpha, which it does on all 12 alpha-bearing corpus PNGs. Assert the channel count and colour type alongside the pixels, or the gate passes while the alpha goes.
+
+    Identical pixels is stricter than any perceptual threshold; this is not a relaxation. The constraint has been wrong three times — "never identical", then "identity holds for most sources", then "pixels or `IDAT`" as though those agreed. Each error generalised from a handful of fixtures. Count before you write a rule here.
 
 11. **The corpus at `~/Pictures/wallpaper` is READ-ONLY.** Tests copy out and pass `--processing-dir`. No wallpaper image is ever committed.
 12. **No non-AI enlargement.** Unchanged: nothing is enlarged except by the model.
