@@ -8,7 +8,7 @@ It replaces a set of zsh scripts that depended on Pixelmator Pro and ImageMagick
 
 macOS, and Python 3.14 or newer. The tool has no third-party runtime dependencies. It shells out to two programs:
 
-- `sips`, which ships with macOS, for measuring, cropping, resizing and encoding.
+- `sips`, which ships with macOS, for measuring and for the colour conversion on the upscale path. Cropping, resizing and encoding are CoreGraphics calls now.
 - `upscayl-bin`, the Upscayl ncnn command-line upscaler, for 4x enlargement. One self-contained binary plus one model file, installed by `paperhanger setup`.
 
 `magick` (ImageMagick) appears in the test suite for image comparison. It is not needed to run the tool.
@@ -156,11 +156,15 @@ The defaults differ per encoder because each sits at that encoder's own quality-
 
 Every crop in the tool routes through `imaging.crop` rather than calling an imaging API directly, which is what keeps the bounds check — still needed, since CoreGraphics silently returns the overlap where `sips` silently padded with black — from being forgotten at a new call site.
 
-**The resample no longer goes through `sips` either.** It is a `CGContextDrawImage` at interpolation High into a bitmap built from the source's own colour space, and both output dimensions are always passed explicitly — `--resampleWidth` and `--resampleHeight` derive the other axis and round it inconsistently, which is the third of the seven defects. The encode is still one `sips` per call, so a resizing call writes a lossless PNG beside its output and encodes that; that intermediate disappears when the encode moves too.
+**The resample no longer goes through `sips` either.** It is a `CGContextDrawImage` at interpolation High into a bitmap built from the source's own colour space, and both output dimensions are always passed explicitly — `--resampleWidth` and `--resampleHeight` derive the other axis and round it inconsistently, which is the third of the seven defects.
+
+**Nor does the encode, and the intermediate went with it.** Resample and encode are now one pass over one decoded frame: one `CGImageDestination`, no lossless PNG staged beside the output and read back — which for a 7680×5120 desktop slice was a ~110 MB file written and decoded for nothing. `-s formatOptions N` was always `kCGImageDestinationLossyCompressionQuality` at N/100, `sips` being ImageIO underneath, so the quality defaults are the same numbers producing the same bytes: measured byte-identical at JPEG 80 and 90, HEIC 80, 85 and 90, and AVIF 85, including HEIC 85 still reproducing HEIC 80's file exactly.
 
 **A resample that changes nothing now does nothing.** A fifth of the resamples a full run performs — 577 of 2734 — ask for the dimensions the image already has, because a phone slice of an upscaled frame is rendered at scale 4 and the render asks for a resample either way. Those hand the decoded frame straight to the encoder rather than drawing it at 1:1, which is not merely faster: over 63 corpus photographs at their own dimensions the pass-through matches `sips`' output on 63 of 63 where the 1:1 draw matches on 11, and on a 7680x5120 frame it holds peak memory to 351 MiB against the draw's 499 (`sips` itself peaks at 332). The draw is what introduced the difference — an alpha-bearing source loses a unit of precision to the premultiply round trip — so skipping it removes a divergence rather than trading accuracy for speed.
 
 Two behaviours changed with the resample. A 16-bit source keeps its depth, as with crop. And an unreadable source now fails inside ImageIO, naming the file, rather than as a `sips` warning on a zero exit — the same exception type, and still no output file left behind.
+
+**Outputs no longer carry the source's EXIF.** `sips` copied it forward; `CGImageDestinationAddImage` writes the picture and its colour profile and nothing else. On 21 of the 27 coverage images the HEIC and AVIF outputs are 127 to 2332 bytes smaller than `sips`' for that reason alone, with the coded picture identical underneath. The ICC profile is unaffected — an ICC-tagged source with no EXIF encodes byte-identically, whatever the profile — so nothing about colour changes; what is gone is the camera metadata riding along inside a wallpaper. The same change makes a **progressive JPEG source come back baseline**, where `sips` inherited the source's scan: 10 to 21% more bytes on the four progressive images in the sample, same picture, and ImageIO will write progressive if it is ever asked to.
 
 ## Testing
 
