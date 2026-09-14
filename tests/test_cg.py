@@ -809,3 +809,213 @@ def test_sips_agrees_about_the_dimensions(tmp_path, photo_fixture):
     with _cg.Scope() as scope:
         got = _cg.dimensions(_cg.load(scope, src))
     assert got == (int(values["pixelWidth"]), int(values["pixelHeight"]))
+
+
+# --------------------------------------------------------------------------
+# Naming the format. The one answer no differential can check.
+# --------------------------------------------------------------------------
+#
+# `probe_file` writes no file, so nothing downstream can be compared to catch
+# a format string that changed. Every row of `_cg.SOURCE_FORMATS` was measured
+# -- a file written to that format, then put through BOTH `sips -g format` and
+# `CGImageSourceGetType` -- and these are the tests that keep it that way.
+
+
+def test_the_read_and_write_tables_agree_where_they_overlap():
+    """`UTI` names the four formats we WRITE, `SOURCE_FORMATS` everything we
+    might READ. They are separate dictionaries in opposite directions, so
+    nothing but this stops them drifting apart -- and a drift would mean the
+    tool could encode a HEIC it would then decline to call a HEIC."""
+    for name, uti in _cg.UTI.items():
+        assert _cg.SOURCE_FORMATS.get(uti) == name, (
+            f"{uti} is written as {name!r} but read back as "
+            f"{_cg.SOURCE_FORMATS.get(uti)!r}")
+
+
+def test_no_two_utis_share_a_format_name():
+    """The table is read one way and written the other; a duplicated name
+    would make the round trip above pass while losing a format."""
+    names = list(_cg.SOURCE_FORMATS.values())
+    assert len(names) == len(set(names))
+
+
+def test_a_uti_that_is_not_in_the_table_is_named_unknown():
+    """The fallback, with its own control beside it.
+
+    `unknown` is what the old probe answered when `sips` printed no format
+    line, and it is deliberately NOT a name derived from the UTI string: four
+    of the fifteen measured rows -- psd, tga, sgi and jp2 -- have a UTI whose
+    last component is not their name, so deriving one for an unmeasured
+    format would be a guess dressed as an answer.
+
+    The `public.jpeg` control is what stops this passing for the wrong reason.
+    Without it a `_pystr` that had stopped reading CFStrings at all would
+    return None for everything, every lookup would miss, and the assertion
+    below would be satisfied by a completely broken reader.
+    """
+    with _cg.Scope() as scope:
+        assert _cg._format_name(_cg._cfstr(scope, "public.jpeg")) == "jpeg"
+        assert _cg._format_name(
+            _cg._cfstr(scope, "com.example.no-such-format")) == "unknown"
+
+
+def test_a_null_type_is_named_unknown():
+    """`CGImageSourceGetType` is a Get and can return NULL. `_format_name`
+    takes the pointer straight from it, so NULL has to be a name and not a
+    crash inside the one function documented never to raise."""
+    assert _cg._format_name(None) == "unknown"
+
+
+@pytest.mark.parametrize("fmt,expected", [
+    ("tiff", "tiff"),
+    ("bmp", "bmp"),
+    ("gif", "gif"),
+    ("psd", "psd"),
+    ("tga", "tga"),
+])
+def test_formats_outside_the_corpus_keep_the_names_sips_gave_them(
+        tmp_path, fmt, expected):
+    """Five rows of the table that no corpus photograph exercises.
+
+    `psd` and `tga` are here for a reason: their UTIs are
+    `com.adobe.photoshop-image` and `com.truevision.tga-image`, so they are
+    two of the four rows where taking the last component of the UTI would
+    produce the wrong name. A table replaced by that string operation passes
+    every corpus test and fails these.
+
+    The expected names are `sips -g format`'s own output for the same files,
+    asserted here rather than quoted, so a disagreement shows up as a failure
+    rather than as a stale comment.
+    """
+    if shutil.which("magick") is None:
+        pytest.skip("ImageMagick (`magick`) is not installed")
+    source = pixels.write_png(tmp_path / "seed.png", 64, 48)
+    target = tmp_path / f"sample.{fmt}"
+    subprocess.run(["magick", str(source), f"{fmt}:{target}"],
+                   check=True, capture_output=True)
+
+    probed = _cg.probe_file(target)
+    assert probed == (64, 48, expected)
+
+    proc = subprocess.run(["/usr/bin/sips", "-g", "format", str(target)],
+                          capture_output=True, text=True, check=True)
+    assert proc.stdout.strip().endswith(expected), (
+        f"sips calls this {proc.stdout.strip()!r}, the table calls it "
+        f"{expected!r}")
+
+
+def test_a_pdf_is_not_an_image(tmp_path):
+    """The case that decided against reading the header properties instead.
+
+    A PDF gives a perfectly good CGImageSource -- type `com.adobe.pdf`, count
+    1 -- whose properties dictionary carries no pixel dimensions at all, so a
+    properties-based probe needs a second rule to reject it. The decode simply
+    returns NULL, which is also what the old `sips` probe did with one.
+    """
+    if shutil.which("magick") is None:
+        pytest.skip("ImageMagick (`magick`) is not installed")
+    source = pixels.write_png(tmp_path / "seed.png", 64, 48)
+    pdf = tmp_path / "doc.pdf"
+    subprocess.run(["magick", str(source), f"pdf:{pdf}"],
+                   check=True, capture_output=True)
+    assert pdf.exists() and pdf.stat().st_size > 0
+    assert _cg.probe_file(pdf) is None
+
+
+def test_probe_file_never_raises_where_load_does(tmp_path):
+    """The two entry points differ on purpose, and this is the line.
+
+    `load` raises ImagingError for anything it cannot decode -- that is how
+    every operation reports a bad source. `probe_file` answers None for the
+    same input, because it is the function that decides whether a file is a
+    photograph at all. A `probe_file` that started raising would end a scan
+    over the user's Pictures folder on its first .DS_Store.
+    """
+    junk = tmp_path / "note.txt"
+    junk.write_text("not an image")
+
+    with pytest.raises(ImagingError):
+        with _cg.Scope() as scope:
+            _cg.load(scope, junk)
+
+    assert _cg.probe_file(junk) is None
+
+
+def test_probe_file_answers_none_when_the_layer_below_raises(tmp_path,
+                                                             monkeypatch):
+    """The `except` in `probe_file`, which no input here can reach.
+
+    It is there for `_cfstr`, which raises ImagingError when CoreFoundation
+    refuses to build a CFString from a filename -- a name whose bytes are not
+    valid UTF-8. APFS will not store such a name, so that case cannot be
+    constructed on this machine and the raise is injected instead.
+
+    Injected at `_cfurl` rather than tested through a file, because the point
+    is the contract and not the trigger: `probe_file` answers None for
+    anything at all, and a narrower `except` would let a future raise from
+    this layer escape into `cli.scan`.
+    """
+    def boom(*args, **kwargs):
+        raise ImagingError("could not build a CFString for a filename")
+
+    source = pixels.write_png(tmp_path / "fine.png", 32, 24)
+    assert _cg.probe_file(source) == (32, 24, "png"), \
+        "the control failed: this file must probe before the raise is injected"
+
+    monkeypatch.setattr(_cg, "_cfurl", boom)
+    assert _cg.probe_file(source) is None
+
+
+def test_a_null_image_measures_zero_rather_than_crashing():
+    """What `probe_file`'s `width < 1` check is actually catching.
+
+    Found by mutation: deleting `probe_file`'s `if not image: return None`
+    leaves every test green, because a NULL CGImage measures 0x0 and the
+    width check answers None anyway. That redundancy is deliberate and it
+    rests on this behaviour, which is Apple's and not ours -- so it is pinned
+    here. If a macOS release ever made this crash, or return something other
+    than zero, this fails and the guard above it stops being optional.
+
+    Contrast `CFRelease(NULL)`, which kills the process outright (measured:
+    exit 133). That is why `probe_file`'s OTHER early return, the one for a
+    NULL image source, is not redundant at all -- and it is not tested here,
+    because a test for it would take the test runner down with it.
+    """
+    assert _cg.dimensions(None) == (0, 0)
+
+
+def test_every_framework_function_called_is_declared():
+    """An undeclared call is a SEGFAULT, not an error.
+
+    ctypes defaults an undeclared function's arguments to C int, so a 64-bit
+    handle is truncated to 32 bits and the process dies. `_declare` exists to
+    stop that and is only as good as the discipline of adding to it -- which
+    nothing checked until now. Two probes written against this module died
+    exactly this way, on `CGImageGetBitsPerPixel` and `CGImageGetBitmapInfo`.
+
+    Reads the source rather than the running module, because a missing
+    declaration is invisible at runtime until the call that crashes.
+    """
+    tree = ast.parse((PACKAGE / "_cg.py").read_text())
+    libraries = {"_CF", "_CG_LIB", "_IO_LIB"}
+
+    declared, used = set(), set()
+    for node in ast.walk(tree):
+        # A declaration reads `_LIB.symbol.restype = ...`, so the library
+        # attribute is itself the value of another attribute access.
+        if (isinstance(node, ast.Attribute)
+                and isinstance(node.value, ast.Attribute)
+                and isinstance(node.value.value, ast.Name)
+                and node.value.value.id in libraries
+                and node.attr in {"restype", "argtypes"}):
+            declared.add(f"{node.value.value.id}.{node.value.attr}")
+        elif (isinstance(node, ast.Attribute)
+                and isinstance(node.value, ast.Name)
+                and node.value.id in libraries):
+            used.add(f"{node.value.id}.{node.attr}")
+
+    assert declared, "found no declarations at all; this test is not reading _cg"
+    undeclared = used - declared
+    assert not undeclared, (
+        f"called but never given a restype/argtypes in _declare(): "
+        f"{sorted(undeclared)} -- an undeclared call segfaults")

@@ -176,6 +176,50 @@ _SRGB_NAME = c_void_p.in_dll(_CG_LIB, "kCGColorSpaceSRGB")
 UTI = {"heic": "public.heic", "jpeg": "public.jpeg",
        "avif": "public.avif", "png": "public.png"}
 
+# The reverse direction, and NOT the reverse of the dictionary above: this is
+# every format `probe_file` might READ, where `UTI` is the four it can write.
+# The two agree where they overlap, which `tests/test_cg.py` pins.
+#
+# EVERY ROW IS MEASURED, none inferred, because a format string that changes
+# silently is the one regression in this task that no differential can see --
+# `probe` writes no file. Each row is a file written to that format and then
+# put through BOTH the old `sips -g format` probe and `CGImageSourceGetType`,
+# so the left column is literally what the old `probe` returned for it. The
+# corpus rows (jpeg, png, webp, heic, gif) come from all 894 photographs; the
+# rest from fixtures written by `magick` and by `sips -s format`.
+#
+# TWO OBVIOUS RULES ARE BOTH WRONG, which is why this is a table and not a
+# string operation. "Strip the `public.` prefix" breaks on the four UTIs that
+# have no such prefix -- webp and gif among them, and both are in the corpus.
+# "Take the last dot-separated component" gets those two right and then breaks
+# on four more: `com.adobe.photoshop-image` is not `psd`,
+# `com.truevision.tga-image` is not `tga`, `com.sgi.sgi-image` is not `sgi`,
+# and `public.jpeg-2000` is not `jp2`. Four of fifteen measured rows, so
+# extrapolating either rule to a format nobody measured would be guessing.
+#
+# Hence the fallback for an unlisted UTI is "unknown" rather than a derived
+# name: camera raw and the other formats no fixture here can produce would
+# each be a guess, and the old `probe`'s own fallback was "unknown" too. It
+# costs nothing today -- no caller in this codebase reads the format string,
+# only tests do -- and a wrong name would cost more than an honest one.
+SOURCE_FORMATS = {
+    "public.jpeg": "jpeg",                    # 841 corpus files
+    "public.png": "png",                      # 47 corpus files
+    "org.webmproject.webp": "webp",           # 3 corpus files
+    "public.heic": "heic",                    # 2 corpus files
+    "com.compuserve.gif": "gif",              # 1 corpus file
+    "public.tiff": "tiff",
+    "public.avif": "avif",
+    "public.jpeg-2000": "jp2",
+    "public.pbm": "pbm",
+    "com.microsoft.bmp": "bmp",
+    "com.microsoft.ico": "ico",
+    "com.microsoft.dds": "dds",
+    "com.adobe.photoshop-image": "psd",
+    "com.truevision.tga-image": "tga",
+    "com.sgi.sgi-image": "sgi",
+}
+
 
 class CGPoint(Structure):
     _fields_ = [("x", c_double), ("y", c_double)]
@@ -210,7 +254,13 @@ def _declare():
                                        c_void_p, c_void_p]
     _CF.CFRelease.restype = None
     _CF.CFRelease.argtypes = [c_void_p]
+    _CF.CFStringGetLength.restype = c_long
+    _CF.CFStringGetLength.argtypes = [c_void_p]
+    _CF.CFStringGetCString.restype = c_bool
+    _CF.CFStringGetCString.argtypes = [c_void_p, c_char_p, c_long, c_uint32]
 
+    _IO_LIB.CGImageSourceGetType.restype = c_void_p
+    _IO_LIB.CGImageSourceGetType.argtypes = [c_void_p]
     _IO_LIB.CGImageSourceCreateWithURL.restype = c_void_p
     _IO_LIB.CGImageSourceCreateWithURL.argtypes = [c_void_p, c_void_p]
     _IO_LIB.CGImageSourceCreateImageAtIndex.restype = c_void_p
@@ -340,6 +390,123 @@ def load(scope, path):
     return scope.own(_checked(
         _IO_LIB.CGImageSourceCreateImageAtIndex(source, 0, None),
         "decode", path), kind="image")
+
+
+def _pystr(ref):
+    """A Python str from a CFString, or None if it will not convert.
+
+    None rather than a truncation on a buffer that turns out too small.
+    Every caller is `_format_name`, which turns None into "unknown" -- so a
+    UTI this cannot render degrades to the honest answer rather than to a
+    prefix of itself that might collide with a real format name.
+
+    The buffer is sized from the UTF-16 length: at most three UTF-8 bytes per
+    code unit for anything in the BMP, and a surrogate pair is two units for
+    four bytes, so four per unit is a bound with room in it. The uniform type
+    identifiers this ever sees are ASCII.
+    """
+    if not ref:
+        return None
+    size = _CF.CFStringGetLength(ref) * 4 + 1
+    buffer = ctypes.create_string_buffer(size)
+    if not _CF.CFStringGetCString(ref, buffer, size, kCFStringEncodingUTF8):
+        return None
+    return buffer.value.decode("utf-8", "replace")
+
+
+def _format_name(uti) -> str:
+    """The short format name for a CGImageSource's uniform type identifier.
+
+    The names are `sips -g format`'s, because they are what `probe` returned
+    before this module measured anything -- see SOURCE_FORMATS for how each
+    row was established and why an unlisted UTI is "unknown" rather than a
+    name derived from the string.
+    """
+    return SOURCE_FORMATS.get(_pystr(uti), "unknown")
+
+
+def probe_file(path):
+    """(width, height, format) for an image, or None for anything else.
+
+    NEVER RAISES, for any input at all. That is the contract the rest of the
+    tool is built on: `cli.scan` tells a photograph from a .DS_Store by
+    whether this returns None, `imaging.crop` bounds-checks with it and
+    `execute` uses it as a post-condition, so a raise here would turn a stray
+    file in the user's Pictures folder into a crashed run. The bare `except`
+    is deliberate and is the reason `_cfurl`'s ImagingError -- raised for a
+    filename CoreFoundation will not encode -- arrives as None.
+
+    THE DECODE IS THE GATE, and it is not the expensive thing it looks like.
+    `CGImageSourceCreateImageAtIndex` returns a CGImage whose pixels are
+    decoded lazily, so asking it for its dimensions never pulls the image
+    through memory. Measured on the largest corpus file,
+    green_grass_texture_3997.png (9072x12096, 101 MB on disk): peak RSS 25.5
+    MiB against a 21.1 MiB floor for the interpreter and these bindings
+    alone, where forcing the pixels through with
+    `CGDataProviderCopyData` on the same file takes 1004.7 MiB. It is also
+    faster than reading the header properties -- 25 corpus photographs in
+    0.021s against 0.030s for `CGImageSourceCopyPropertiesAtIndex`, and
+    0.399s for the `sips` subprocess it replaces.
+
+    So the properties route buys nothing, and the decode answers a better
+    question: `CGImageSourceCopyPropertiesAtIndex` hands back a dictionary
+    with no pixel dimensions in it for a PDF and for a JPEG truncated to its
+    first 200 bytes, both of which would then need a second rule to reject,
+    while the decode simply returns NULL for both -- which is the old
+    `probe`'s answer for them too.
+
+    Three NULLs, three different meanings, all None:
+      * no source -- a directory, or a path that does not exist.
+      * no image -- a .DS_Store, a text file, a zero-byte file, a PDF, a
+        JPEG truncated past its header. The source object is created for
+        several of these (a .DS_Store included, where it comes back with a
+        count of 0 and no type at all); only the decode refuses them.
+      * no type -- never observed alongside a successful decode, but it is a
+        Get that can return NULL and "unknown" is what the old probe said
+        when `sips` printed no format line.
+
+    THE TWO EARLY RETURNS ARE NOT THE SAME KIND OF GUARD, which mutation
+    testing is how we found out. Deleting either leaves every test green
+    except one, and the exception is the tell:
+
+      * `if not source` is what stands between a bad path and a dead
+        process. Delete it and the NULL goes into the scope as a CF handle,
+        so `CFRelease(NULL)` runs on the way out and TAKES THE PROCESS DOWN.
+        Measured: exit 133, no traceback, pytest itself killed rather than a
+        test failing.
+      * `if not image` is redundant, and deliberately kept. Measured:
+        `CGImageRelease(NULL)` is a no-op, unlike CFRelease, and
+        `CGImageGetWidth(NULL)` returns 0 rather than crashing -- so with the
+        guard deleted the `width < 1` check below still answers None for
+        every input that reaches it. It stays because relying on a NULL
+        falling through two more calls to be caught by an arithmetic test is
+        a worse thing to read than a refusal at the point of failure, and
+        because the width check's own reason is a degenerate image, not a
+        missing one.
+
+    That also makes the `width < 1` check the backstop for both, which is
+    why no test can kill it on its own: `tests/test_cg.py` pins the
+    CoreGraphics behaviours the redundancy rests on instead, so a macOS
+    release that changed either one fails there rather than here.
+    """
+    try:
+        with Scope() as scope:
+            source = _IO_LIB.CGImageSourceCreateWithURL(_cfurl(scope, path), None)
+            if not source:
+                return None
+            scope.own(source)
+            image = _IO_LIB.CGImageSourceCreateImageAtIndex(source, 0, None)
+            if not image:
+                return None
+            scope.own(image, kind="image")
+            width, height = dimensions(image)
+            if width < 1 or height < 1:
+                return None
+            # A Get: not ours to release, so it does not go into the scope.
+            return (width, height,
+                    _format_name(_IO_LIB.CGImageSourceGetType(source)))
+    except Exception:                              # noqa: BLE001 - the contract
+        return None
 
 
 def dimensions(image):

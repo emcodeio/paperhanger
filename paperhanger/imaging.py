@@ -15,17 +15,30 @@ both used and neither is derived -- is now enforced inside
 
 `normalize_to_srgb_png` went too, and with it the last `sips` invocation
 that WRITES anything: no `--matchTo`, and nothing here passes an ICC
-profile to a subprocess. What is left of `sips` is `probe`, which reads,
-so fact 1 is live and fact 4 no longer describes a `sips` call at all.
+profile to a subprocess. Fact 4 no longer describes a `sips` call at all.
 Fact 4's post-condition is not retired with it -- `upscale` still passes
 `produces=`, and it is the whole of what stands between an upscayl-bin run
 that exits 0 having written nothing and a caller that believes it.
+
+And now `probe` has gone the same way, which was the last `sips` call of
+any kind here, reading or writing. NOTHING IN THIS MODULE RUNS `sips` ANY
+MORE. The `SIPS` constant below survives only because the differential
+harnesses under `tests/` still run the old tool as their reference; no
+code path a user reaches goes near it. So fact 1 is now a statement about
+a tool this module does not invoke, like facts 2, 3, 5, 6 and 7 before it,
+and the failure it describes is not reachable from here.
 
 Seven measured facts shape this file. Each fails SILENTLY if ignored:
 
   1. sips -g pixelWidth exits 0 while printing `pixelWidth: <nil>` for text,
      empty and truncated files, and dies by signal on .DS_Store. Exit status is
      not a usable signal; stdout is.
+     Measured again while replacing it, on the real corpus `.DS_Store`: SIGABRT
+     (returncode -6), on an uncaught NSInvalidArgumentException complaining
+     that `typeIdentifier` cannot be nil. ImageIO in the same position builds
+     a CGImageSource for the file quite happily and then reports a count of 0,
+     no type, and no image at index 0 -- so the replacement declines it by
+     answering the question rather than by surviving the answer.
   2. Crop must never be fused with a resample. `sips -c 1080 1920 --cropOffset
      0 500 --resampleWidth 960` on a 3840-wide source returns 480x270, not
      960x540 -- the resample is applied against the PRE-CROP width.
@@ -163,6 +176,11 @@ from . import _cg
 # the same class object as `_cg.ImagingError`.
 from ._cg import ImagingError                              # noqa: F401
 
+# FOR THE TESTS ALONE. No function in this module, and no code path a user
+# reaches, invokes `sips` any more -- `probe` was the last one. It stays
+# because five differential test modules run the old tool as their reference
+# and spell its path `imaging.SIPS`, so deleting it here would delete the
+# comparison that proves the replacements right. It goes when they do.
 SIPS = "/usr/bin/sips"
 
 
@@ -255,45 +273,32 @@ def _cleared(out_path) -> str:
                 f"removed ({exc.strerror})")
 
 
-def _properties(stdout: str) -> dict:
-    values = {}
-    for line in stdout.splitlines():
-        key, sep, value = line.strip().partition(":")
-        if sep:
-            values[key.strip()] = value.strip()
-    return values
-
-
 def probe(path):
     """(width, height, format) for an image, or None for anything else.
 
-    Never raises. Decides from stdout, not from the exit status -- see fact 1.
+    Never raises, for any input at all -- see `_cg.probe_file`, which is the
+    whole of it now.
+
+    NO SUBPROCESS. This was the last `sips` call in the tool, and the last
+    one that could be missing: measuring is an in-process ImageIO call, so
+    there is no longer a way for the imaging layer to answer "not an image"
+    because a binary was absent rather than because the file was. `cli` had a
+    pre-flight and a `doctor` line built entirely around that failure, and
+    both are gone with it.
+
+    What is preserved, deliberately and exactly, is the answer. Over all 894
+    corpus photographs this returns the same dimensions as the `sips -g`
+    parse it replaces -- zero disagreements -- and the same format string for
+    every format the corpus holds: 841 jpeg, 47 png, 3 webp, 2 heic, 1 gif,
+    including `snowy_forest_landscape_9522.jpg`, which is a WebP under a
+    `.jpg` name and was reported `webp` by both. `_cg.SOURCE_FORMATS` is
+    where those strings are pinned and where the measurement is recorded.
+
+    Fact 1 above is retired as a description of THIS function and kept as a
+    statement about `sips`. Its successor is narrower and stronger: there is
+    no exit status to misread, because there is no process.
     """
-    path = Path(path)
-    try:
-        proc = subprocess.run(
-            [SIPS, "-g", "pixelWidth", "-g", "pixelHeight", "-g", "format", str(path)],
-            capture_output=True, text=True, timeout=60,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-
-    # A negative returncode means sips was killed by a signal, which is what
-    # .DS_Store does to it. There is nothing usable in stdout in that case,
-    # but check explicitly so the reason is documented rather than incidental.
-    if proc.returncode < 0:
-        return None
-
-    values = _properties(proc.stdout)
-    try:
-        width = int(values.get("pixelWidth", ""))
-        height = int(values.get("pixelHeight", ""))
-    except ValueError:
-        return None          # '<nil>', absent, or not a number
-    if width < 1 or height < 1:
-        return None
-
-    return (width, height, values.get("format", "unknown"))
+    return _cg.probe_file(path)
 
 
 def normalize_to_srgb_png(source, out_path) -> None:

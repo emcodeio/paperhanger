@@ -15,6 +15,7 @@ behaviour.
 
 import os
 import shutil
+import subprocess
 import tempfile
 from pathlib import Path
 
@@ -518,83 +519,82 @@ def test_overwrite_demands_the_upscaler_again(
 
 # ---------- the sips pre-flight ----------
 
-@pytest.fixture
-def no_sips(tmp_path, monkeypatch):
-    """A machine whose sips is missing, quarantined, or not where it was."""
-    monkeypatch.setattr(imaging, "SIPS", str(tmp_path / "no" / "such" / "sips"))
+# ---------- the sips pre-flight, and why there is no longer one ----------
+#
+# Four tests stood here. They pinned a pre-flight that refused to start when
+# `/usr/bin/sips` was missing, and a `doctor` line that reported the same
+# thing, because a probe that could not spawn `sips` returned None for every
+# photograph and the run told the user their whole 894-image library was
+# unreadable -- `0 images, 0 outputs, 0 rejected, 0 already done, 894
+# non-images skipped`, written at exit 0.
+#
+# `probe` measures through ImageIO in this process now, so that failure has no
+# way to happen: there is no binary on the imaging path to be missing. The
+# tests went with the check rather than being rewritten, because there is
+# nothing left for them to assert -- a pre-flight for it would be a branch
+# that can never be taken, and the deleted `doctor` line named a tool the tool
+# does not use.
+#
+# What replaces them is the two below: one that a scan measures correctly with
+# every subprocess on the machine broken, which is the failure class stated as
+# a property rather than as a guard, and one that `doctor` has stopped
+# mentioning `sips` while still reporting everything that CAN be missing.
 
 
-def test_a_missing_sips_stops_the_run_rather_than_emptying_it(
-        inbox, tmp_path, no_sips, capsys):
-    """One sentence instead of a lie about the user's whole library.
+def test_a_scan_measures_photographs_with_every_subprocess_broken(
+        inbox, tmp_path, monkeypatch, capsys):
+    """The deleted pre-flight's failure class, shown not to exist.
 
-    `probe` returns None for anything it cannot measure and never raises,
-    which is correct -- it is how a .DS_Store is told from a photograph. The
-    cost is that a missing sips is indistinguishable from a directory of
-    files that are none of them images.
+    The old probe spawned `/usr/bin/sips` per file, so a missing or
+    quarantined binary emptied the scan. Here every spawn on the machine
+    raises, and the run still measures the photograph and plans its outputs --
+    which is only possible because measuring no longer leaves the process.
+
+    `--dry-run` so that nothing downstream needs `upscayl-bin`, which really
+    is an external binary and really can be missing; this is a statement about
+    the imaging path, not about the toolchain.
     """
     fixture(inbox / "lichen.png", 2000, 3000)
 
-    code, out = run([str(inbox), "--processing-dir", str(tmp_path / "proc")], capsys)
+    def refuse(*args, **kwargs):
+        raise AssertionError(f"the scan spawned a subprocess: {args!r}")
 
-    assert code == cli.USAGE_ERROR
-    assert imaging.SIPS in error_block(out)
-    assert "0 images" not in out, \
-        "the report header must not describe the photograph as unreadable"
+    monkeypatch.setattr(subprocess, "run", refuse)
+    monkeypatch.setattr(subprocess, "Popen", refuse)
 
-
-def test_without_the_check_a_missing_sips_reports_the_library_as_unreadable(
-        inbox, tmp_path, no_sips, monkeypatch, capsys):
-    """Guards the guard: what the check above is preventing, measured.
-
-    With `check_sips` neutered the run scans the directory, measures nothing,
-    classifies the photograph as a non-image, plans no work, writes no file
-    and exits 0 -- telling the user their photographs are corrupt. Without
-    this test the assertion above would pass equally well against a pre-flight
-    that refused every run for some unrelated reason.
-    """
-    fixture(inbox / "lichen.png", 2000, 3000)
-    monkeypatch.setattr(cli, "check_sips", lambda: None)
-
-    code, out = run([str(inbox), "--processing-dir", str(tmp_path / "proc")], capsys)
+    code, out = run([str(inbox), "--dry-run",
+                     "--processing-dir", str(tmp_path / "proc")], capsys)
 
     assert code == cli.OK
-    assert "0 images" in out and "1 non-image" in out
-    assert not (tmp_path / "proc" / "to_sort_phone").exists()
+    assert "1 image" in out
+    assert "1 non-image" not in out, \
+        "the photograph must not be counted as junk"
 
 
-def test_a_missing_sips_is_refused_before_the_directory_is_read(
-        tmp_path, no_sips, capsys):
-    """The complaint is about sips, not about the input.
+def test_doctor_reports_the_upscaler_and_no_longer_reports_sips(capsys):
+    """Everything doctor names is something that can actually be missing.
 
-    An unreadable directory and a missing sips both end the run at exit 1, and
-    only one of them is the user's actual problem -- so the check runs first
-    and the message says which.
+    The binary and the model still can be, so both stay. `sips` cannot affect
+    a run any more, and a line saying `sips: ok` would assert a dependency
+    this tool has stopped having.
     """
-    inbox = tmp_path / "in"
-    inbox.mkdir()
-    fixture(inbox / "lichen.png", 2000, 3000)
-    inbox.chmod(0o000)
-    try:
-        code, out = run([str(inbox), "--processing-dir", str(tmp_path / "proc")],
-                        capsys)
-    finally:
-        inbox.chmod(0o755)
-
-    assert code == cli.USAGE_ERROR
-    assert imaging.SIPS in error_block(out)
-    assert "cannot read" not in out
-
-
-def test_doctor_and_the_run_read_the_same_sips(tmp_path, no_sips, capsys):
-    """Both ask `sips_is_present`, so neither can start saying something the
-    other does not. doctor reported this before `_run` did."""
     code, out = run(["doctor"], capsys)
 
     assert code == cli.OK
-    assert "MISSING" in next(line for line in out.splitlines()
-                             if line.startswith("sips"))
-    assert cli.check_sips() is not None
+    assert "sips" not in out.lower()
+    assert any(line.startswith(cli.BINARY_LABEL) for line in out.splitlines())
+    assert any(line.startswith("model") for line in out.splitlines())
+
+
+def test_the_sips_preflight_is_gone_from_the_module():
+    """Named, so that deleting the tests above cannot quietly leave the check.
+
+    Both spellings: a run that still called `check_sips` would keep refusing
+    on a machine without `sips`, and this file would no longer have a test
+    that noticed.
+    """
+    assert not hasattr(cli, "check_sips")
+    assert not hasattr(cli, "sips_is_present")
 
 
 # ---------- skip-existing, decided once ----------
@@ -660,10 +660,13 @@ def test_every_skip_existing_decision_goes_through_one_function(
 # ---------- setup and doctor ----------
 
 def test_doctor_reports_without_failing(capsys):
+    """`sips` was the second thing asserted here and is deliberately gone --
+    see `test_doctor_reports_the_upscaler_and_no_longer_reports_sips`. The
+    model takes its place, so this still checks two lines rather than one."""
     code, out = run(["doctor"], capsys)
     assert code == 0
     assert "upscayl" in out.lower()
-    assert "sips" in out.lower()
+    assert "model" in out.lower()
 
 
 def test_doctor_names_where_the_binary_came_from(tmp_path, monkeypatch, capsys):

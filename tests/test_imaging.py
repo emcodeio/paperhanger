@@ -4,12 +4,21 @@ from pathlib import Path
 
 import pytest
 
-from paperhanger import geometry, imaging
+from paperhanger import cli, geometry, imaging
 from paperhanger.geometry import Rect
 from tests.pixels import read_png_rgb, write_marked_png, write_png
 
 
 # ---------- probe ----------
+#
+# `probe` decides WHAT COUNTS AS AN IMAGE. `cli.scan` separates photographs
+# from junk with it, `crop` bounds-checks with it, `execute` uses it as a
+# post-condition and the report's non-image count is its None answers. It is
+# also the one operation in this module that writes no file, so the
+# differential harness the other six replacements lean on cannot see a
+# regression here at all: a format string that quietly became "public.jpeg"
+# would break no output and every comparison. Hence the corpus format table
+# below, and hence every string in `_cg.SOURCE_FORMATS` being measured.
 
 def test_probe_reads_a_png(tmp_path):
     path = write_png(tmp_path / "a.png", 640, 480)
@@ -28,34 +37,73 @@ def test_probe_reads_odd_dimensions(tmp_path):
     ("empty.jpg", b""),
     ("empty.png", b""),
 ])
-def test_probe_rejects_non_images_that_exit_zero(tmp_path, name, content):
-    """sips exits 0 for all of these, printing 'pixelWidth: <nil>'. Exit status
-    is not the signal; parsing stdout is."""
+def test_probe_rejects_non_images(tmp_path, name, content):
+    """Junk is None, whatever its name says.
+
+    These were the files `sips` exited 0 for while printing
+    `pixelWidth: <nil>`, which is why the old probe read stdout instead of the
+    exit status. ImageIO has no exit status to misread: it builds no image
+    source for any of them, so the answer falls out of the decode. The two
+    `.jpg`/`.png` rows are the ones that matter -- the extension is not
+    evidence, and a probe that trusted it would pass the `.txt` row alone.
+    """
     path = tmp_path / name
     path.write_bytes(content)
     assert imaging.probe(path) is None
 
 
 def test_probe_rejects_a_truncated_jpeg(tmp_path):
-    # For this synthetic image, sips's SOF0 marker lands at byte 156 but sips
-    # still needs data past it (measured: dims come back on this machine
-    # somewhere between 700-800 bytes in, not at the marker) before it will
-    # report dimensions. 100 bytes is comfortably short of that on this
-    # generated fixture -- a real photo's larger header made 2000 bytes the
-    # right cutoff in the brief's corpus, but is not universal, so this test
-    # picks a cutoff verified against the actual fixture it truncates.
+    """A JPEG cut off before its dimensions are readable is not an image.
+
+    The cutoff is verified against THIS fixture rather than assumed: the
+    control below asserts the untruncated file probes correctly, so the test
+    cannot pass by having produced something unreadable at both lengths --
+    which is exactly how it would pass if `probe` started returning None for
+    everything.
+
+    100 bytes is short of the SOF marker for this generated image. Measured
+    while moving `probe` to ImageIO, on a 400x300 fixture: the first 200 bytes
+    give a source whose type is `public.jpeg` and whose decode still returns
+    NULL, and `sips` agreed, printing no dimensions. A real photograph's
+    larger header makes the threshold file-specific, which is why this
+    truncates and measures one known file instead of naming a universal
+    number.
+    """
     good = write_png(tmp_path / "good.png", 400, 300, noise=True)
     jpeg = tmp_path / "full.jpg"
-    subprocess.run(["/usr/bin/sips", "-s", "format", "jpeg", str(good),
-                    "--out", str(jpeg)], check=True, capture_output=True)
+    imaging.resize_and_encode(good, 400, 300, "jpeg", 90, jpeg, resize=False)
+
+    assert imaging.probe(jpeg) == (400, 300, "jpeg"), \
+        "the control failed: the untruncated fixture must be readable, or " \
+        "the truncation below proves nothing"
+
     truncated = tmp_path / "truncated.jpg"
     truncated.write_bytes(jpeg.read_bytes()[:100])
     assert imaging.probe(truncated) is None
 
 
-def test_probe_survives_a_file_that_aborts_sips(tmp_path, corpus):
-    """.DS_Store makes sips die with an uncaught NSException (exit 134 in a
-    shell, a negative returncode in Python). probe must not raise."""
+def test_probe_declines_a_ds_store(tmp_path):
+    """.DS_Store killed `sips` with a SIGNAL. ImageIO must just say no.
+
+    Measured on the real corpus file: `sips -g pixelWidth` died on an uncaught
+    NSInvalidArgumentException -- `object cannot be nil (key: typeIdentifier)`
+    -- returncode -6, which is the whole reason the old probe checked
+    `returncode < 0`. ImageIO builds a CGImageSource for the same bytes
+    perfectly happily and then reports a count of 0, no type and no image at
+    index 0, so the decode is what declines it.
+
+    Synthetic bytes rather than the corpus file, so this runs on any machine;
+    `test_probe_declines_the_real_ds_store` is the same assertion against the
+    real one.
+    """
+    junk = tmp_path / ".DS_Store"
+    junk.write_bytes(b"\x00\x00\x00\x01Bud1" + b"\x00" * 64)
+    assert imaging.probe(junk) is None
+
+
+def test_probe_declines_the_real_ds_store(tmp_path, corpus):
+    """The synthetic bytes above, checked against the file that provoked all
+    of this. Skips where the corpus is not present."""
     ds_store = corpus / ".DS_Store"
     if not ds_store.exists():
         pytest.skip("no .DS_Store in the corpus")
@@ -64,9 +112,22 @@ def test_probe_survives_a_file_that_aborts_sips(tmp_path, corpus):
     assert imaging.probe(local) is None
 
 
+def test_probe_reports_the_real_format_not_the_extension(tmp_path, webp_fixture):
+    """The corpus really contains `snowy_forest_landscape_9522.jpg`, a WebP.
+
+    Asserted as the POSITIVE string rather than `!= "jpeg"`: a probe that had
+    started answering "unknown" for every WebP would satisfy the inequality
+    and would be a regression, since `webp` is what the old probe returned for
+    all three WebPs in the corpus, that mis-named one included.
+    """
+    src = webp_fixture(tmp_path / "lies.jpg", 300, 200)
+    assert src.suffix == ".jpg"
+    assert imaging.probe(src) == (300, 200, "webp")
+
+
 def test_probe_reports_actual_format_not_extension(tmp_path, corpus):
-    """snowy_forest_landscape_9522.jpg in the corpus is really a WebP. This is
-    why normalize-or-not is decided from the probe, never from the suffix."""
+    """The same file the fixture above stands in for. This is why
+    normalize-or-not is decided from the probe, never from the suffix."""
     lying = corpus / "snowy_forest_landscape_9522.jpg"
     if not lying.exists():
         pytest.skip("the known extension-mismatch fixture is not present")
@@ -78,27 +139,20 @@ def test_probe_reports_actual_format_not_extension(tmp_path, corpus):
     assert local.suffix == ".jpg"
 
 
-def test_probe_names_a_format_it_cannot_read_rather_than_crashing(
-        tmp_path, monkeypatch):
-    """`values.get("format", "unknown")` -- the fallback nothing exercised.
+def test_probe_never_raises(tmp_path):
+    """The contract, stated as one test over every shape that has broken it.
 
-    A measurable image whose format line sips does not print is the shape
-    that reaches it, and the fallback is what keeps `probe` to its contract of
-    returning a triple or None rather than raising. Written as
-    `values["format"]` it raises KeyError, out of the one function in this
-    module documented never to raise, in the middle of a scan over 894 files.
-
-    The stdout is stubbed because sips prints a format for everything it can
-    measure at all; what is being pinned is the branch, not a file.
+    `cli.scan` calls this on every entry of a directory the user chose, so
+    anything that raises here ends a run over someone's Pictures folder with
+    a traceback instead of a wallpaper.
     """
-    class Result:
-        returncode = 0
-        stdout = "  pixelWidth: 640\n  pixelHeight: 480\n"
-        stderr = ""
-
-    monkeypatch.setattr(imaging.subprocess, "run", lambda *a, **k: Result())
-
-    assert imaging.probe(tmp_path / "whatever.png") == (640, 480, "unknown")
+    junk = tmp_path / ".DS_Store"
+    junk.write_bytes(b"\x00\x00\x00\x01Bud1" + b"\x00" * 64)
+    empty = tmp_path / "empty.png"
+    empty.write_bytes(b"")
+    for candidate in [tmp_path, tmp_path / "absent.png", junk, empty,
+                      tmp_path / "no" / "such" / "parent" / "x.png"]:
+        assert imaging.probe(candidate) is None
 
 
 def test_probe_of_a_missing_file_is_none(tmp_path):
@@ -107,6 +161,91 @@ def test_probe_of_a_missing_file_is_none(tmp_path):
 
 def test_probe_of_a_directory_is_none(tmp_path):
     assert imaging.probe(tmp_path) is None
+
+
+def test_probe_runs_no_subprocess(tmp_path, monkeypatch):
+    """What the deleted `sips` pre-flight was guarding, from the other side.
+
+    `cli` refused to start when `/usr/bin/sips` was missing, because a probe
+    that could not spawn it returned None for every photograph and the run
+    reported a whole library as unreadable. That check is gone, and this is
+    the evidence that it can be: measuring spawns nothing, so there is no
+    binary whose absence could empty a scan.
+
+    Breaks every spawn on the machine for the duration, rather than checking
+    `imaging.SIPS` -- which still exists for the differential harnesses, and
+    which a probe could therefore still be reading without this noticing.
+    """
+    def refuse(*args, **kwargs):
+        raise AssertionError(f"probe spawned a subprocess: {args!r}")
+
+    path = write_png(tmp_path / "a.png", 64, 48)
+    monkeypatch.setattr(subprocess, "run", refuse)
+    monkeypatch.setattr(subprocess, "Popen", refuse)
+    monkeypatch.setattr(subprocess, "check_output", refuse)
+
+    assert imaging.probe(path) == (64, 48, "png")
+
+
+# The census the `sips` probe returned for the whole corpus, recorded BEFORE
+# the ImageIO one was written, by running the old body over all 894
+# photographs. It is the only check in this project that can catch a format
+# string changing, because `probe` writes no file for a differential to
+# compare -- so it is pinned as counts rather than as a set, and a photograph
+# whose format were read differently would move one count and fail.
+CORPUS_FORMATS = {"jpeg": 841, "png": 47, "webp": 3, "heic": 2, "gif": 1}
+
+
+@pytest.mark.corpus
+def test_probe_reproduces_the_sips_format_census_over_the_whole_corpus(corpus):
+    """Tier 2: all 894, against what `sips -g format` said for each.
+
+    `cli.scan` is what the tool actually calls, so this goes through it rather
+    than through `probe` directly -- the non-image count it returns is the
+    other half of the answer, and `.DS_Store` is the one file that has to land
+    there.
+    """
+    from collections import Counter
+
+    images, non_images = cli.scan(corpus)
+
+    assert Counter(fmt for _p, _w, _h, fmt in images) == CORPUS_FORMATS
+    assert sum(CORPUS_FORMATS.values()) == 894
+    assert non_images == 1, \
+        "the corpus holds exactly one non-image, its .DS_Store"
+
+
+@pytest.mark.corpus
+def test_probe_agrees_with_sips_on_every_corpus_dimension(corpus):
+    """The other half of the triple, over the same 894 files.
+
+    Runs the old `sips -g` parse here rather than trusting the recorded
+    census, because dimensions are 894 pairs and a table of them in this file
+    would be a transcription nobody could check. Zero disagreements was the
+    measured result.
+    """
+    disagreed = []
+    for path in sorted(p for p in Path(corpus).iterdir() if p.is_file()):
+        proc = subprocess.run(
+            [imaging.SIPS, "-g", "pixelWidth", "-g", "pixelHeight", str(path)],
+            capture_output=True, text=True)
+        values = {}
+        for line in proc.stdout.splitlines():
+            key, sep, value = line.strip().partition(":")
+            if sep:
+                values[key.strip()] = value.strip()
+        try:
+            expected = (int(values["pixelWidth"]), int(values["pixelHeight"]))
+        except (KeyError, ValueError):
+            expected = None                        # the .DS_Store, and only it
+
+        measured = imaging.probe(path)
+        got = None if measured is None else measured[:2]
+        if got != expected:
+            disagreed.append((path.name, expected, got))
+
+    assert not disagreed, (f"{len(disagreed)} file(s) measured differently "
+                           f"from sips: {disagreed[:5]}")
 
 
 # ---------- operations ----------

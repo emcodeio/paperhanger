@@ -25,10 +25,10 @@ geometry runs against 27 real aspect ratios instead of the handful anybody
 would think to type out.
 
 What it costs, and what that buys: one run of the tool over 27 photographs,
-about seven minutes of real sips. The stub replaces the ML model and nothing
-else -- every crop, resample, colour conversion and encode below is the real
-thing, on real pixels, at full size. That is also why the run is a MODULE
-fixture: it is one run, asked eleven different questions.
+several minutes of real imaging. The stub replaces the ML model and nothing
+else -- every measure, crop, resample, colour conversion and encode below is
+the real thing, on real pixels, at full size. That is also why the run is a
+MODULE fixture: it is one run, asked eleven different questions.
 
 What it cannot see, and where to look instead:
 
@@ -37,7 +37,10 @@ What it cannot see, and where to look instead:
     marked fixtures are what prove a crop lands where it was asked to.
   * Whether `probe` is telling the truth. It is both the measurement and the
     thing measured, so a probe that misreported every file would agree with
-    itself all the way through. Tier 1 measures it against PNGs of known size.
+    itself all the way through. Tier 1 measures it against PNGs of known
+    size, and `test_imaging.py` carries two Tier 2 tests that measure it
+    against `sips` over all 894 corpus files -- dimensions and format
+    strings both -- which is the check this file cannot make.
   * Anything about encoder quality: `-s formatOptions 80` is checked where it
     is passed, not in the bytes that come back.
   * Any flag but `--format heic` over both devices. One run is what seven
