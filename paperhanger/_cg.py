@@ -55,7 +55,14 @@ monochrome ACCEPTS it and renders the wrong picture.
 
 The grayscale failure only fires when the draw SCALES. At 1:1 the same
 bad pairing round-trips correctly, which is why it survived measurement
-twice before Task 0 caught it.
+twice before Task 0 caught it. `resize_to_file` does not draw at 1:1 at
+all -- see the identity case there -- so the pairing is now only reached
+where it is visible, and `tests/test_resize_differential.py` compares a
+REDUCING resample against `sips` for each of the four rows a fixture can
+produce: monochrome and RGB, each with and without alpha. The Indexed
+row is a refusal rather than a picture and has its own test; nothing in
+`tests/pixels.py` writes a 32-bit float PNG, so that row is measured in
+the preflight instruments and nowhere else.
 """
 
 import ctypes
@@ -508,3 +515,86 @@ def crop_to_file(source, x: int, y: int, width: int, height: int,
             )
 
         write_png(scope, cut, out_path)
+
+
+def resize_to_file(source, out_width: int, out_height: int, out_path) -> None:
+    """Resample to exactly out_width x out_height and write PNG.
+
+    Both axes are always explicit; nothing here derives one from the other.
+
+    INTERPOLATION IS SET TO HIGH BY NAME, and the test for it asserts the
+    call rather than the output, because no output can tell High from
+    Default. Measured on a 2000x1400 noise PNG at three target shapes:
+    Default and High are byte-identical at all three, while None, Low and
+    Medium each produce a different file. So a wrong constant would be
+    caught by the differential -- except the one that is Default today and
+    is Apple's to redefine tomorrow, which is the one the call pins.
+    (On a greyscale ramp, Low and Medium match High too: a smooth source
+    cannot tell interpolation levels apart, which is why the resample
+    fixtures carry noise.)
+
+    AT IDENTITY THE DRAW IS SKIPPED, and that is not an optimisation with a
+    neutral output. `render` asks this function for the source's own
+    dimensions on 577 of the 2734 resamples a full corpus run performs --
+    band 4 renders the 4x frame at scale 4, so `resize = needs_resize or
+    scale != 1` computes True for a resample that changes nothing -- and
+    those calls are where CoreGraphics is furthest from `sips` in both
+    memory and pixels. Measured here, on this machine:
+
+      * PIXELS. Over 63 corpus photographs at their own dimensions, the
+        concatenated `IDAT` of the skip equals `sips`' on 63 of 63; the draw
+        equals it on 11. The three files the preflight found diverging --
+        green_leaf_closeup_2463, roadside_grass_2121,
+        sunlight_through_leaves_8375, all 7680x5120 -- are three of the 52
+        the draw alters, at 31.8-46.8% of bytes and a maximum channel delta
+        of 61-97. So the draw INTRODUCES the divergence and skipping it
+        removes it; there is nothing to pin.
+      * ALPHA. A 400x300 RGBA source at alpha 128 comes back from the draw
+        differing from `sips` on 120,000 of 480,000 samples, every one of
+        them by 1, because the destination bitmap is PremultipliedLast and
+        the encode has to undo the premultiply. Grey+alpha: 60,400 of
+        240,000. The skip is byte-identical to `sips` on both.
+      * MEMORY. 7680x5120, peak RSS of a child process per route, three runs
+        each: `sips` 332.1 MiB, the draw 499.2, the skip 351.0. The draw
+        holds the decoded frame and a second bitmap of the same dimensions
+        at once -- 7680 x 5120 x 4 is 157 MB of it -- where the skip holds
+        one frame and lands within 6% of `sips`.
+
+    THE CONDITION IS THE DIMENSIONS AND NOTHING ELSE, and that is true HERE
+    for a reason that does not travel. `bitmap_context` builds the
+    destination out of the SOURCE's own colour space, so the draw in this
+    function converts nothing: skipping it deletes no work. Where a draw
+    targets a colour space of our choosing it IS the conversion -- Task 6's
+    `normalize_to_srgb_png` is exactly that -- and skipping it there would
+    delete the conversion. Do not read this condition as a general licence.
+
+    Two consequences of skipping, both measured and neither a defect:
+
+      * An INDEXED source resizes at identity and is refused at every other
+        shape, because `bitmap_format` is what refuses it and the identity
+        path does not build a context. The skip's output is byte-identical
+        to `sips`' for that source, so the asymmetry is between raising and
+        succeeding correctly, not between two answers.
+      * A source shallower than 8 bits per component still comes back at 8,
+        because ImageIO's decode is what promotes it. The draw does the same
+        thing; `sips` keeps the depth. Measured on a 1-bit greyscale PNG:
+        draw and skip are byte-identical to each other and both differ from
+        `sips` in depth alone. Skipping neither causes nor cures it.
+    """
+    with Scope() as scope:
+        image = load(scope, source)
+
+        if dimensions(image) == (out_width, out_height):
+            write_png(scope, image, out_path)
+            return
+
+        ctx = bitmap_context(scope, image, out_width, out_height, source)
+        _CG_LIB.CGContextSetInterpolationQuality(ctx, kCGInterpolationHigh)
+        _CG_LIB.CGContextDrawImage(
+            ctx, CGRect(CGPoint(0.0, 0.0),
+                        CGSize(float(out_width), float(out_height))), image)
+        scaled = scope.own(_checked(
+            _CG_LIB.CGBitmapContextCreateImage(ctx),
+            f"read back the {out_width}x{out_height} resample", source),
+            kind="image")
+        write_png(scope, scaled, out_path)

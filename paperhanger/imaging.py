@@ -6,6 +6,13 @@ remain true statements ABOUT `sips`, they are the reason this migration
 exists, and `tests/test_crop_differential.py` still runs the old pad-and-shift
 body as its differential reference, which depends on every one of them.
 
+The RESAMPLE half of `resize_and_encode` went the same way, so fact 3 has
+stopped describing a call in this file as well: no `--resampleWidth` or
+`--resampleHeight` is passed by anything here any more. The rule it justifies
+-- that the caller's two numbers are both used and neither is derived -- is
+now enforced inside `_cg.resize_to_file`. The ENCODE is still `sips`, so facts
+1, 4 and 7 remain live descriptions of calls in this file.
+
 Seven measured facts shape this file. Each fails SILENTLY if ignored:
 
   1. sips -g pixelWidth exits 0 while printing `pixelWidth: <nil>` for text,
@@ -142,6 +149,11 @@ from ._cg import ImagingError                              # noqa: F401
 
 SIPS = "/usr/bin/sips"
 SRGB_PROFILE = "/System/Library/ColorSync/Profiles/sRGB Profile.icc"
+
+# What `resize_and_encode` appends to its destination's name for the lossless
+# intermediate between the CoreGraphics resample and the `sips` encode. It
+# ends in `execute.PARTIAL_SUFFIX` on purpose -- see that function.
+STAGED_RESIZE_SUFFIX = ".resized.partial"
 
 
 def _tail(stream) -> str:
@@ -321,19 +333,67 @@ def crop(source, rect, out_path) -> None:
 
 def resize_and_encode(source, out_width: int, out_height: int, fmt: str,
                       quality, out_path, resize: bool) -> None:
-    """Resample (optionally) and encode, in one invocation.
+    """Resample (optionally) and encode.
 
     Both axes are always passed explicitly -- see fact 3. The caller computed
-    them; this function does not derive anything.
+    them; this function does not derive anything. The signature is unchanged
+    and `execute` is untouched; what changed is who does the resampling.
+
+    THE RESAMPLE IS A CoreGraphics CALL AND THE ENCODE IS STILL `sips`, so a
+    resizing call now writes a lossless PNG beside its output and encodes
+    that. Task 5 replaces the encode and the staging file goes with it.
+
+    The staged file is removed on every exit, including the failing ones, and
+    its name is built to survive the one exit no `finally` covers. It is the
+    destination's whole name with `.resized.partial` APPENDED -- appended
+    rather than substituted, so no suffix of the caller's is replaced and no
+    other plan's output name can be produced -- and it ends in `.partial`
+    because `execute.sweep_partials` globs exactly that at the start of every
+    run. A process killed between the resample and the encode therefore
+    leaves a file the next run tidies, rather than a 300 MB PNG standing in
+    the output directory looking like something the tool meant to write.
+    The suffix is spelled out here rather than imported: `execute` imports
+    this module, so the constant cannot travel the other way.
+
+    Three behaviours changed with the resample, all measured:
+
+      * AN IDENTITY RESAMPLE IS A PASS-THROUGH. `_cg.resize_to_file` skips
+        the draw when the source already has the requested dimensions, which
+        is 577 of the 2734 resamples a corpus run performs. It is also the
+        case where drawing diverged from `sips` -- see that function for the
+        counts.
+      * A 16-BIT SOURCE KEEPS ITS DEPTH, where `sips --resampleHeightWidth`
+        drops it to 8. The same intended divergence already pinned for
+        `crop`, and no corpus file is 16-bit.
+      * AN UNREADABLE SOURCE FAILS DIFFERENTLY. It used to be `sips`
+        exiting 0 with `not a valid file` on stderr, or exiting 13; it is now
+        an ImagingError from ImageIO naming the file. Same exception type,
+        same guarantee that no output is left behind -- the destination is
+        cleared BEFORE the resample rather than by `_run`, because the
+        resample can now fail before `_run` is ever reached and a stale file
+        from an earlier run must not be able to stand in for output.
     """
-    argv = [SIPS]
+    out_path = Path(out_path)
+    source_for_encode = source
+    staged = None
+
     if resize:
-        argv += ["--resampleHeightWidth", str(out_height), str(out_width)]
-    argv += ["-s", "format", fmt]
-    if quality is not None:
-        argv += ["-s", "formatOptions", str(quality)]
-    argv += [str(source), "--out", str(out_path)]
-    _run(argv, produces=out_path)
+        # Fact 4's guarantee, moved earlier: `_run(produces=...)` clears the
+        # destination, and the resample now runs before it.
+        out_path.unlink(missing_ok=True)
+        staged = out_path.with_name(out_path.name + STAGED_RESIZE_SUFFIX)
+        _cg.resize_to_file(source, out_width, out_height, staged)
+        source_for_encode = staged
+
+    try:
+        argv = [SIPS, "-s", "format", fmt]
+        if quality is not None:
+            argv += ["-s", "formatOptions", str(quality)]
+        argv += [str(source_for_encode), "--out", str(out_path)]
+        _run(argv, produces=out_path)
+    finally:
+        if staged is not None:
+            staged.unlink(missing_ok=True)
 
 
 def upscale(source_png, out_png, binary, models_dir,

@@ -554,13 +554,37 @@ def test_cropping_before_normalizing_is_the_same_picture(tmp_path):
 def test_failure_raises_with_stderr(tmp_path):
     """Fact 4. sips does not fail here -- it exits 0, warns on stderr, and
     writes nothing. Measured: `sips -s format png missing.png --out x.png`
-    exits 0 and no x.png appears. Only the post-condition catches it."""
+    exits 0 and no x.png appears. Only the post-condition catches it.
+
+    resize=False, because that is now the branch `sips` still runs. The
+    resizing branch fails earlier and in CoreGraphics, which is the test
+    below; this one is about the encode, and the encode is still a
+    subprocess whose exit status means nothing.
+    """
+    missing = tmp_path / "nope.png"
+    out = tmp_path / "x.png"
+    with pytest.raises(imaging.ImagingError) as caught:
+        imaging.resize_and_encode(missing, 100, 100, "png", None,
+                                  out, resize=False)
+    assert "not a valid file" in str(caught.value)   # sips's own stderr
+    assert not out.exists()
+
+
+def test_the_resize_branch_fails_in_the_binding_layer_instead(tmp_path):
+    """The same unreadable source, through the branch that now resamples.
+
+    Nothing reaches `sips` at all: ImageIO refuses to open the file and `_cg`
+    raises the one exception type this layer has, naming the path. The
+    guarantee that survives the change is the one the executor depends on --
+    one exception type per photo, and no output file left behind.
+    """
     missing = tmp_path / "nope.png"
     out = tmp_path / "x.png"
     with pytest.raises(imaging.ImagingError) as caught:
         imaging.resize_and_encode(missing, 100, 100, "png", None,
                                   out, resize=True)
-    assert "not a valid file" in str(caught.value)   # sips's own stderr
+    assert "could not open" in str(caught.value)
+    assert str(missing) in str(caught.value)
     assert not out.exists()
 
 
@@ -580,7 +604,12 @@ def test_a_directory_input_is_also_a_silent_skip(tmp_path):
 def test_a_stale_destination_cannot_stand_in_for_output(tmp_path):
     """The post-condition asks "is the file there?", so a leftover file from an
     earlier run would answer yes for a run that wrote nothing. Clearing the
-    destination first is what makes the question mean what it looks like."""
+    destination first is what makes the question mean what it looks like.
+
+    On this branch `_run` is never reached -- the resample fails first -- so
+    `produces=` is no longer what clears it. `resize_and_encode` clears the
+    destination itself before resampling, and this is the test that says so.
+    """
     missing = tmp_path / "nope.png"
     out = tmp_path / "out.png"
     write_png(out, 64, 64)                      # stale output from an earlier run
@@ -612,12 +641,29 @@ def test_a_timeout_raises_imaging_error():
 
 def test_a_nonzero_exit_raises_with_stderr(tmp_path):
     """The other branch of _run: a real non-image exits 13 rather than
-    skipping, so the status check is still doing work."""
+    skipping, so the status check is still doing work.
+
+    resize=False for the same reason as above -- a resizing call never gets
+    as far as the subprocess now, and this test is about the subprocess.
+    """
+    junk = tmp_path / "note.txt"
+    junk.write_bytes(b"this is not an image\n")
+    with pytest.raises(imaging.ImagingError) as caught:
+        imaging.resize_and_encode(junk, 100, 100, "png", None,
+                                  tmp_path / "x.png", resize=False)
+    message = str(caught.value)
+    assert "exited 13" in message
+    assert "Cannot extract image" in message         # sips's own stderr
+
+
+def test_a_non_image_is_refused_on_the_resize_branch_too(tmp_path):
+    """A file that exists and is not an image. ImageIO opens the source --
+    `CGImageSourceCreateWithURL` succeeds for anything readable -- and fails
+    at the decode, so this reaches a different `_checked` than the missing
+    file above and must still be the one exception type."""
     junk = tmp_path / "note.txt"
     junk.write_bytes(b"this is not an image\n")
     with pytest.raises(imaging.ImagingError) as caught:
         imaging.resize_and_encode(junk, 100, 100, "png", None,
                                   tmp_path / "x.png", resize=True)
-    message = str(caught.value)
-    assert "exited 13" in message
-    assert "Cannot extract image" in message         # sips's own stderr
+    assert "could not decode" in str(caught.value)
