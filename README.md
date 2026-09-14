@@ -156,6 +156,12 @@ The defaults differ per encoder because each sits at that encoder's own quality-
 
 Every crop in the tool routes through `imaging.crop` rather than calling an imaging API directly, which is what keeps the bounds check — still needed, since CoreGraphics silently returns the overlap where `sips` silently padded with black — from being forgotten at a new call site.
 
+**The resample no longer goes through `sips` either.** It is a `CGContextDrawImage` at interpolation High into a bitmap built from the source's own colour space, and both output dimensions are always passed explicitly — `--resampleWidth` and `--resampleHeight` derive the other axis and round it inconsistently, which is the third of the seven defects. The encode is still one `sips` per call, so a resizing call writes a lossless PNG beside its output and encodes that; that intermediate disappears when the encode moves too.
+
+**A resample that changes nothing now does nothing.** A fifth of the resamples a full run performs — 577 of 2734 — ask for the dimensions the image already has, because a phone slice of an upscaled frame is rendered at scale 4 and the render asks for a resample either way. Those hand the decoded frame straight to the encoder rather than drawing it at 1:1, which is not merely faster: over 63 corpus photographs at their own dimensions the pass-through matches `sips`' output on 63 of 63 where the 1:1 draw matches on 11, and on a 7680x5120 frame it holds peak memory to 351 MiB against the draw's 499 (`sips` itself peaks at 332). The draw is what introduced the difference — an alpha-bearing source loses a unit of precision to the premultiply round trip — so skipping it removes a divergence rather than trading accuracy for speed.
+
+Two behaviours changed with the resample. A 16-bit source keeps its depth, as with crop. And an unreadable source now fails inside ImageIO, naming the file, rather than as a `sips` warning on a zero exit — the same exception type, and still no output file left behind.
+
 ## Testing
 
 Four tiers. Only the first three are part of "implemented". The full-corpus run is the author's acceptance pass, deliberately outside the definition of done.
