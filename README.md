@@ -8,7 +8,7 @@ It replaces a set of zsh scripts that depended on Pixelmator Pro and ImageMagick
 
 macOS, and Python 3.14 or newer. The tool has no third-party runtime dependencies. It shells out to two programs:
 
-- `sips`, which ships with macOS, for measuring and for the colour conversion on the upscale path. Cropping, resizing and encoding are CoreGraphics calls now.
+- `sips`, which ships with macOS, for measuring. Cropping, resizing, encoding and the colour conversion on the upscale path are CoreGraphics calls now, so nothing asks `sips` to write a file any more.
 - `upscayl-bin`, the Upscayl ncnn command-line upscaler, for 4x enlargement. One self-contained binary plus one model file, installed by `paperhanger setup`.
 
 `magick` (ImageMagick) appears in the test suite for image comparison. It is not needed to run the tool.
@@ -167,6 +167,12 @@ Two behaviours changed with the resample. A 16-bit source keeps its depth, as wi
 **Outputs no longer carry the source's EXIF.** `sips` copied it forward; `CGImageDestinationAddImage` writes the picture and its colour profile and nothing else. On 21 of the 27 coverage images the HEIC and AVIF outputs are 127 to 2332 bytes smaller than `sips`' for that reason alone, with the coded picture identical underneath. It applies to JPEG too, where both tools write an Exif segment and only `sips` fills it from the source. The ICC profile is unaffected — an ICC-tagged source with no EXIF encodes byte-identically, whatever the profile — so nothing about colour changes; what is gone is the camera metadata riding along inside a wallpaper. The tag that would have been visible is Orientation, and no image in the corpus carries a rotating one: of 894, 257 carry Orientation 1, one the invalid 0, 128 carry EXIF without the tag, and the rest carry none.
 
 The same change makes a **progressive JPEG source come back baseline**, where `sips` inherited the source's scan: 10 to 21% more bytes on the four progressive images in the sample, and the same picture in the strongest sense — asked for progressive, ImageIO produces `sips`' own entropy-coded scan byte for byte on all four, two of them whole files included.
+
+**The sRGB conversion no longer goes through `--matchTo`, and it is the last `sips` write there was.** It is a `CGContextDrawImage` into a bitmap context built in sRGB, which is the one place in this codebase where the destination colour space is chosen rather than read off the source. That difference decides an optimisation: the resample skips its draw when the dimensions already match, and here the draw *is* the conversion, so a skip on the same condition would fire on every photo — nothing about normalizing resizes — and stop converting, silently, at the right dimensions and the right colour type. On a 600×400 source that costs 92% of the samples on an Adobe RGB file and a maximum channel error of 144; on the corpus sample it is caught by one Adobe RGB and one ProPhoto RGB photograph, and an untagged file cannot see it at all. `tests/test_normalize_differential.py` watches both the call and the pixels for exactly that reason.
+
+Three things changed with it. A 16-bit source comes back 8-bit — the one place the pipeline narrows depth, because `sips --matchTo` did the same and because the only reader of this file is `upscayl-bin`, which emits 8-bit PNG. Colour models the resampler refuses, indexed and CMYK among them, convert here without complaint, since they are only ever a *source* of this draw. And the two ITU video profiles now follow the transfer curve written in the profile rather than the gamma 2.4 `sips` applies instead — 15 to 18 levels out of 255 on the neutral axis, with ImageMagick's LittleCMS agreeing with CoreGraphics; no corpus file carries either profile.
+
+Memory does not move: peak RSS on a 7680×5120 photograph is 494.6 MiB here against `sips --matchTo`'s 479.2, and 21.5 MiB of ours is the Python interpreter and the `ctypes` bindings that the `sips` route runs without.
 
 ## Testing
 
