@@ -604,6 +604,17 @@ def test_an_unremovable_stale_output_still_raises_imaging_error(tmp_path):
         "the premise: the stale file could not be removed, which is why the "
         "unlink had to raise something")
 
+    # And it says WHY, which a bare `except OSError: pass` did not: that
+    # version left the caller with "could not create a heic destination"
+    # and no mention of the permission or of the file still standing there.
+    # `_cg._write` composes the same sentence for its own recovery unlink.
+    message = str(caught.value)
+    assert "still there" in message, message
+    assert "Permission denied" in message, message
+    assert isinstance(caught.value.__cause__, imaging.ImagingError), (
+        "the ImageIO failure is the cause; the unlink failure is the "
+        "annotation on it")
+
 
 def test_fact_4_still_has_a_live_caller(tmp_path):
     """A write that `sips` SKIPS still exits 0, and one call still runs it.

@@ -545,8 +545,10 @@ def _write(scope, image, out_path, uti: str, what: str, options=None):
     agree only when the source's entries are what ImageIO would have
     written anyway -- which is exactly what `sips --matchTo` puts in an
     `eXIf` chunk. On a from-scratch source carrying one IFD0 entry `sips`'
-    APP1 is 90 bytes against our 78, and at two entries 102 against the
-    same 78. So EXIF does not travel on ANY of the four formats, JPEG
+    APP1 segment is 90 bytes against our 78, and at two entries 102
+    against the same 78 -- whole segments, `FFE1` marker and length
+    included, which is 2 more than the same figures quoted as payloads.
+    So EXIF does not travel on ANY of the four formats, JPEG
     included, and an Orientation of 6 -- the one tag a viewer would see --
     is carried by `sips` and dropped by us.
 

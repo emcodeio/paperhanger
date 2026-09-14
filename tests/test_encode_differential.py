@@ -322,8 +322,10 @@ def test_the_source_exif_is_what_the_two_sides_disagree_about(tmp_path,
         # drop a PNG's eXIf on the way to JPEG"). They do not. Measured, both
         # write an APP1 Exif segment, and `sips` copies the source's IFD0
         # entries into it where ImageIO synthesises its own: on a
-        # from-scratch source carrying one IFD0 entry, `sips`' APP1 is 90
-        # bytes against our 78, and at two entries 102 against the same 78.
+        # from-scratch source carrying one IFD0 entry, `sips`' APP1 SEGMENT
+        # is 90 bytes against our 78, and at two entries 102 against the
+        # same 78 -- whole segments, marker and length included, so 2 more
+        # than the same measurement quoted as payload sizes.
         # The files agree HERE only because `sips --matchTo` writes an eXIf
         # holding exactly what ImageIO would have synthesised anyway. The
         # test below builds a source that does not, and the JPEGs differ.
@@ -536,6 +538,30 @@ def _jpeg_without_metadata(data: bytes) -> bytes:
         return b""
     return b"".join(payload for marker, payload in segments
                     if not 0xE0 <= marker <= 0xEF)
+
+
+SOF_MARKERS = frozenset(range(0xC0, 0xD0)) - {0xC4, 0xC8, 0xCC}
+
+
+def _jpeg_frame(data: bytes) -> bytes:
+    """The frame header's PAYLOAD, without its marker or length.
+
+    The payload and not the segment, because the marker is the one byte that
+    legitimately differs across the divergence this file pins: `sips` writes
+    SOF2 and ImageIO SOF0. Measured on all four progressive coverage sources,
+    the 15-byte payload is IDENTICAL across that pair -- so comparing it is
+    well defined precisely where whole-segment comparison would not be.
+
+    It carries the precision, both dimensions, the component count and, per
+    component, the sampling factors and quantization-table selector. Those
+    are the picture's shape, and DQT does not cover them: flipping component
+    0's sampling factor from 0x22 to 0x11 (4:2:0 to 4:4:4) leaves the tables
+    byte-identical, measured in both directions on two corpus sources.
+    """
+    for marker, payload in _jpeg_segments(data):
+        if marker in SOF_MARKERS:
+            return payload[4:]
+    return b""
 
 
 def _jpeg_tables(data: bytes) -> bytes:
@@ -901,17 +927,32 @@ def _describe_encode(source, fmt, old_out, new_out):
         # than swallowed by the word "progressive". The corpus vacuity guard
         # goes through this branch, which is how the hole was found.
         #
-        # A frame-header check stood here too and came out again: every
-        # dimension difference I could construct already moves DQT (400x300
-        # against 200x150 at quality 90 gives 138 bytes of tables either way
-        # and different contents), so nothing reached it. A mutation removing
-        # it left every gate green, which is what a check that is not there
-        # looks like.
         if _jpeg_tables(old) != _jpeg_tables(new):
             return ("a progressive source, and the quantization tables "
                     f"differ as well: sips {len(_jpeg_tables(old))} bytes, "
                     f"ours {len(_jpeg_tables(new))} -- the scan structure "
                     f"does not account for that")
+        # THE FRAME HEADER IS THE OTHER HALF, and it was deleted from here
+        # once on the evidence that every DIMENSION difference already moves
+        # DQT. That was true and it was the wrong test: a sampling-factor
+        # flip, 0x22 to 0x11, leaves the tables byte-identical and used to
+        # come back accounted for. Measured in both directions on two corpus
+        # sources. Deleting a check because one mutation class cannot reach
+        # it says nothing about the classes that can.
+        if _jpeg_frame(old) != _jpeg_frame(new):
+            return ("a progressive source, and the frame headers differ "
+                    "beyond the scan structure -- dimensions, sampling "
+                    "factors or table selectors, none of which the scan "
+                    "structure accounts for")
+        # DHT and the scan itself are NOT compared, and that is residual
+        # rather than an oversight. A progressive frame's Huffman tables are
+        # genuinely a different set -- 197 bytes against our 183, plus a
+        # `DRI` segment `sips` does not write -- and the scan is incomparable
+        # by construction. What stands in for both is the measurement in
+        # this module's docstring: asked for progressive, ImageIO produces
+        # `sips`' own scan byte for byte on four of four, 0.81 to 11.34 MB
+        # of it. That is stronger evidence than any gate over two different
+        # scan structures could be.
         return None
     if _jpeg_scan(old) != _jpeg_scan(new):
         return (f"the entropy-coded scan differs: sips {len(_jpeg_scan(old))} "
@@ -952,16 +993,82 @@ def test_the_jpeg_accounting_separates_metadata_from_picture(tmp_path,
         "difference")
 
 
+def _edit_segment(data: bytes, marker: int, offset_in_payload: int, value):
+    """`data` with one byte of one segment's payload changed.
+
+    Byte surgery rather than a second encode, because what these tests need
+    is a pair differing in EXACTLY one place -- a re-encode at another
+    quality moves the tables and the scan together, which is why the pair it
+    produces cannot tell one rule from another. `value` may be a callable
+    taking the old byte, for "change it to something else, whatever it is".
+    """
+    out = bytearray(data)
+    cursor = 2
+    while cursor + 4 <= len(out):
+        if out[cursor] != 0xFF:
+            break
+        found = out[cursor + 1]
+        if found == 0xDA:
+            break
+        length = struct.unpack(">H", out[cursor + 2:cursor + 4])[0]
+        if found == marker:
+            at = cursor + 4 + offset_in_payload
+            out[at] = value(out[at]) if callable(value) else value
+            return bytes(out)
+        cursor += 2 + length
+    raise AssertionError(f"no {marker:#04x} segment to edit")
+
+
+def test_the_jpeg_rule_notices_a_quantization_table_difference(tmp_path,
+                                                               photo_fixture):
+    """The widening from scan-equality to non-APPn equality, falsified.
+
+    The rule used to compare the entropy-coded scan alone. The pair above --
+    quality 90 against quality 60 -- differs in the scan AND in the tables,
+    so it passes under either rule and cannot tell them apart: its docstring
+    claimed a coverage it did not have. THIS pair differs only in the
+    tables, one byte of DQT with the scan untouched, and it is the pair that
+    goes red if the rule narrows back.
+    """
+    src = photo_fixture(tmp_path / "s.png", 400, 300)
+    original = tmp_path / "q90.jpg"
+    imaging.resize_and_encode(src, 400, 300, "jpeg", 90, original, resize=False)
+    data = original.read_bytes()
+
+    tweaked = tmp_path / "q90-dqt.jpg"
+    tweaked.write_bytes(_edit_segment(data, 0xDB, 1, lambda byte: byte + 1))
+    assert _jpeg_scan(tweaked.read_bytes()) == _jpeg_scan(data), (
+        "the premise: the scan is untouched, so a scan-only rule sees "
+        "agreement")
+    assert _jpeg_tables(tweaked.read_bytes()) != _jpeg_tables(data)
+
+    result = _describe_encode(src, "jpeg", original, tweaked)
+    assert result is not None, (
+        "a changed quantization table with an identical scan was accounted "
+        "for as agreement")
+
+
 def test_the_progressive_accounting_tolerates_only_the_scan(tmp_path,
                                                             photo_fixture):
-    """Both halves of the branch that excuses a progressive source.
+    """Every half of the branch that excuses a progressive source.
 
-    It must ACCOUNT for the scan-structure divergence and nothing else, so
-    both directions are here at tier 1 rather than only in the corpus guard:
-    the same shape at the same quality is excused, and a different shape is
-    not. DQT is what catches the second, because the tables move with the
-    dimensions as well as the quality -- 400x300 against 200x150 at quality
-    90 gives 138 bytes of tables either way and different contents.
+    It must ACCOUNT for the scan-structure divergence and NOTHING else, and
+    that takes three cases rather than the two this test started with,
+    because the two reached only one of the two checks:
+
+      * the same shape at the same quality is excused -- what the branch is
+        for;
+      * a different SHAPE is caught, by DQT, since the tables move with the
+        dimensions as well as the quality (400x300 against 200x150 at
+        quality 90 gives 138 bytes either way and different contents);
+      * a different SAMPLING FACTOR is caught by the frame header, and by
+        nothing else. Flipping component 0 from 0x22 to 0x11 leaves DQT
+        byte-identical, and with the frame-header check deleted the pair
+        came back accounted for -- measured in both directions on two corpus
+        sources. That deletion was made on the strength of thirty-six
+        dimension comparisons, every one of which DQT caught first; a
+        mutation class that cannot reach a check says nothing about the
+        classes that can.
     """
     base = photo_fixture(tmp_path / "s.png", 400, 300)
     source = _write_progressive_jpeg(base, tmp_path / "p.jpg")
@@ -981,6 +1088,21 @@ def test_the_progressive_accounting_tolerates_only_the_scan(tmp_path,
         "a 200x150 encode was accounted for as a 400x300 one because the "
         "source happened to be progressive")
     assert "quantization tables" in result, result
+
+    # Component 0's sampling factor is the second byte of its three-byte
+    # entry, which starts 6 bytes into the payload.
+    flipped = tmp_path / "flipped.jpg"
+    flipped.write_bytes(_edit_segment(
+        same.read_bytes(), 0xC0, 7,
+        lambda byte: 0x11 if byte != 0x11 else 0x22))
+    assert _jpeg_tables(flipped.read_bytes()) == _jpeg_tables(same.read_bytes()), (
+        "the premise: a sampling-factor flip leaves the tables alone, so DQT "
+        "cannot be what catches it")
+    result = _describe_encode(source, "jpeg", old_out, flipped)
+    assert result is not None, (
+        "a changed sampling factor was accounted for as the progressive "
+        "scan divergence")
+    assert "frame headers" in result, result
 
 
 @pytest.mark.corpus

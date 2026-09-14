@@ -356,15 +356,18 @@ def resize_and_encode(source, out_width: int, out_height: int, fmt: str,
     was asked to produce, where anything that checks for a file would read it
     as this run's.
 
-    AND IT IS GUARDED, because an unlink can fail. A stale output inside a
+    AND IT IS GUARDED, WITHOUT LOSING THE REASON. A stale output inside a
     directory turned read-only raises PermissionError, which is not
     ImagingError and so breaks the one-exception-type-per-photo contract the
     executor is built on -- measured, `[Errno 13] Permission denied` escaping
     this function. That is Task 1's `write_png` bug arriving in a second
-    place, and it takes the same answer: best effort. When the removal fails
-    the write is about to fail for the same reason and will say so by name,
-    so swallowing the OSError loses no information; what it buys is that
-    every route out of here is still the one type.
+    place and it takes the same answer, including the half a first attempt
+    here dropped: a bare `except OSError: pass` left the caller with
+    `could not create a heic destination for <path>` and no mention of the
+    permission or of the earlier file still standing at that path. So the
+    failure is carried and appended, exactly as `_cg._write` does it -- best
+    effort on the removal, one exception type out, and the message says the
+    old file survived.
 
     Five behaviours changed, all measured:
 
@@ -404,10 +407,17 @@ def resize_and_encode(source, out_width: int, out_height: int, fmt: str,
     out_path = Path(out_path)
     try:
         out_path.unlink(missing_ok=True)
-    except OSError:
-        pass                    # the write below fails for the same reason
-    _cg.resize_and_encode_to_file(source, out_width, out_height, fmt, quality,
-                                  out_path, resize)
+        left_behind = ""
+    except OSError as exc:
+        left_behind = (f"; an earlier file is still there and could not be "
+                       f"removed ({exc.strerror})")
+    try:
+        _cg.resize_and_encode_to_file(source, out_width, out_height, fmt,
+                                      quality, out_path, resize)
+    except ImagingError as exc:
+        if not left_behind:
+            raise
+        raise ImagingError(f"{exc}{left_behind}") from exc
 
 
 def upscale(source_png, out_png, binary, models_dir,
