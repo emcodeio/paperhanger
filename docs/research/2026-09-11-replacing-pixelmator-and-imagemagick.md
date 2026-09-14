@@ -288,7 +288,7 @@ So the old and new crops differ on most real JPEG sources, and **neither is the 
 
 ### The 16-bit downconversion, and a misattribution corrected
 
-`sips` dropped a 16-bit source to 8 bits. The design attributed that to the **pad** in `crop`, and called it the one defect in the old path that was ours rather than Apple's. **Measured while replacing `crop`, that is wrong.** On a 16-bit 200×200 PNG, `sips` returned 8 bits from the direct crop, from the crop at 0,0, from the pad alone, and from a plain resample. Only a format convert with no pixel operation kept 16. So the pad was not the cause and the defect was never ours.
+`sips` dropped a 16-bit source to 8 bits. The design attributed that to the **pad** in `crop`, and called it the one defect in the old path that was ours rather than Apple's. **Measured while replacing `crop`, that is wrong.** On a 16-bit 200×200 PNG, `sips` returned 8 bits from the direct crop, from the crop at 0,0, from the pad alone, from the pad followed by the crop, and from a plain resample. Only a format convert with no pixel operation kept 16. So the pad was not the cause and the defect was never ours.
 
 It is recorded here rather than as a ninth fact because nothing in the tool depended on it: no corpus file is 16-bit (measured — all 894 images are 8 bits per component), so it was latent throughout. `crop` and `resize_and_encode` now **keep** 16 bits where `sips` dropped them, and `normalize_to_srgb_png` deliberately does not: its only reader is `upscayl-bin`, which emits 8-bit PNG, so a 16-bit intermediate would be discarded one step later at best. All three choices are pinned on fixtures in `tests/test_imaging.py` and `tests/test_cg.py`.
 
