@@ -53,24 +53,42 @@ probably the same cause. `sips` inherits a source JPEG's progressive scan;
 ImageIO writes baseline. Four of the 27 coverage images are progressive
 sources, and on them our JPEG is 10.2% to 21.0% larger with an entropy-coded
 stream that cannot be compared to `sips`' at all -- a different scan structure
-is a different file, not a worse one. Both divergences read as `sips`
-carrying the source's own properties forward where `AddImage` starts from the
-frame; ImageIO will honour a progressive request if asked
-(`{JFIF: {IsProgressive: true}}` reproduces `sips`' 809714-byte file exactly
-on snowy_mountain_range_with_forest_2565.jpg), so this is a decision rather
-than a limitation, and it is pinned below as the decision it is.
+is a different file, not a worse one.
+
+ASKED FOR PROGRESSIVE, ImageIO produces `sips`' OWN SCAN. Measured on all four,
+`{JFIF: {IsProgressive: true}}` against `sips -s format jpeg -s formatOptions
+90`:
+
+  bokeh_nature_scene_7629.jpg                4345454    byte-identical
+  mountain_landscape_sunset_5677.jpg        11337145    byte-identical
+  snowy_mountain_range_with_forest_2565.jpg   809714    2 bytes differ
+  abstract_blue_texture_4503.JPG            3896999    100 bytes shorter
+
+and the entropy-coded scan -- everything from `SOS` on, 0.8 to 11.3 MB of it
+-- is byte-identical on **four of four**. That is the claim worth making, and
+an earlier draft of this file made a weaker and wronger one ("reproduces
+sips' file exactly"), which is false by two bytes on the third row and by a
+hundred on the fourth. The two bytes are the JFIF density, 96 dpi carried
+forward against ImageIO's 72; the hundred are the APP1 Exif segment, `sips`
+copying four IFD0 entries where ImageIO synthesises one. Both are the same
+metadata divergence as above, not a coding difference. So the picture is not
+merely equivalent, it is the same bits, and the choice between the two scan
+structures is ours to make rather than a limit we ran into. It is pinned
+below as the decision it is.
 """
 
 import ctypes
 import shutil
 import struct
 import subprocess
+import zlib
 from ctypes import c_void_p
 from pathlib import Path
 
 import pytest
 
 from paperhanger import _cg, formats, imaging
+from tests import pixels
 from tests.differential import PNG_SIGNATURE, _format_of, compare
 
 # Every (format, quality) pair the pipeline can produce, plus the two extra
@@ -299,14 +317,84 @@ def test_the_source_exif_is_what_the_two_sides_disagree_about(tmp_path,
     assert without_exif is None, (
         f"the same source without its eXIf chunk still differs: {without_exif}")
     if fmt == "jpeg":
-        # Both tools drop a PNG's eXIf on the way to JPEG, so there is
-        # nothing to diverge about. Stated rather than skipped: it is the row
-        # that shows the divergence belongs to the HEIF container.
-        assert with_exif is None, with_exif
+        # THIS ROW IS A PROPERTY OF THE FIXTURE, NOT OF JPEG, and an earlier
+        # draft asserted it as though it were the container's ("both tools
+        # drop a PNG's eXIf on the way to JPEG"). They do not. Measured, both
+        # write an APP1 Exif segment, and `sips` copies the source's IFD0
+        # entries into it where ImageIO synthesises its own: on a
+        # from-scratch source carrying one IFD0 entry, `sips`' APP1 is 90
+        # bytes against our 78, and at two entries 102 against the same 78.
+        # The files agree HERE only because `sips --matchTo` writes an eXIf
+        # holding exactly what ImageIO would have synthesised anyway. The
+        # test below builds a source that does not, and the JPEGs differ.
+        assert with_exif is None, (
+            f"sips --matchTo's own eXIf stopped round-tripping through JPEG: "
+            f"{with_exif}")
     else:
         assert with_exif is not None, (
             f"a {fmt} encode of an EXIF-bearing source matched sips byte for "
             f"byte; sips has stopped copying the metadata, or we have started")
+
+
+def _with_exif(path, entries):
+    """A noise PNG carrying an `eXIf` chunk holding `entries` in IFD0.
+
+    Built here rather than through `sips --matchTo`, which is the whole
+    point: that fixture's EXIF happens to be what ImageIO re-synthesises, so
+    it cannot show a divergence that depends on the payload. `entries` are
+    (tag, SHORT value) pairs -- 0x0112 is Orientation.
+    """
+    base = pixels.write_png(Path(path).with_suffix(".base.png"), 400, 300,
+                            noise=True).read_bytes()
+    ifd = struct.pack(">2sHIH", b"MM", 42, 8, len(entries))
+    for tag, value in entries:
+        ifd += struct.pack(">HHIHH", tag, 3, 1, value, 0)
+    ifd += struct.pack(">I", 0)
+    chunk = (struct.pack(">I", len(ifd)) + b"eXIf" + ifd
+             + struct.pack(">I", zlib.crc32(b"eXIf" + ifd) & 0xFFFFFFFF))
+    rebuilt = bytearray(PNG_SIGNATURE)
+    for kind, raw in _chunks(base):
+        rebuilt += raw
+        if kind == b"IHDR":
+            rebuilt += chunk
+    path = Path(path)
+    path.write_bytes(bytes(rebuilt))
+    assert "eXIf" in _kinds(path)
+    return path
+
+
+def test_a_jpeg_loses_the_source_exif_too(tmp_path):
+    """JPEG is not exempt; the fixture above only made it look exempt.
+
+    An Orientation of 6 means "rotate 90 degrees on display", so this is the
+    one EXIF tag whose loss a viewer could SEE. `sips` carries it into the
+    output; we do not. The corpus makes that harmless -- censused over all
+    894 images, 245 JPEGs and 12 PNGs carry Orientation 1, one carries the
+    invalid 0, 128 carry EXIF with no Orientation tag, and NONE carries a
+    rotating value -- but harmless because of the corpus is not the same as
+    absent, and this is where it is written down.
+
+    The scan is asserted identical alongside, because that is what makes the
+    difference metadata rather than a different picture.
+    """
+    source = _with_exif(tmp_path / "oriented.png", [(0x0112, 6)])
+    old_out = tmp_path / "sips.jpg"
+    new_out = tmp_path / "cg.jpg"
+    _sips_encode_reference(source, "jpeg", 90, old_out)
+    imaging.resize_and_encode(source, 400, 300, "jpeg", 90, new_out,
+                              resize=False)
+
+    old, new = old_out.read_bytes(), new_out.read_bytes()
+    assert old != new, (
+        "sips stopped carrying the source's Orientation into its JPEG, so "
+        "there is no divergence here to pin")
+    assert _jpeg_scan(old) == _jpeg_scan(new), (
+        "the pictures differ, which would make this a coding difference "
+        "rather than a metadata one")
+    assert _orientation(old) == 6, "the premise: sips carries the tag"
+    assert _orientation(new) is None, (
+        f"our JPEG carries Orientation {_orientation(new)}; something started "
+        f"copying the source's EXIF")
 
 
 @pytest.mark.parametrize("fmt,quality", [("heic", 80), ("avif", 85)])
@@ -386,6 +474,84 @@ def _jpeg_scan(data: bytes) -> bytes:
     return b""
 
 
+def _jpeg_segments(data: bytes):
+    """(marker byte, whole segment) up to the scan, then (0xDA, the rest).
+
+    The whole segment, header included, so a comparison over these is a
+    comparison over every byte of the file.
+    """
+    out = []
+    offset = 2
+    while offset + 4 <= len(data):
+        if data[offset] != 0xFF:
+            break
+        marker = data[offset + 1]
+        if marker == 0xDA:
+            out.append((marker, data[offset:]))
+            break
+        length = struct.unpack(">H", data[offset + 2:offset + 4])[0]
+        out.append((marker, data[offset:offset + 2 + length]))
+        offset += 2 + length
+    return out
+
+
+def _orientation(data: bytes):
+    """The EXIF Orientation in a JPEG's APP1, or None.
+
+    IFD0 only: Orientation is defined there, and a value in a sub-IFD would
+    not be the one a viewer rotates by.
+    """
+    for marker, payload in _jpeg_segments(data):
+        if marker != 0xE1 or payload[4:10] != b"Exif\x00\x00":
+            continue
+        tiff = payload[10:]
+        if len(tiff) < 8:
+            return None
+        endian = ">" if tiff[:2] == b"MM" else "<"
+        first = struct.unpack(endian + "I", tiff[4:8])[0]
+        if first + 2 > len(tiff):
+            return None
+        count = struct.unpack(endian + "H", tiff[first:first + 2])[0]
+        for index in range(count):
+            entry = first + 2 + index * 12
+            if entry + 12 > len(tiff):
+                break
+            tag = struct.unpack(endian + "H", tiff[entry:entry + 2])[0]
+            if tag == 0x0112:
+                return struct.unpack(endian + "H", tiff[entry + 8:entry + 10])[0]
+    return None
+
+
+def _jpeg_without_metadata(data: bytes) -> bytes:
+    """Every segment but the APPn ones, concatenated. Empty for a non-JPEG.
+
+    APP0 through APP15 are where JFIF density, Exif and an ICC profile live,
+    and they are what the two encoders disagree about. Everything else -- the
+    frame header, the quantization and Huffman tables, the scan -- decides
+    the picture, so comparing this is comparing the picture and its coding
+    parameters without the metadata riding alongside.
+    """
+    segments = _jpeg_segments(data)
+    if not segments:
+        return b""
+    return b"".join(payload for marker, payload in segments
+                    if not 0xE0 <= marker <= 0xEF)
+
+
+def _jpeg_tables(data: bytes) -> bytes:
+    """The DQT segments: the quantization tables, which are the quality.
+
+    They survive the progressive/baseline divergence -- measured identical
+    between `sips`' progressive output and our baseline one at the same
+    quality on all four progressive coverage images, 138 bytes each, and
+    different at a different quality on all six tried. So they are what the
+    corpus gate can still hold a progressive source to once the scans have
+    become incomparable.
+    """
+    return b"".join(payload for marker, payload in _jpeg_segments(data)
+                    if marker == 0xDB)
+
+
 def _jpeg_is_progressive(data: bytes) -> bool:
     """True for a SOF2 frame header, False for SOF0, for anything else."""
     offset = 2
@@ -415,10 +581,18 @@ def test_the_container_readers_are_not_vacuous(tmp_path, photo_fixture):
 
     picture = _heif_picture(heic.read_bytes())
     assert 0 < len(picture) < heic.stat().st_size
-    scan = _jpeg_scan(jpg.read_bytes())
+    data = jpg.read_bytes()
+    scan = _jpeg_scan(data)
     assert 0 < len(scan) < jpg.stat().st_size
+    body = _jpeg_without_metadata(data)
+    assert len(scan) < len(body) < len(data), (
+        "the body must hold more than the scan and less than the file, or it "
+        "is not excluding the APPn segments")
+    assert 0 < len(_jpeg_tables(data)) < len(body)
     assert _heif_picture(b"not a container at all") == b""
     assert _jpeg_scan(b"\xff\xd8not a jpeg") == b""
+    assert _jpeg_without_metadata(b"\xff\xd8not a jpeg") == b""
+    assert _jpeg_tables(b"\xff\xd8not a jpeg") == b""
 
 
 # ---------------------------------------------------------------------------
@@ -632,8 +806,11 @@ def test_a_progressive_source_comes_back_baseline(tmp_path, photo_fixture):
     sampling factors -- but the entropy-coded streams are not comparable, so
     this is the one lossy case where byte identity was never reachable.
     ImageIO will write progressive if asked for it -- the fixture above is
-    that request -- so what is pinned here is a decision: the encode takes
-    the frame from its source and nothing else.
+    that request, and asked for it on the four progressive corpus sources it
+    produces `sips`' own entropy-coded scan byte for byte, two of the four
+    whole files included. So what is pinned here is a decision, and one that
+    costs nothing but bytes: the encode takes the frame from its source and
+    nothing else.
     """
     base = photo_fixture(tmp_path / "s.png", 800, 600)
     source = _write_progressive_jpeg(base, tmp_path / "progressive.jpg")
@@ -670,16 +847,27 @@ def test_a_baseline_source_stays_byte_identical(tmp_path, photo_fixture):
 # ---------------------------------------------------------------------------
 
 
-def _describe_encode(source, fmt, quality, old_out, new_out):
+def _describe_encode(source, fmt, old_out, new_out):
     """None when the two encodes agree, or a sentence saying how they do not.
 
     WHOLE FILES FIRST, because that is the bar and 6 of the 27 meet it. When
-    they differ, the difference has to be attributable: for the HEIF family
-    our `mdat` must be a suffix of `sips`' -- same coded picture, `sips`
-    carrying an extra item in front of it -- and for JPEG the entropy-coded
-    scan must match. A progressive source is the one case where no comparison
-    of the scan is possible, and it is reported as the known divergence
-    rather than passed over in silence.
+    they differ, the difference has to be ATTRIBUTABLE, and the two branches
+    hold each other to the same standard -- an earlier version did not, and
+    the JPEG one waved through any header difference at all once the scans
+    matched, which would have accepted a changed quantization table as
+    agreement:
+
+      * HEIF: our `mdat` must be a suffix of `sips`', and the bytes in front
+        of it must be the `Exif` item.
+      * JPEG: every segment that is not an APPn must be identical, the scan
+        included. An APPn is metadata -- JFIF density, Exif, the colour
+        profile -- and a difference there is the divergence being measured;
+        a difference in SOF, DQT or DHT is a different picture and is
+        reported.
+
+    A progressive source is the one case where no comparison of the scan is
+    possible, since a different scan structure is a different stream, and it
+    is reported as the known divergence rather than passed over in silence.
     """
     old, new = old_out.read_bytes(), new_out.read_bytes()
     if old == new:
@@ -695,16 +883,104 @@ def _describe_encode(source, fmt, quality, old_out, new_out):
             return (f"sips' extra {extra} bytes of mdat are not an Exif item")
         return None
 
-    if _jpeg_scan(old) == _jpeg_scan(new) and _jpeg_scan(new):
+    old_body = _jpeg_without_metadata(old)
+    new_body = _jpeg_without_metadata(new)
+    if old_body and old_body == new_body:
         return None
     if _jpeg_is_progressive(Path(source).read_bytes()):
-        if _jpeg_is_progressive(old) and not _jpeg_is_progressive(new):
-            return None                 # the pinned divergence, by name below
-        return ("a progressive source, but not the pinned divergence: sips "
-                f"progressive={_jpeg_is_progressive(old)}, ours "
-                f"progressive={_jpeg_is_progressive(new)}")
-    return (f"the entropy-coded scan differs: sips {len(old)} bytes, ours "
-            f"{len(new)}, and the source is not progressive")
+        if not (_jpeg_is_progressive(old) and not _jpeg_is_progressive(new)):
+            return ("a progressive source, but not the pinned divergence: "
+                    f"sips progressive={_jpeg_is_progressive(old)}, ours "
+                    f"progressive={_jpeg_is_progressive(new)}")
+        # The scans are incomparable and that is the whole of what is
+        # tolerated. The quantization tables are not: DQT survives the
+        # scan-structure difference -- measured identical between `sips`'
+        # progressive output and our baseline one at the same quality on all
+        # four progressive coverage images -- and it moves with both the
+        # quality and the dimensions, so both are still caught here rather
+        # than swallowed by the word "progressive". The corpus vacuity guard
+        # goes through this branch, which is how the hole was found.
+        #
+        # A frame-header check stood here too and came out again: every
+        # dimension difference I could construct already moves DQT (400x300
+        # against 200x150 at quality 90 gives 138 bytes of tables either way
+        # and different contents), so nothing reached it. A mutation removing
+        # it left every gate green, which is what a check that is not there
+        # looks like.
+        if _jpeg_tables(old) != _jpeg_tables(new):
+            return ("a progressive source, and the quantization tables "
+                    f"differ as well: sips {len(_jpeg_tables(old))} bytes, "
+                    f"ours {len(_jpeg_tables(new))} -- the scan structure "
+                    f"does not account for that")
+        return None
+    if _jpeg_scan(old) != _jpeg_scan(new):
+        return (f"the entropy-coded scan differs: sips {len(_jpeg_scan(old))} "
+                f"bytes, ours {len(_jpeg_scan(new))}, and the source is not "
+                f"progressive")
+    return (f"the scans agree and something outside the APPn segments does "
+            f"not: sips markers {[hex(m) for m, _ in _jpeg_segments(old)]}, "
+            f"ours {[hex(m) for m, _ in _jpeg_segments(new)]}")
+
+
+def test_the_jpeg_accounting_separates_metadata_from_picture(tmp_path,
+                                                             photo_fixture):
+    """Both directions of the rule the corpus gate leans on, at tier 1.
+
+    It must ACCEPT a pair differing only in an APPn segment -- that is the
+    divergence being measured -- and REJECT one whose coding parameters
+    differ, which is what an earlier version did not: it compared the scan
+    alone, so a changed quantization table with the same entropy data would
+    have read as agreement.
+    """
+    src = photo_fixture(tmp_path / "s.png", 400, 300)
+    ninety = tmp_path / "q90.jpg"
+    sixty = tmp_path / "q60.jpg"
+    imaging.resize_and_encode(src, 400, 300, "jpeg", 90, ninety, resize=False)
+    imaging.resize_and_encode(src, 400, 300, "jpeg", 60, sixty, resize=False)
+
+    assert _describe_encode(src, "jpeg", ninety, sixty) is not None, (
+        "two different qualities were accounted for as agreement")
+
+    # The same file with its APP0 removed: metadata gone, picture untouched.
+    stripped = tmp_path / "no-app0.jpg"
+    data = ninety.read_bytes()
+    stripped.write_bytes(data[:2] + b"".join(
+        payload for marker, payload in _jpeg_segments(data) if marker != 0xE0))
+    assert stripped.read_bytes() != data, "the APP0 removal did nothing"
+    assert _describe_encode(src, "jpeg", ninety, stripped) is None, (
+        "a difference confined to an APPn segment was reported as a picture "
+        "difference")
+
+
+def test_the_progressive_accounting_tolerates_only_the_scan(tmp_path,
+                                                            photo_fixture):
+    """Both halves of the branch that excuses a progressive source.
+
+    It must ACCOUNT for the scan-structure divergence and nothing else, so
+    both directions are here at tier 1 rather than only in the corpus guard:
+    the same shape at the same quality is excused, and a different shape is
+    not. DQT is what catches the second, because the tables move with the
+    dimensions as well as the quality -- 400x300 against 200x150 at quality
+    90 gives 138 bytes of tables either way and different contents.
+    """
+    base = photo_fixture(tmp_path / "s.png", 400, 300)
+    source = _write_progressive_jpeg(base, tmp_path / "p.jpg")
+    old_out = tmp_path / "sips.jpg"
+    _sips_encode_reference(source, "jpeg", 90, old_out)
+
+    same = tmp_path / "same.jpg"
+    imaging.resize_and_encode(source, 400, 300, "jpeg", 90, same, resize=False)
+    assert _describe_encode(source, "jpeg", old_out, same) is None, (
+        "the scan-structure divergence is what this branch exists to excuse")
+
+    smaller = tmp_path / "smaller.jpg"
+    imaging.resize_and_encode(source, 200, 150, "jpeg", 90, smaller,
+                              resize=True)
+    result = _describe_encode(source, "jpeg", old_out, smaller)
+    assert result is not None, (
+        "a 200x150 encode was accounted for as a 400x300 one because the "
+        "source happened to be progressive")
+    assert "quantization tables" in result, result
 
 
 @pytest.mark.corpus
@@ -738,7 +1014,7 @@ def test_encode_matches_sips_over_the_sample(corpus_sample, tmp_path):
                 imaging.resize_and_encode(source, width, height, fmt, quality,
                                           new_out, resize=False)
                 compared += 1
-                result = _describe_encode(source, fmt, quality, old_out, new_out)
+                result = _describe_encode(source, fmt, old_out, new_out)
             finally:
                 shutil.rmtree(room, ignore_errors=True)
             if result is not None:
@@ -751,14 +1027,21 @@ def test_encode_matches_sips_over_the_sample(corpus_sample, tmp_path):
 def test_the_corpus_comparison_is_not_vacuous(corpus_sample, tmp_path):
     """Guards the gate above over the real files, where the outputs are
     hundreds of times larger than a fixture's and an accounting rule that
-    accepted everything would look exactly like agreement."""
+    accepted everything would look exactly like agreement.
+
+    Both branches, because they are two different rules and only one of them
+    used to be guarded. `_describe_encode` takes no `quality` -- an earlier
+    version did and never read it, which made the call above LOOK like it
+    was checking the pair against a quality it was not.
+    """
     source = next(path for path in sorted(Path(corpus_sample).iterdir())
                   if imaging.probe(path) is not None)
     width, height, _ = imaging.probe(source)
-    old_out = tmp_path / "sips.heic"
-    new_out = tmp_path / "cg.heic"
-    _sips_encode_reference(source, "heic", 80, old_out)
-    imaging.resize_and_encode(source, width, height, "heic", 40, new_out,
-                              resize=False)
-    assert _describe_encode(source, "heic", 80, old_out, new_out) is not None, (
-        f"{source.name}: heic 40 was accounted for as heic 80")
+    for fmt, suffix in (("heic", ".heic"), ("jpeg", ".jpg")):
+        old_out = tmp_path / f"sips{suffix}"
+        new_out = tmp_path / f"cg{suffix}"
+        _sips_encode_reference(source, fmt, 80, old_out)
+        imaging.resize_and_encode(source, width, height, fmt, 40, new_out,
+                                  resize=False)
+        assert _describe_encode(source, fmt, old_out, new_out) is not None, (
+            f"{source.name}: {fmt} 40 was accounted for as {fmt} 80")

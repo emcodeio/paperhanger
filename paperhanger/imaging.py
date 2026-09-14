@@ -343,9 +343,9 @@ def resize_and_encode(source, out_width: int, out_height: int, fmt: str,
     only because the two halves ran in two processes, and both halves are now
     one ImageIO destination. One decode, one frame in memory, one file
     written. It is not free: holding the frame, the resample and the encoder
-    at once raises peak RSS by 69 MiB on a 7680x5120 reduction against the
-    staged shape, which released the first two before `sips` started.
-    `_cg.resize_and_encode_to_file` has the three routes measured.
+    at once puts the whole-machine high-water mark 6.3% above the single
+    `sips` call this replaces on a 7680x5120 reduction, 454.0 MiB against
+    427.0. `_cg.resize_and_encode_to_file` has all three routes measured.
 
     THE DESTINATION IS CLEARED FIRST, which `_run(produces=...)` used to do
     and no longer can, because no subprocess runs. It is not the unlink
@@ -356,7 +356,17 @@ def resize_and_encode(source, out_width: int, out_height: int, fmt: str,
     was asked to produce, where anything that checks for a file would read it
     as this run's.
 
-    Four behaviours changed, all measured:
+    AND IT IS GUARDED, because an unlink can fail. A stale output inside a
+    directory turned read-only raises PermissionError, which is not
+    ImagingError and so breaks the one-exception-type-per-photo contract the
+    executor is built on -- measured, `[Errno 13] Permission denied` escaping
+    this function. That is Task 1's `write_png` bug arriving in a second
+    place, and it takes the same answer: best effort. When the removal fails
+    the write is about to fail for the same reason and will say so by name,
+    so swallowing the OSError loses no information; what it buys is that
+    every route out of here is still the one type.
+
+    Five behaviours changed, all measured:
 
       * AN IDENTITY RESAMPLE IS A PASS-THROUGH. `_cg._resample` skips the
         draw when the source already has the requested dimensions, which is
@@ -370,21 +380,32 @@ def resize_and_encode(source, out_width: int, out_height: int, fmt: str,
         0 with `not a valid file` on stderr, or exiting 13; it is now an
         ImagingError from ImageIO naming the file. Same exception type, same
         guarantee that no output is left behind.
-      * THE SOURCE'S METADATA DOES NOT TRAVEL. `sips` copies a source's EXIF
-        into its output and ImageIO writes only the picture and its colour
-        space, so a HEIC or AVIF encoded from an EXIF-bearing photograph
-        comes back without the `Exif` item -- 21 of the 27 coverage images,
-        at 127 to 2332 bytes each, with the coded picture identical in every
-        one. The ICC profile is NOT affected: an ICC-tagged source with no
-        EXIF encodes byte-identically to `sips` at heic 80, jpeg 90 and
-        avif 85. A PROGRESSIVE JPEG source is the other half of the same
-        change: `sips` inherits the source's progressive scan and ImageIO
-        writes a baseline file, 10.2% to 21.0% larger on the four
-        progressive images in the sample.
-        `tests/test_encode_differential.py` pins both.
+      * THE SOURCE'S METADATA DOES NOT TRAVEL, ON ANY OF THE FOUR FORMATS.
+        `sips` copies a source's EXIF into its output and ImageIO writes only
+        the picture and its colour space, so a HEIC or AVIF encoded from an
+        EXIF-bearing photograph comes back without the `Exif` item -- 21 of
+        the 27 coverage images, at 127 to 2332 bytes each, with the coded
+        picture identical in every one. JPEG is NOT exempt, though a fixture
+        made it look so for a while: both tools write an APP1 Exif segment
+        and only `sips` fills it from the source, so an Orientation of 6 --
+        the one tag a viewer would see -- is carried by `sips` and dropped
+        here. Nothing in the corpus carries a rotating orientation; the
+        census is in `tests/test_encode_differential.py`, with the rest.
+        The ICC profile is NOT affected: an ICC-tagged source with no EXIF
+        encodes byte-identically to `sips` at heic 80, jpeg 90 and avif 85.
+      * A PROGRESSIVE JPEG SOURCE COMES BACK BASELINE, which is the same
+        change seen from the other side: `sips` inherits the source's scan
+        structure, ImageIO writes its own, 10.2% to 21.0% larger on the four
+        progressive images in the sample. Asked for progressive it produces
+        `sips`' own entropy-coded scan byte for byte, so the picture is not
+        merely equivalent and the choice is ours.
+        `tests/test_encode_differential.py` pins all of it.
     """
     out_path = Path(out_path)
-    out_path.unlink(missing_ok=True)
+    try:
+        out_path.unlink(missing_ok=True)
+    except OSError:
+        pass                    # the write below fails for the same reason
     _cg.resize_and_encode_to_file(source, out_width, out_height, fmt, quality,
                                   out_path, resize)
 

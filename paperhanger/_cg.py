@@ -457,16 +457,24 @@ def _quality_options(scope, quality):
     lossy quality, and an options dictionary holding one for it would be a
     number with no meaning riding along with every lossless write.
 
-    THE CALLBACKS ARE PASSED BY ADDRESS. `kCFTypeDictionaryKeyCallBacks` is
-    a STRUCT exported by CoreFoundation, not a pointer to one, so
-    `c_void_p.in_dll(...)` reads its first field -- the version, which is 0
-    -- and hands CFDictionaryCreate a NULL callbacks table. That dictionary
-    retains nothing and compares keys by pointer identity, and it still
-    produces the right bytes here, because the scope holds the CFNumber
-    alive until after Finalize and the key is the framework's own constant.
-    It is wrong in a way no output can show, which is why it is spelled out:
-    `addressof` is the address OF the struct, and that is what the parameter
-    wants.
+    THE CALLBACKS ARE PASSED BY ADDRESS, and the obvious alternative is a
+    LATENT USE-AFTER-FREE. `kCFTypeDictionaryKeyCallBacks` is a STRUCT
+    exported by CoreFoundation, not a pointer to one: its first word is the
+    version, 0, followed by five function pointers (retain, release,
+    copyDescription, equal, hash). So `c_void_p.in_dll(...)` reads that
+    first word, `.value` comes back as literally `None`, and
+    CFDictionaryCreate is handed a NULL callbacks table -- a dictionary
+    that does not retain what you put in it. Measured with
+    CFGetRetainCount on the CFNumber: `addressof` takes it 1 -> 2, the
+    `in_dll` spelling leaves it at 1.
+
+    It produces the right bytes anyway, at every format and quality, which
+    is the whole problem. The only reason it works is that the `Scope`
+    holds the CFNumber alive until after Finalize; anything that released
+    it earlier, or any reordering of the scope, would have ImageIO reading
+    freed memory for the quality. `addressof` is the address OF the struct,
+    which is what the parameter wants, and then the dictionary owns its
+    own reference.
     """
     if quality is None:
         return None
@@ -520,16 +528,30 @@ def _write(scope, image, out_path, uti: str, what: str, options=None):
       source chunks        jpeg 90     heic 80             avif 85
       neither              identical   identical           identical
       iCCP only            identical   identical           identical
-      eXIf only            identical   127 bytes smaller   127 smaller
-      both                 identical   127 bytes smaller   127 smaller
+      eXIf only            identical*  127 bytes smaller   127 smaller
+      both                 identical*  127 bytes smaller   127 smaller
 
     So the ICC profile is NOT the variable -- ImageIO writes the same
     `colr` box `sips` does, byte for byte, for AdobeRGB, Display P3, ROMM
     RGB and ITU-2020 alike. The EXIF is. In the HEIF family `sips` adds a
     second item (an `Exif` item, an `iref cdsc` pointing at the picture,
     and 66 bytes in `mdat`); the coded picture is identical, and ours is
-    the same bytes without the metadata item. Both halves of that are
-    pinned in `tests/test_encode_differential.py`.
+    the same bytes without the metadata item.
+
+    *THE JPEG COLUMN IS THAT FIXTURE'S PROPERTY, NOT JPEG'S, and an
+    earlier version of this docstring read it as the container's. Both
+    tools write an APP1 Exif segment on the way to JPEG; `sips` copies the
+    source's IFD0 entries into it and ImageIO synthesises its own, so they
+    agree only when the source's entries are what ImageIO would have
+    written anyway -- which is exactly what `sips --matchTo` puts in an
+    `eXIf` chunk. On a from-scratch source carrying one IFD0 entry `sips`'
+    APP1 is 90 bytes against our 78, and at two entries 102 against the
+    same 78. So EXIF does not travel on ANY of the four formats, JPEG
+    included, and an Orientation of 6 -- the one tag a viewer would see --
+    is carried by `sips` and dropped by us.
+
+    Both halves of all of that are pinned in
+    `tests/test_encode_differential.py`.
     """
     dest = _destination(scope, out_path, uti, what)
     _IO_LIB.CGImageDestinationAddImage(dest, image, options)
@@ -718,21 +740,30 @@ def resize_and_encode_to_file(source, out_width: int, out_height: int,
     encode; the intermediate existed only because the two halves were in
     two processes, and with the encode here it is gone. It cost a full
     extra encode and decode of the frame, and it bought a lower peak.
+
     Measured on a 7680x5120 noise PNG reduced to 3840x2160 heic 80, two
-    runs each, as peak RSS of the process doing the work:
+    runs each, as the WHOLE-MACHINE high-water mark -- which is not the sum
+    of two `ru_maxrss` figures, because that assumes both were reached at
+    once. Each route's parent blocks while its child works, so the parent's
+    CURRENT resident size at that moment is what adds:
 
-      this, one pass          454.1 MiB   no child, no intermediate
-      Task 4, staged          385.0 MiB   plus a 135.0 MiB `sips` child
-                                          and a 22.1 MB PNG on disk
-      pre-Task 4, one `sips`   18.6 MiB   plus a 408.4 MiB `sips` child
+      this, one pass          454.0 MiB   one process, nothing on disk
+      Task 4, staged          385.0 MiB   its own resample peak, alone; by
+                                          the time it spawns `sips` it has
+                                          released to 59.2, so the child
+                                          phase reaches only 194.2, and
+                                          22.1 MB sits on disk
+      pre-Task 4, one `sips`  427.0 MiB   18.6 resident in the parent while
+                                          the child peaks at 408.4
 
-    So the fused pass holds the decoded frame, the resampled bitmap and
-    the encoder's buffers at once where the staged shape released the
-    first two before `sips` started: 69 MiB more than Task 4's in-process
-    peak, and 46 more than the `sips` this all replaces. That is the trade
-    -- one process and one file against a higher high-water mark -- and it
-    is worth knowing which way it goes before a bigger frame than the
-    corpus holds turns up.
+    So fusing costs **6.3% over what shipped** and 17.9% over Task 4's
+    shape, because the decoded frame, the resampled bitmap and the
+    encoder's buffers are live together where the staged shape released
+    the first two before `sips` started. What it buys is one process and
+    no intermediate file. The comparison that counts is the first one --
+    Task 4 existed for a single commit -- and an earlier version of this
+    docstring led with the other, which flattered the change in one place
+    by 46 MiB and damned it in another by 69.
 
     THE FORMAT IS REFUSED BY NAME. Handing an unknown one to `_cfstr`
     would build a CFString CoreFoundation is happy with and ImageIO is not,

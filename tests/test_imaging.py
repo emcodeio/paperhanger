@@ -554,6 +554,57 @@ def test_an_unreadable_source_fails_in_the_binding_layer(tmp_path, kind,
     assert not out.exists()
 
 
+def test_a_stale_destination_cannot_stand_in_for_a_skipped_sips_write(tmp_path):
+    """`_run`'s own unlink-first, which nothing else reaches any more.
+
+    The post-condition asks "is the file there?", and fact 4 is `sips`
+    answering a write it skipped with exit 0 and no file. Put an earlier
+    run's output at the destination and the question answers yes for a run
+    that wrote nothing -- so `_run` removes the destination before starting,
+    and this is the only test that reaches that line now that
+    `resize_and_encode` runs no subprocess.
+
+    Through `normalize_to_srgb_png` because it is the `sips` call that still
+    writes. When Task 6 moves it, `upscale` is the last `produces=` caller
+    and this test should follow it there rather than be deleted.
+    """
+    stale = tmp_path / "out.png"
+    write_png(stale, 64, 64)
+    with pytest.raises(imaging.ImagingError) as caught:
+        imaging.normalize_to_srgb_png(tmp_path / "nope.png", stale)
+    assert "exited 0 without writing" in str(caught.value)
+    assert not stale.exists(), (
+        "sips skipped the write and an earlier run's file is still standing "
+        "at the destination, which the post-condition reads as success")
+
+
+def test_an_unremovable_stale_output_still_raises_imaging_error(tmp_path):
+    """The unlink can fail, and a bare PermissionError is not this layer's.
+
+    A stale output inside a directory turned read-only: the clearing unlink
+    cannot remove it, and before this was guarded the OSError escaped
+    `resize_and_encode` unchanged. `execute` catches ImagingError per photo
+    and carries on; anything else ends the run. Task 1 fixed this shape in
+    `write_png` and it arrived again here.
+    """
+    room = tmp_path / "ro"
+    room.mkdir()
+    out = room / "o.heic"
+    write_png(out, 8, 8)                       # an earlier run's output
+    source = write_png(tmp_path / "s.png", 64, 48, noise=True)
+    room.chmod(0o500)
+    try:
+        with pytest.raises(imaging.ImagingError) as caught:
+            imaging.resize_and_encode(source, 64, 48, "heic", 80, out,
+                                      resize=False)
+    finally:
+        room.chmod(0o700)
+    assert str(out) in str(caught.value)
+    assert out.exists(), (
+        "the premise: the stale file could not be removed, which is why the "
+        "unlink had to raise something")
+
+
 def test_fact_4_still_has_a_live_caller(tmp_path):
     """A write that `sips` SKIPS still exits 0, and one call still runs it.
 
