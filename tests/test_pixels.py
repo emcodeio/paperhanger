@@ -5,8 +5,9 @@ import zlib
 import pytest
 
 from tests.pixels import (read_ihdr, read_png_grey, write_grey_alpha_png,
-                          write_grey_png, write_indexed_png, write_png,
-                          write_png16, write_rgba_png)
+                          write_grey_png, write_indexed_png,
+                          write_interlaced_png, write_png, write_png16,
+                          write_rgba_png)
 
 
 def _sips_dimensions(path):
@@ -160,6 +161,38 @@ def test_indexed_png_is_colour_type_3(tmp_path):
     assert _sips_dimensions(path) == (40, 30)
 
 
+@pytest.mark.parametrize("width,height", [(41, 23), (1, 1), (17, 5)])
+def test_interlaced_png_holds_the_plain_writer_s_image(tmp_path, width, height):
+    """Adam7, checked by something that is not our own Adam7 decoder.
+
+    `tests/differential.py` decodes interlaced PNG and this module writes it.
+    Both are ours, and two implementations of one misunderstanding agree with
+    each other perfectly, so the assertion goes through `sips`: rendered to
+    JPEG at the same quality, the interlaced file and the plain one must come
+    out byte for byte the same, which they can only do if they decode to the
+    same pixels.
+
+    1x1 and 17x5 are here because most of the seven passes hold no pixels at
+    those sizes, and a pass loop that emitted a scanline anyway would write a
+    file no decoder could read.
+    """
+    plain = write_png(tmp_path / "plain.png", width, height, noise=True)
+    woven = write_interlaced_png(tmp_path / "woven.png", width, height, noise=True)
+    assert read_ihdr(woven) == (width, height, 8, 2, 1)
+    assert plain.read_bytes() != woven.read_bytes()
+
+    rendered = []
+    for source in (plain, woven):
+        out = tmp_path / f"{source.stem}.jpg"
+        subprocess.run(["/usr/bin/sips", "-s", "format", "jpeg", "-s",
+                        "formatOptions", "100", str(source), "--out", str(out)],
+                       check=True, capture_output=True)
+        rendered.append(out.read_bytes())
+    assert rendered[0] == rendered[1], (
+        "sips decoded the interlaced file to different pixels from the plain "
+        "one, so the Adam7 layout is wrong")
+
+
 def test_read_png_grey_refuses_an_rgb_png(tmp_path):
     """Converting silently is what the reader exists not to do."""
     path = write_png(tmp_path / "rgb.png", 8, 8)
@@ -169,7 +202,7 @@ def test_read_png_grey_refuses_an_rgb_png(tmp_path):
 
 @pytest.mark.parametrize("writer", [write_grey_png, write_png16,
                                     write_rgba_png, write_grey_alpha_png,
-                                    write_indexed_png])
+                                    write_indexed_png, write_interlaced_png])
 @pytest.mark.parametrize("width,height", [(0, 10), (10, 0), (-1, 10)])
 def test_the_new_writers_refuse_a_degenerate_size(tmp_path, writer, width, height):
     path = tmp_path / "degenerate.png"
