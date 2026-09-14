@@ -29,6 +29,8 @@
     - **`IDAT` is out as the primary check.** It fires on ten files whose pixels are identical, for two container reasons the CoreGraphics writer will never match: nine are `sips` writing colour type 6 against CoreGraphics' type 2, and one is an Adam7 interlaced source that `sips` preserves and CoreGraphics does not.
     - **Decoded pixels are the bar** — but an RGB-only comparison silently hides that `kCGImageAlphaNoneSkipLast` drops alpha, which it does on all 12 alpha-bearing corpus PNGs. Assert the channel count and colour type alongside the pixels, or the gate passes while the alpha goes.
 
+    **One correction to the counts above.** They were themselves measured by comparing decoded 8-bit RGB -- the very comparison this constraint rejects. For all 12 alpha-bearing corpus PNGs `sips` writes colour type 6 where CoreGraphics writes type 2, and the census filed nine of those under "pixels identical". Under the comparison mandated here they are differences, and real ones: the alpha is genuinely lost. Tasks 3 to 6 should expect roughly nine to twelve corpus reports the "25 differing in pixels" figure does not predict, and they are fixed in Task 6 rather than pinned.
+
     Identical pixels is stricter than any perceptual threshold; this is not a relaxation. The constraint has been wrong three times — "never identical", then "identity holds for most sources", then "pixels or `IDAT`" as though those agreed. Each error generalised from a handful of fixtures. Count before you write a rule here.
 
 11. **The corpus at `~/Pictures/wallpaper` is READ-ONLY.** Tests copy out and pass `--processing-dir`. No wallpaper image is ever committed.
@@ -511,39 +513,9 @@ Expected: FAIL, `ModuleNotFoundError: No module named 'tests.differential'`
 
 - [ ] **Step 3: Write the harness**
 
-```python
-# tests/differential.py
-"""Compare a sips operation against its CoreGraphics replacement.
+**The code that was here has been removed rather than corrected.** It compared whole file bytes, which Global Constraint 10 now forbids, and leaving a superseded implementation four lines below the criterion that contradicts it is how an implementer ends up transcribing the wrong thing.
 
-The bar is byte-identical. Where a difference is intended, the calling
-test pins it as a named exception with its reason; nothing is waved
-through for being small.
-"""
-
-
-def compare(old_fn, new_fn, source, tmp_path):
-    """Run both, return None if the bytes match, else a description."""
-    old_out = tmp_path / "_old_out"
-    new_out = tmp_path / "_new_out"
-    old_fn(source, old_out)
-    new_fn(source, new_out)
-
-    old = old_out.read_bytes()
-    new = new_out.read_bytes()
-    if old == new:
-        return None
-
-    if len(old) != len(new):
-        return (f"{source.name}: sips wrote {len(old)} bytes, "
-                f"CoreGraphics wrote {len(new)} bytes")
-
-    for i, (a, b) in enumerate(zip(old, new)):
-        if a != b:
-            return (f"{source.name}: first difference at offset {i} "
-                    f"(sips {a:#04x}, CoreGraphics {b:#04x}), "
-                    f"{sum(x != y for x, y in zip(old, new))} bytes differ")
-    return f"{source.name}: differs"
-```
+What shipped is `tests/differential.py`. For PNG it decodes with `zlib` and `struct` only -- never through ImageIO, because a gate that decoded with the framework under test would agree with itself about a bitmap it had built wrongly -- and checks dimensions, then `IHDR` colour type and its implied channel count, then bit depth, then `PLTE`/`tRNS`, then every sample of every pixel. For lossy formats it compares whole files. It takes a `suffix` argument, defaulting to `.png`, because `crop` refuses a non-`.png` name and Task 5 needs `.heic`.
 
 - [ ] **Step 4: Run to verify pass**
 
@@ -959,7 +931,10 @@ def test_encode_matches_sips_byte_for_byte(tmp_path, photo_fixture, fmt, quality
     def new(source, out):
         imaging.resize_and_encode(source, 800, 600, fmt, quality, out, resize=False)
 
-    assert compare(old, new, src, tmp_path) is None
+    # suffix matters: without it the harness writes HEIC bytes into a .png
+    # name, and every reader downstream goes by the name.
+    ext = "jpg" if fmt == "jpeg" else fmt
+    assert compare(old, new, src, tmp_path, suffix=f".{ext}") is None
 
 
 def test_png_takes_no_quality(tmp_path, photo_fixture):
