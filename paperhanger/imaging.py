@@ -73,7 +73,19 @@ SRGB_PROFILE = "/System/Library/ColorSync/Profiles/sRGB Profile.icc"
 
 
 class ImagingError(RuntimeError):
-    """A sips or upscayl-bin invocation failed."""
+    """An imaging operation failed.
+
+    A sips or upscayl-bin invocation that did not succeed, and -- since the
+    CoreGraphics binding layer arrived -- anything `_cg` refuses: a file
+    ImageIO will not decode, a colour space or bit depth no bitmap context
+    accepts, a destination that cannot be written. That layer raises this
+    and nothing else on purpose, so `execute` still catches ONE type per
+    photo, reports that photo failed, and carries on with the run.
+
+    It subclasses RuntimeError for compatibility with callers that predate
+    it. Tests should not use `pytest.raises(RuntimeError)` as a stand-in
+    for an unrelated failure, because this satisfies it.
+    """
 
 
 def _tail(stream) -> str:

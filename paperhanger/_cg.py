@@ -25,19 +25,26 @@ wrong. Measured on this machine, on a 150x200 gradient reduced to 75x100:
   source model   alpha info          result
   Monochrome     kCGImageAlphaNone   correct, byte-identical to sips
   Monochrome     NoneSkipLast        context created, output ALL BLACK
+  Mono + alpha   kCGImageAlphaNone   accepted; composited onto black
+  Mono + alpha   PremultipliedLast   alpha preserved
   RGB            kCGImageAlphaNone   NULL context
   RGB            NoneSkipLast        correct
   RGB + alpha    NoneSkipLast        opaque; source composited onto black
   RGB + alpha    PremultipliedLast   alpha preserved
   Indexed        every combination   NULL context
+  32-bit float   every combination   NULL context, at 8, 16 and 32 bpc
 
 So a single hardcoded alpha value is wrong whichever one is picked: the
 plan's `kCGImageAlphaNoneSkipLast` blackens the ten grayscale wallpapers
 in the corpus and flattens the twelve alpha-bearing PNGs, and its obvious
 counterpart `kCGImageAlphaNone` returns NULL for the other 884 files.
-`_bitmap_format` derives all three fields from the source instead, and
-refuses a model it cannot serve by name -- see the constraint that `_cg`
-never hands a NULL onward.
+`bitmap_format` derives all three fields from the source instead, and
+refuses a model or a depth it cannot serve by name -- see the constraint
+that `_cg` never hands a NULL onward.
+
+Note the asymmetry in the table, because it is the reason the failure is
+silent rather than loud: RGB REJECTS the wrong value with a NULL, and
+monochrome ACCEPTS it and renders the wrong picture.
 
 The grayscale failure only fires when the draw SCALES. At 1:1 the same
 bad pairing round-trips correctly, which is why it survived measurement
@@ -79,15 +86,14 @@ kCGInterpolationHigh = 3
 # CGImageAlphaInfo. The low five bits of a CGBitmapInfo.
 kCGImageAlphaNone = 0
 kCGImageAlphaPremultipliedLast = 1
-kCGImageAlphaLast = 3
 kCGImageAlphaNoneSkipLast = 5
 kCGImageAlphaNoneSkipFirst = 6
 kCGBitmapAlphaInfoMask = 0x1F
 
-# CGColorSpaceModel.
+# CGColorSpaceModel. Only the two this module can build a context for;
+# every other value is refused through COLOUR_MODELS, which has the names.
 kCGColorSpaceModelMonochrome = 0
 kCGColorSpaceModelRGB = 1
-kCGColorSpaceModelIndexed = 5
 
 # For error messages only: a model we refuse should say which one it was.
 COLOUR_MODELS = {
@@ -114,7 +120,14 @@ class CGRect(Structure):
 
 
 def _declare():
-    """Every signature, in one place, so an argtypes mistake is findable."""
+    """Every signature, in one place, so an argtypes mistake is findable.
+
+    A function that is NOT declared here does not fail politely when called:
+    ctypes defaults its arguments to C int, so a 64-bit handle is truncated
+    to 32 bits and the process segfaults. Two probes written against this
+    module died that way, on `CGImageGetBitsPerPixel` and
+    `CGImageGetBitmapInfo`. Adding a call means adding it here first.
+    """
     _CF.CFStringCreateWithCString.restype = c_void_p
     _CF.CFStringCreateWithCString.argtypes = [c_void_p, c_char_p, c_uint32]
     _CF.CFURLCreateWithFileSystemPath.restype = c_void_p
@@ -294,11 +307,16 @@ def bitmap_format(image, path):
     Derived, never hardcoded -- the module docstring has the measurements.
     Three rules:
 
-      * MONOCHROME takes kCGImageAlphaNone. NoneSkipLast is accepted by
-        CGBitmapContextCreate and renders the whole frame black on any
-        scaling draw; PremultipliedLast is accepted too and turns a
-        grayscale PNG into a gray+alpha one, changing the file's structure
-        for no gain. Ten of the 894 corpus photographs are monochrome.
+      * MONOCHROME takes PremultipliedLast when the source has an alpha
+        channel and kCGImageAlphaNone when it does not. NoneSkipLast is
+        accepted by CGBitmapContextCreate and renders the whole frame
+        black on any scaling draw. AlphaNone on a grey+ALPHA source is
+        accepted too, and composites it onto the context's black ground:
+        measured on an 8-bit colour-type-4 PNG, values 0, 6, 12, 18 at
+        alpha 128 came back 0, 3, 6, 9 with the channel gone. Ten of the
+        894 corpus photographs are monochrome and none of them carries
+        alpha, which is why this branch has to be right by construction
+        rather than by the corpus happening not to exercise it.
       * RGB takes PremultipliedLast when the source has an alpha channel
         and NoneSkipLast when it does not. NoneSkipLast on an
         alpha-bearing source composites it onto the context's black ground
@@ -310,29 +328,41 @@ def bitmap_format(image, path):
         every alpha setting, and a NULL travelling onward is what this
         layer exists to prevent.
 
-    Bits per component follow the source too. `sips` drops a 16-bit source
-    to 8-bit on both its resample and its pad path; preserving it here is
-    the same intended divergence §4 of the design already pins for crop.
-    No corpus file is 16-bit, so this is latent rather than live.
+    Bits per component follow the source: 8, or 16 for a deeper one.
+    `sips` drops a 16-bit source to 8-bit on both its resample and its pad
+    path; preserving it here is the same intended divergence §4 of the
+    design already pins for crop. No corpus file is 16-bit, so that part is
+    latent rather than live.
+
+    Deeper than 16 is refused by name. A 32-bit float source decodes into a
+    colour space that accepts NO integer context -- 8, 16 and 32 bits per
+    component all return NULL -- so the alternative is a failure whose
+    message says only that a context could not be made, rather than one
+    that says the depth is why.
     """
     space = _checked(_CG_LIB.CGImageGetColorSpace(image),
                      "read the colour space", path)   # a Get: not ours
     model = _CG_LIB.CGColorSpaceGetModel(space)
+    alpha = has_alpha(image)
 
     if model == kCGColorSpaceModelMonochrome:
-        info = kCGImageAlphaNone
+        info = kCGImageAlphaPremultipliedLast if alpha else kCGImageAlphaNone
     elif model == kCGColorSpaceModelRGB:
-        info = (kCGImageAlphaPremultipliedLast if has_alpha(image)
+        info = (kCGImageAlphaPremultipliedLast if alpha
                 else kCGImageAlphaNoneSkipLast)
     else:
         raise ImagingError(
             f"cannot build a bitmap context for the "
             f"{COLOUR_MODELS.get(model, model)} colour space of {path}")
 
-    # 8 or 16; there is no legal integer format between them, and a source
-    # deeper than 16 (a float TIFF) would need kCGBitmapFloatComponents,
-    # which no corpus file asks for.
-    bits = 16 if _CG_LIB.CGImageGetBitsPerComponent(image) > 8 else 8
+    source_bits = _CG_LIB.CGImageGetBitsPerComponent(image)
+    if source_bits > 16:
+        raise ImagingError(
+            f"cannot build a bitmap context for the {source_bits}-bit "
+            f"components of {path}")
+    # 8 or 16; there is no legal integer format between them, and anything
+    # shallower promotes to 8 without losing a value.
+    bits = 16 if source_bits > 8 else 8
     return space, bits, info
 
 
@@ -361,20 +391,20 @@ def _png_destination(scope, out_path):
 def write_png(scope, image, out_path, options=None):
     """Encode `image` as PNG, or raise.
 
-    The destination is unlinked first for the reason `imaging._run` takes a
-    `produces=`: a stale file from an earlier run must not be able to stand
-    in for output this run never produced. Finalize returning false is the
-    other half -- ImageIO reports a refused write there and nowhere else,
-    so an unchecked call is a silent success with no file behind it.
+    NO UNLINK-FIRST here, unlike `imaging._run`'s `produces=`. It was in an
+    earlier draft, on the reasoning that a stale file must not stand in for
+    output this run never produced, and measuring it found it changed no
+    observable outcome: ImageIO truncates an existing destination, and
+    replaces a read-only one, whether or not the file is removed first.
+    Where the write fails it fails at CGImageDestinationCreateWithURL, and
+    a stale file survives identically either way -- with the unlink in
+    place the message was WORSE, since the unlink's own errno replaced the
+    more specific "could not create a PNG destination for ...".
+
+    Finalize is checked because ImageIO reports a refused write there and
+    nowhere else: discarding the return value is a silent success with no
+    file behind it.
     """
-    try:
-        Path(out_path).unlink(missing_ok=True)
-    except OSError as exc:
-        # NotADirectoryError when a component of the path is a file,
-        # PermissionError when the directory is not ours. Both are the
-        # caller's problem and both must leave as the one exception type
-        # this layer promises, not as a second kind for `execute` to catch.
-        raise ImagingError(f"could not write {out_path}: {exc}") from exc
     dest = _png_destination(scope, out_path)
     _IO_LIB.CGImageDestinationAddImage(dest, image, options)
     if not _IO_LIB.CGImageDestinationFinalize(dest):

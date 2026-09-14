@@ -4,9 +4,9 @@ import zlib
 
 import pytest
 
-from tests.pixels import (read_ihdr, read_png_grey, write_grey_png,
-                          write_indexed_png, write_png, write_png16,
-                          write_rgba_png)
+from tests.pixels import (read_ihdr, read_png_grey, write_grey_alpha_png,
+                          write_grey_png, write_indexed_png, write_png,
+                          write_png16, write_rgba_png)
 
 
 def _sips_dimensions(path):
@@ -139,6 +139,16 @@ def test_rgba_png_is_colour_type_6(tmp_path):
     assert _sips_dimensions(path) == (40, 30)
 
 
+def test_grey_alpha_png_is_colour_type_4(tmp_path):
+    path = write_grey_alpha_png(tmp_path / "greyalpha.png", 40, 30, alpha=128)
+    width, height, depth, colour, interlace = read_ihdr(path)
+    assert (width, height) == (40, 30)
+    assert colour == 4, "greyscale with alpha"
+    assert depth == 8
+    assert interlace == 0
+    assert _sips_dimensions(path) == (40, 30)
+
+
 def test_indexed_png_is_colour_type_3(tmp_path):
     path = write_indexed_png(tmp_path / "paletted.png", 40, 30)
     width, height, depth, colour, interlace = read_ihdr(path)
@@ -158,7 +168,8 @@ def test_read_png_grey_refuses_an_rgb_png(tmp_path):
 
 
 @pytest.mark.parametrize("writer", [write_grey_png, write_png16,
-                                    write_rgba_png, write_indexed_png])
+                                    write_rgba_png, write_grey_alpha_png,
+                                    write_indexed_png])
 @pytest.mark.parametrize("width,height", [(0, 10), (10, 0), (-1, 10)])
 def test_the_new_writers_refuse_a_degenerate_size(tmp_path, writer, width, height):
     path = tmp_path / "degenerate.png"

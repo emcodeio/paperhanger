@@ -8,9 +8,10 @@ Writing was the first of them and the file kept the name through the rest.
     costs nothing.
   * `write_marked_png` puts a solid block at a known rectangle, so a test can
     say which REGION it expects rather than only which size.
-  * `write_grey_png`, `write_png16`, `write_rgba_png` and
-    `write_indexed_png` emit the shapes the first two cannot: colour types
-    0, 6 and 3, and bit depth 16. Each exists because the imaging layer
+  * `write_grey_png`, `write_png16`, `write_rgba_png`,
+    `write_grey_alpha_png` and `write_indexed_png` emit the shapes the
+    first two cannot: colour types 0, 6, 4 and 3, and bit depth 16. Each
+    exists because the imaging layer
     builds a different destination bitmap for it, and hands back a wrong
     file -- black, flattened, or NULL -- when it is not told them apart.
     See each writer's docstring for which.
@@ -216,6 +217,42 @@ def write_rgba_png(path, width: int, height: int,
     path = Path(path)
     path.write_bytes(_png_bytes(width, height, bytes(rows),
                                 depth=8, colour_type=6))
+    return path
+
+
+def write_grey_alpha_png(path, width: int, height: int,
+                         top=0, bottom=255, alpha=128) -> Path:
+    """A greyscale-with-alpha PNG: IHDR colour type 4, two channels.
+
+    No corpus file is this shape, and that is the argument FOR having it
+    rather than against. A monochrome bitmap context built with
+    kCGImageAlphaNone accepts a grey+alpha source and composites it onto
+    black -- measured, values 0, 6, 12, 18 at alpha 128 coming back
+    0, 3, 6, 9 -- so without this writer the branch that has to get that
+    right could not be reached by any test, and an untestable branch that
+    silently composites is the exact shape the binding layer exists to
+    prevent.
+
+    `alpha` is partial by default for the same reason as in
+    `write_rgba_png`: an opaque source cannot tell a preserved channel from
+    a flattened one.
+    """
+    if width < 1 or height < 1:
+        raise ValueError("width and height must be >= 1")
+    for name, value in (("top", top), ("bottom", bottom), ("alpha", alpha)):
+        if not 0 <= value <= 255:
+            raise ValueError(f"{name} must be within 0-255, got {value}")
+
+    span = height - 1
+    rows = bytearray()
+    for y in range(height):
+        rows.append(0)  # filter type 0 (None)
+        value = top if span == 0 else round(top + (bottom - top) * y / span)
+        rows.extend(bytes((value, alpha)) * width)
+
+    path = Path(path)
+    path.write_bytes(_png_bytes(width, height, bytes(rows),
+                                depth=8, colour_type=4))
     return path
 
 

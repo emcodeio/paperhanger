@@ -20,6 +20,7 @@ that was confirmed to go red before it was allowed to go green.
 import ast
 import os
 import resource
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -71,18 +72,38 @@ def test_load_reads_the_bytes_not_the_extension(tmp_path, webp_fixture):
     right about it before `probe` can be.
     """
     src = webp_fixture(tmp_path / "lying.jpg", 320, 200)
+    header = src.read_bytes()[:12]
+    assert header[:4] == b"RIFF" and header[8:12] == b"WEBP", (
+        f"the fixture did not write a WebP, it wrote {header!r} -- and a "
+        f"fixture that quietly produced a JPEG would make this test pass "
+        f"while proving nothing"
+    )
+    assert src.suffix == ".jpg", "and the name still lies, which is the point"
     with _cg.Scope() as scope:
         assert _cg.dimensions(_cg.load(scope, src)) == (320, 200)
 
 
 def test_load_keeps_a_tagged_profile_in_an_rgb_space(tmp_path, profiled_fixture):
-    """A wide-gamut source is still RGB, so it still gets an RGB bitmap."""
+    """A wide-gamut source is still RGB, so it still gets an RGB bitmap.
+
+    The fixture's own claim is asserted first. `profiled_fixture` shells
+    out to `sips --matchTo`, and if that ever stopped tagging the file the
+    test would go on passing on an untagged PNG while appearing to cover
+    the wide-gamut case -- the corpus holds 19 Adobe RGB and 3 ProPhoto
+    sources, so the case is real.
+    """
     src = profiled_fixture(tmp_path / "adobe.png", 120, 80,
                            "AdobeRGB1998.icc")
+    untagged = profiled_fixture(tmp_path / "plain.png", 120, 80, None)
+    assert b"iCCP" in src.read_bytes(), "the fixture tagged nothing"
+    assert b"iCCP" not in untagged.read_bytes(), "and the base is untagged"
+
     with _cg.Scope() as scope:
         image = _cg.load(scope, src)
         assert _cg.colour_model(image, src) == "RGB"
         assert _cg.dimensions(image) == (120, 80)
+        _space, bits, info = _cg.bitmap_format(image, src)
+    assert (bits, info) == (8, _cg.kCGImageAlphaNoneSkipLast)
 
 
 # --------------------------------------------------------------------------
@@ -113,16 +134,29 @@ def test_checked_treats_a_zero_pointer_as_null():
 # --------------------------------------------------------------------------
 
 
+class _Boom(Exception):
+    """A sentinel no production code raises.
+
+    The plan's version of the test below raised and caught `RuntimeError`.
+    `ImagingError` SUBCLASSES RuntimeError, so that version stayed green
+    with `load` completely broken: the `pytest.raises` was satisfied by the
+    failure of the call the test meant to succeed, and `released` was then
+    non-empty from the CFString and CFURL alone.
+    """
+
+
 def test_scope_releases_on_exception(tmp_path, png_fixture):
     """A raise inside the scope must not leak the handles taken before it."""
     src = png_fixture(tmp_path / "a.png", 64, 64)
     released = []
     scope = _cg.Scope(release=released.append)
-    with pytest.raises(RuntimeError):
+    with pytest.raises(_Boom):
         with scope:
             _cg.load(scope, src)
-            raise RuntimeError("boom")
-    assert released, "the scope released nothing when the body raised"
+            raise _Boom("boom")
+    assert len(released) == 4, (
+        "the scope released {} handles when the body raised, not the four "
+        "a load takes".format(len(released)))
 
 
 def test_scope_releases_every_handle_a_load_takes(tmp_path, png_fixture):
@@ -301,6 +335,61 @@ def test_an_alpha_bearing_source_gets_a_premultiplied_context(tmp_path):
     assert info == _cg.kCGImageAlphaPremultipliedLast
 
 
+def test_a_monochrome_source_with_alpha_keeps_its_channel(tmp_path):
+    """The branch the corpus cannot reach, which is why it needs a fixture.
+
+    A grey+alpha source through an AlphaNone context is ACCEPTED and
+    composited onto the context's black ground: measured, values 0, 6, 12,
+    18 at alpha 128 coming back 0, 3, 6, 9. No corpus file is colour type
+    4 and no test could construct one until `write_grey_alpha_png` existed,
+    so this silently did the wrong thing with nothing able to say so.
+    """
+    src = pixels.write_grey_alpha_png(tmp_path / "greyalpha.png", 64, 64,
+                                      alpha=128)
+    with _cg.Scope() as scope:
+        image = _cg.load(scope, src)
+        assert _cg.colour_model(image, src) == "monochrome"
+        assert _cg.has_alpha(image), "a colour type 4 source carries alpha"
+        _space, _bits, info = _cg.bitmap_format(image, src)
+    assert info == _cg.kCGImageAlphaPremultipliedLast
+
+
+def test_a_monochrome_source_with_alpha_is_not_composited_onto_black(
+        tmp_path):
+    """And the same thing measured in pixels rather than in a constant."""
+    src = pixels.write_grey_alpha_png(tmp_path / "greyalpha.png", 60, 80,
+                                      top=40, bottom=200, alpha=128)
+    out = tmp_path / "half.png"
+    with _cg.Scope() as scope:
+        image = _cg.load(scope, src)
+        _cg.write_png(scope, _draw(scope, image, src, 30, 40), out)
+
+    _width, _height, _depth, colour, _ = pixels.read_ihdr(out)
+    assert colour == 4, (
+        f"colour type {colour}: the alpha channel was dropped, and the grey "
+        f"values will have been composited onto black"
+    )
+
+
+def test_a_source_deeper_than_16_bits_is_refused_by_name(tmp_path):
+    """A 32-bit float source accepts NO integer context -- 8, 16 and 32 all
+    return NULL -- so the depth is named rather than left as a context that
+    could not be made for reasons unstated."""
+    if shutil.which("magick") is None:
+        pytest.skip("ImageMagick (`magick`) is not installed")
+    src = tmp_path / "float32.tiff"
+    subprocess.run(
+        ["magick", "-size", "40x40", "gradient:red-blue", "-depth", "32",
+         "-define", "quantum:format=floating-point", str(src)],
+        check=True, capture_output=True)
+    with _cg.Scope() as scope:
+        image = _cg.load(scope, src)
+        with pytest.raises(ImagingError) as exc:
+            _cg.bitmap_format(image, src)
+    assert "32-bit components" in str(exc.value)
+    assert "float32.tiff" in str(exc.value)
+
+
 def test_an_indexed_source_is_refused_by_name(tmp_path):
     """The model where CGBitmapContextCreate returns NULL under every setting.
 
@@ -347,7 +436,8 @@ def test_bitmap_context_is_not_null_for_any_model_it_accepts(
     sources = [png_fixture(tmp_path / "rgb.png", 40, 40),
                grayscale_fixture(tmp_path / "grey.png", 40, 40),
                png16_fixture(tmp_path / "deep.png", 40, 40),
-               pixels.write_rgba_png(tmp_path / "alpha.png", 40, 40)]
+               pixels.write_rgba_png(tmp_path / "alpha.png", 40, 40),
+               pixels.write_grey_alpha_png(tmp_path / "greya.png", 40, 40)]
     for src in sources:
         with _cg.Scope() as scope:
             image = _cg.load(scope, src)
@@ -411,48 +501,83 @@ def test_write_png_writes_a_readable_file(tmp_path, png_fixture):
     assert pixels.read_ihdr(out)[:2] == (48, 32)
 
 
-def test_write_png_raises_when_it_cannot_write(tmp_path, png_fixture):
-    """ImageIO reports a refused write in Finalize's return value and
-    nowhere else, so an unchecked call is a silent success with no file
-    behind it -- the same shape of failure `imaging._run` takes `produces=`
-    to rule out."""
-    src = png_fixture(tmp_path / "in.png", 16, 16)
-    out = tmp_path / "no-such-dir" / "out.png"
+@pytest.mark.parametrize("kind", ["missing directory", "parent is a file",
+                                  "destination is a directory",
+                                  "unwritable directory"])
+def test_write_png_refuses_an_unwritable_destination(tmp_path, png_fixture,
+                                                     kind):
+    """Every route a bad destination can take leaves as ImagingError.
 
+    All four fail at CGImageDestinationCreateWithURL, NOT at Finalize --
+    measured, and the reason the Finalize branch needs the separate test
+    below rather than being reachable from here. Parametrised because the
+    earlier single-case version pinned only the first of them, and the
+    "parent is a file" route in particular used to escape as a bare
+    NotADirectoryError from an unlink this function no longer does.
+    """
+    src = png_fixture(tmp_path / "in.png", 16, 16)
+    if kind == "missing directory":
+        out = tmp_path / "no-such-dir" / "out.png"
+    elif kind == "parent is a file":
+        blocker = tmp_path / "blocker"
+        blocker.write_text("not a directory")
+        out = blocker / "out.png"
+    elif kind == "destination is a directory":
+        out = tmp_path / "adir"
+        out.mkdir()
+    else:
+        parent = tmp_path / "ro"
+        parent.mkdir()
+        parent.chmod(0o500)
+        out = parent / "out.png"
+
+    try:
+        with _cg.Scope() as scope:
+            with pytest.raises(ImagingError) as exc:
+                _cg.write_png(scope, _cg.load(scope, src), out)
+    finally:
+        if kind == "unwritable directory":
+            out.parent.chmod(0o700)
+    assert "out.png" in str(exc.value) or str(out) in str(exc.value)
+
+
+def test_write_png_raises_when_finalize_refuses(tmp_path, png_fixture,
+                                                monkeypatch):
+    """The branch no bad path reaches, pinned the only way it can be.
+
+    ImageIO reports a refused write in `CGImageDestinationFinalize`'s
+    return value and nowhere else, so discarding it is a silent success
+    with no file behind it. Four real failure routes were measured and
+    every one of them fails earlier, at the destination `_checked` -- so
+    the false return is forced here. Without this test, deleting the `if
+    not ...` leaves the whole file green.
+    """
+    src = png_fixture(tmp_path / "in.png", 16, 16)
+    out = tmp_path / "out.png"
+    monkeypatch.setattr(_cg._IO_LIB, "CGImageDestinationFinalize",
+                        lambda dest: False)
     with _cg.Scope() as scope:
         with pytest.raises(ImagingError) as exc:
             _cg.write_png(scope, _cg.load(scope, src), out)
     assert str(out) in str(exc.value)
-    assert not out.exists()
 
 
 def test_write_png_replaces_whatever_was_at_the_destination(tmp_path,
                                                             png_fixture):
-    """Output from an earlier run must not be able to stand in for this one."""
+    """The destination ends up holding THIS run's output.
+
+    This does not pin an unlink-first, and an earlier version of it was
+    named as though it did: ImageIO truncates an existing destination by
+    itself, so removing the unlink left the test green and the unlink was
+    dropped. What is pinned is the outcome -- an 8x8 file at the
+    destination does not survive a 48x32 write.
+    """
     src = png_fixture(tmp_path / "in.png", 48, 32)
     out = tmp_path / "out.png"
     png_fixture(out, 8, 8)                      # the stale file
     with _cg.Scope() as scope:
         _cg.write_png(scope, _cg.load(scope, src), out)
     assert pixels.read_ihdr(out)[:2] == (48, 32), "the old file survived"
-
-
-def test_write_png_reports_an_os_error_as_an_imaging_error(tmp_path,
-                                                           png_fixture):
-    """One exception type out of this layer, including from the unlink.
-
-    A path whose parent is a FILE raises NotADirectoryError from `unlink`,
-    which `missing_ok` does not suppress. Left uncaught it would reach
-    `execute` as a second exception type and fail the whole run rather than
-    the one photo.
-    """
-    src = png_fixture(tmp_path / "in.png", 16, 16)
-    blocker = tmp_path / "blocker"
-    blocker.write_text("not a directory")
-    with _cg.Scope() as scope:
-        with pytest.raises(ImagingError) as exc:
-            _cg.write_png(scope, _cg.load(scope, src), blocker / "out.png")
-    assert "out.png" in str(exc.value)
 
 
 # --------------------------------------------------------------------------
