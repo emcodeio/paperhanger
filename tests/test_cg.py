@@ -646,6 +646,109 @@ def test_write_png_replaces_whatever_was_at_the_destination(tmp_path,
 
 
 # --------------------------------------------------------------------------
+# crop_to_file, and the silent wrong answer it has to stop.
+# --------------------------------------------------------------------------
+
+
+def _grey_at(path, x, y):
+    _width, _height, rows = pixels.read_png_grey(path)
+    return rows[y][x]
+
+
+@pytest.mark.parametrize("y,label", [
+    (0, "the origin, where sips does a centred crop instead"),
+    (200, "flush with the bottom, where sips drops the crop entirely"),
+    (120, "an interior row, which sips gets right"),
+])
+def test_crop_to_file_honours_the_origin_it_is_given(tmp_path, gradient_fixture,
+                                                     y, label):
+    """CGImageCreateWithImageInRect takes its rect at the image's TOP LEFT.
+
+    Checked in PIXELS, because the size is the same whichever region comes
+    back and the fixture's value names its own source row. A top-left origin
+    and a bottom-left one both return 40x50 here and only the contents say
+    which. 300 rows over a 0..255 ramp keeps the map monotonic, so the first
+    output row is compared against the source row it should be.
+    """
+    src = gradient_fixture(tmp_path / "ramp.png", 40, 300)
+    out = tmp_path / "cut.png"
+    _cg.crop_to_file(src, 0, y, 40, 50, out)
+    assert pixels.read_ihdr(out)[:2] == (40, 50)
+    assert _grey_at(out, 0, 0) == _grey_at(src, 0, y), label
+    assert _grey_at(out, 0, 49) == _grey_at(src, 0, y + 49), label
+
+
+@pytest.mark.parametrize("rect,expected", [
+    ((350, 40, 120, 80), (50, 80)),      # overruns the right edge
+    ((0, 0, 900, 900), (400, 200)),      # larger than the source
+    ((-10, -10, 120, 80), (110, 70)),    # starts outside
+])
+def test_the_raw_call_returns_the_overlap_rather_than_failing(
+        tmp_path, photo_fixture, rect, expected):
+    """The hazard the post-condition exists for, measured on the API itself.
+
+    CGImageCreateWithImageInRect neither clamps to the rect nor refuses it:
+    it INTERSECTS with the image and hands back the overlap, at no error.
+    Without this test the post-condition below would be an assertion about
+    something nobody had shown could happen.
+    """
+    src = photo_fixture(tmp_path / "s.png", 400, 200)
+    x, y, width, height = rect
+    with _cg.Scope() as scope:
+        image = _cg.load(scope, src)
+        cut = _cg._CG_LIB.CGImageCreateWithImageInRect(
+            image, _cg.CGRect(_cg.CGPoint(float(x), float(y)),
+                              _cg.CGSize(float(width), float(height))))
+        assert cut, "the rect overlaps the image, so this is not the NULL case"
+        scope.own(cut, kind="image")
+        assert _cg.dimensions(cut) == expected
+
+
+@pytest.mark.parametrize("rect", [
+    (350, 40, 120, 80), (0, 0, 900, 900), (-10, -10, 120, 80),
+])
+def test_crop_to_file_refuses_a_rect_that_does_not_fit(tmp_path, photo_fixture,
+                                                       rect):
+    """And turns that overlap into the one exception type this layer raises,
+    writing nothing. `imaging.crop` checks first and is the guard that
+    matters; this is the one for a caller holding the handles directly."""
+    src = photo_fixture(tmp_path / "s.png", 400, 200)
+    out = tmp_path / "cut.png"
+    with pytest.raises(ImagingError, match="does not lie inside"):
+        _cg.crop_to_file(src, *rect, out)
+    assert not out.exists()
+
+
+def test_crop_to_file_refuses_a_rect_that_misses_the_image_entirely(
+        tmp_path, photo_fixture):
+    """The NULL branch, which is a different one: no overlap at all and
+    CGImageCreateWithImageInRect returns NULL rather than an empty image."""
+    src = photo_fixture(tmp_path / "s.png", 400, 200)
+    out = tmp_path / "cut.png"
+    with pytest.raises(ImagingError, match="could not crop"):
+        _cg.crop_to_file(src, 900, 900, 120, 80, out)
+    assert not out.exists()
+
+
+def test_repeated_crops_do_not_leak(tmp_path, photo_fixture):
+    """The crop's own release cycle: `load` takes three handles and the cut
+    image is a fourth, and a cut image holds the decoded pixels of the region
+    it was written from. Same instrument and same threshold as
+    `test_repeated_loads_do_not_leak`; confirmed to go red at +1170 MB with
+    `Scope.__exit__`'s CGImageRelease branch removed.
+    """
+    src = photo_fixture(tmp_path / "big.png", 1200, 900)
+    out = tmp_path / "cut.png"
+    before = _rss_mb()
+    for _ in range(300):
+        _cg.crop_to_file(src, 0, 0, 1200, 300, out)
+    growth = _rss_mb() - before
+    assert growth < 50, (
+        f"resident memory grew {growth:.0f} MB over 300 crops -- something "
+        f"is not being released")
+
+
+# --------------------------------------------------------------------------
 # Global Constraint 1.
 # --------------------------------------------------------------------------
 

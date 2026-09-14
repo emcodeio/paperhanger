@@ -128,13 +128,16 @@ def test_crop_produces_the_exact_rect(tmp_path):
 
 
 def test_crop_offsets_land_where_asked(tmp_path):
-    """sips takes -c HEIGHT WIDTH and --cropOffset Y X. Getting either order
-    wrong silently crops the WRONG REGION at the right size, so dimensions
-    alone cannot catch it -- a fully transposed implementation still returns
-    100x100 for a 100x100 request. Hence a marker and a real pixel check.
+    """A transposed rect silently crops the WRONG REGION at the right size, so
+    dimensions alone cannot catch it -- a fully transposed implementation
+    still returns 100x100 for a 100x100 request. Hence a marker and a real
+    pixel check.
 
-    The rect is deliberately non-square, which catches a transposed -c, and
-    deliberately off-centre, which catches a transposed --cropOffset.
+    The rect is deliberately non-square, which catches a swap of width and
+    height, and deliberately off-centre, which catches a swap of x and y.
+    Both swaps were live hazards: `sips` took -c HEIGHT WIDTH and
+    --cropOffset Y X, and CGRect takes origin before size with x before y,
+    so the argument order reversed at the swap and this is what checks it.
     """
     marker = (240, 30, 200)
     rect = Rect(x=250, y=40, width=120, height=80)
@@ -171,12 +174,16 @@ def test_crop_marker_check_would_fail_on_a_wrong_region(tmp_path):
     (Rect(x=0, y=0, width=900, height=900), "is larger than the source"),
 ])
 def test_an_out_of_bounds_crop_is_refused(tmp_path, rect, why):
-    """Fact 5. sips does not clamp and does not error -- it PADS WITH BLACK.
+    """Neither implementation clamps and neither errors.
 
-    Measured on this 400x200 source: every rect below comes back at exit 0,
-    with exactly the requested dimensions, as a valid file. The fact 4
-    post-condition cannot help, because the file really is there. Only
-    measuring the source and comparing catches it.
+    `sips` PADDED WITH BLACK -- fact 5: every rect below came back at exit 0,
+    with exactly the requested dimensions, as a valid file, so the fact 4
+    post-condition could not help because the file really was there.
+    CoreGraphics INTERSECTS instead and returns the overlap, which is a
+    plausible file at the WRONG dimensions. Measured on this 400x200 source:
+    120x80 at x=350 comes back 50x80 and 900x900 at the origin comes back as
+    the whole 400x200. Only measuring the source and comparing catches
+    either, which is why the guard survived the swap unchanged.
     """
     source = write_marked_png(tmp_path / "m.png", 400, 200,
                               Rect(x=250, y=40, width=120, height=80))
@@ -244,67 +251,17 @@ def test_crop_is_region_exact_on_and_off_the_bad_offsets(tmp_path, rect):
     assert _crop_lands_on_the_marker(tmp_path, 400, 200, rect, "b")
 
 
-def _edge_error(rows, colour, index):
-    """Mean absolute per-channel error of column `index` against `colour`."""
-    column = [row[index] for row in rows]
-    return sum(abs(p[c] - colour[c]) for p in column for c in range(3)) / (len(column) * 3)
-
-
-@pytest.mark.parametrize("rect", [
-    Rect(x=0, y=0, width=400, height=300),      # padded branch (offset 0 0)
-    Rect(x=0, y=300, width=400, height=300),    # padded branch (flush bottom)
-    Rect(x=100, y=100, width=400, height=300),  # direct branch
-])
-def test_cropping_a_lossy_source_does_not_bleed_the_pad_in(tmp_path, rect):
-    """Fact 7. Every other crop fixture here is a PNG, so the suite was blind to
-    this: the pad step's `-s format png` sat after --padColor, where sips drops
-    it, and the magenta pad shared 8x8 DCT blocks with the pixels being kept.
-
-    Measured on THIS fixture, with the pad step's `-s format png` put back
-    after --padColor: column 0 mean absolute per-channel error 63.14 and
-    column 1 21.87, against 0.33 in the interior, with column 0 shifted
-    R +73.2, G -49.1, B +67.1 -- FF00FF's own signature, a quarter of the way
-    to magenta on the outermost column. The same columns measure 0.00 once
-    PNG is forced, so a uniform region survives the round trip exactly and
-    the whole of that error is the pad.
-
-    (The numbers here used to be 9.34 and 8.20 against 1.43, carried over
-    from a marked fixture this test abandoned for the uniform one below. They
-    understated the defect by a factor of seven, because a marked source rings
-    against its own colour boundary and that ringing was being counted as the
-    interior figure.)
-
-    The interior is ordinary JPEG noise and is the right thing to compare
-    against, so the edges are required to be no worse than the middle.
-    """
-    # A UNIFORM source, deliberately: a marked one has a hard colour boundary
-    # at the rect edge, and JPEG rings against that boundary in the source
-    # itself, which is real compression noise rather than anything crop did.
-    # Uniform green leaves the magenta pad as the only thing that could move
-    # an edge pixel, and it is far from FF00FF in every channel.
-    colour = (20, 90, 40)
-    source_png = write_png(tmp_path / "m.png", 800, 600, colour=colour)
-    source_jpg = tmp_path / "m.jpg"
-    imaging.resize_and_encode(source_png, 800, 600, "jpeg", 90, source_jpg,
-                              resize=False)
-
-    out = tmp_path / "crop.png"
-    imaging.crop(source_jpg, rect, out)
-    _, _, rows = read_png_rgb(out)
-
-    interior = _edge_error(rows, colour, rect.width // 2)
-    for index in (0, 1, 2):
-        assert _edge_error(rows, colour, index) <= interior + 2.0, (
-            f"column {index} is further from {colour} than the interior; "
-            "the pad is bleeding in"
-        )
-
-
 def test_crop_always_writes_png_even_from_a_lossy_source(tmp_path):
-    """Fact 7's other half. Without `-s format` sips keeps the SOURCE's format
-    whatever the --out suffix says, so before the fix crop wrote JPEG bytes into
-    a file named .png and quietly spent a lossy generation on an intermediate.
-    probe reads the content, not the name, which is the only way to see it."""
+    """A lossy source must not produce a lossy intermediate.
+
+    This used to be fact 7's other half: without `-s format` sips kept the
+    SOURCE's format whatever the --out suffix said, so crop wrote JPEG bytes
+    into a file named .png and quietly spent a lossy generation. The trap is
+    gone with the tool -- `_cg.crop_to_file` names `public.png` on the
+    destination and can write nothing else -- but the CONTRACT is ours and
+    outlives the implementation, so it stays asserted. probe reads the
+    content, not the name, which is the only way to see it.
+    """
     marked = write_marked_png(tmp_path / "m.png", 800, 600,
                               Rect(x=0, y=0, width=400, height=300))
     source_jpg = tmp_path / "m.jpg"
@@ -312,11 +269,11 @@ def test_crop_always_writes_png_even_from_a_lossy_source(tmp_path):
                               resize=False)
     assert imaging.probe(source_jpg)[2] == "jpeg"
 
-    for tag, rect in [("padded", Rect(x=0, y=0, width=400, height=300)),
-                      ("direct", Rect(x=100, y=100, width=400, height=300))]:
-        out = tmp_path / f"{tag}.png"
+    for tag, rect in [("at the origin", Rect(x=0, y=0, width=400, height=300)),
+                      ("interior", Rect(x=100, y=100, width=400, height=300))]:
+        out = tmp_path / f"{tag.replace(' ', '_')}.png"
         imaging.crop(source_jpg, rect, out)
-        assert imaging.probe(out)[2] == "png", f"{tag} branch did not write PNG"
+        assert imaging.probe(out)[2] == "png", f"{tag} did not write PNG"
 
 
 @pytest.mark.parametrize("name", ["out.jpg", "out.heic", "out"])
@@ -351,43 +308,15 @@ def test_crop_still_accepts_the_name_every_caller_passes(tmp_path):
         assert imaging.probe(out)[:2] == (100, 80)
 
 
-def test_the_padded_intermediate_is_really_png(tmp_path, monkeypatch):
-    """Guards the argument order directly. The intermediate is deleted in a
-    finally, so catch it mid-flight: if `-s format png` ever drifts back behind
-    --padColor this fails, rather than silently degrading edge pixels."""
-    seen = {}
-    real_run = imaging._run
-
-    def spy(argv, **kwargs):
-        result = real_run(argv, **kwargs)
-        produces = kwargs.get("produces")
-        if produces is not None and str(produces).endswith(".padded.png"):
-            seen["format"] = imaging.probe(produces)[2]
-        return result
-
-    monkeypatch.setattr(imaging, "_run", spy)
-
-    marked = write_marked_png(tmp_path / "m.png", 800, 600,
-                              Rect(x=0, y=0, width=400, height=300))
-    source_jpg = tmp_path / "m.jpg"
-    imaging.resize_and_encode(marked, 800, 600, "jpeg", 90, source_jpg,
-                              resize=False)
-    imaging.crop(source_jpg, Rect(x=0, y=0, width=400, height=300),
-                 tmp_path / "out.png")
-    assert seen.get("format") == "png", f"padded intermediate was {seen}"
-
-
-def test_raw_sips_still_has_the_bug_the_workaround_exists_for(tmp_path):
-    """A canary on the defect itself, calling sips directly. If Apple ever
-    fixes this, this test fails and the padding pass can be deleted -- which
-    is worth knowing, because it costs a full extra pass per affected crop."""
-    marker = (240, 30, 200)
-    rect = Rect(x=0, y=120, width=300, height=80)      # flush with the bottom
-    source = write_marked_png(tmp_path / "m.png", 400, 200, rect, marker=marker)
-    out = tmp_path / "raw.png"
-    subprocess.run(["/usr/bin/sips", "-c", "80", "300", "--cropOffset", "120", "0",
-                    str(source), "--out", str(out)], check=True, capture_output=True)
-    assert imaging.probe(out)[:2] == (400, 200), "sips now honours the offset"
+def test_crop_leaves_no_intermediate_behind(tmp_path):
+    """The pad wrote `<out>.padded.png` beside the output and removed it in a
+    finally. Nothing writes beside the output any more, and this says so: a
+    stray file in a processing directory is one the executor never registered
+    as an intermediate and therefore never deletes."""
+    source = write_png(tmp_path / "s.png", 400, 300, noise=True)
+    out = tmp_path / "out.png"
+    imaging.crop(source, Rect(x=0, y=0, width=400, height=100), out)
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["out.png", "s.png"]
 
 
 def test_fusing_crop_and_resample_is_wrong(tmp_path):
