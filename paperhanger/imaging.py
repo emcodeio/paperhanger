@@ -1,4 +1,10 @@
-"""Every subprocess call the tool makes. The only module that touches images.
+"""The only module that touches images. Subprocesses, and now `_cg`.
+
+`crop` no longer calls `sips`; it is a CoreGraphics call through `_cg`, and
+facts 6 and 7 below have stopped describing it. They are kept because they
+remain true statements ABOUT `sips`, they are the reason this migration
+exists, and `tests/test_crop_differential.py` still runs the old pad-and-shift
+body as its differential reference, which depends on every one of them.
 
 Seven measured facts shape this file. Each fails SILENTLY if ignored:
 
@@ -41,9 +47,12 @@ Seven measured facts shape this file. Each fails SILENTLY if ignored:
          1600x1000 at (0,200), returns the whole 1600x1200 image.
      An x of 1 or more is correct at every y, and x == 0 is correct for every
      y strictly between those two. So two of the three desktop slices and one
-     of the three phone slices were silently wrong. `crop` works around it by
-     padding 1px on every side and cropping at +1, which makes x non-zero and
-     the bottom edge non-flush; verified region-exact for all six slices.
+     of the three phone slices were silently wrong. `crop` used to work
+     around it by padding 1px on every side and cropping at +1, which made x
+     non-zero and the bottom edge non-flush. NO LONGER: it is a
+     CGImageCreateWithImageInRect call, which honours any origin, and the pad
+     -- a full extra rewrite of an image that on the upscale path has already
+     been quadrupled -- is gone with it.
   7. ARGUMENT ORDER decides whether `-s format` is honoured. Placed after
      --padColor it is silently dropped: a 2560x1600 JPEG padded with
      `-p H W --padColor FF00FF -s format png` comes back as JPEG, byte-identical
@@ -59,33 +68,49 @@ Seven measured facts shape this file. Each fails SILENTLY if ignored:
      magenta on the outermost column. Forced to PNG the same columns measure
      0.00: a uniform region survives the round trip exactly, so the whole of
      that error is the pad. Invisible to any dimension or file-exists check.
-     Both crop branches therefore put `-s format png` FIRST, and `crop`
-     always emits a lossless intermediate.
+     The pad that provoked this is gone from `crop`, so nothing here passes
+     --padColor any more; the measurement stays because the reference in
+     tests/test_crop_differential.py still runs that pass.
      Note also that without -s format, sips keeps the SOURCE's format whatever
      the --out suffix says, so a .png filename proves nothing about the bytes.
+     That half is still live for `resize_and_encode`, which is why it passes
+     `-s format` explicitly, and it is why `crop` REFUSES an out_path that
+     names anything but .png: the name is what every reader downstream goes by.
+
+An eighth fact, which is about `sips` and is NOT one of the seven above
+because nothing in this module depends on it any more:
+
+  8. A REGION DECODE OF A BASELINE JPEG IS NOT THE WHOLE-FRAME DECODE, once
+     the file reaches 1024*1024 == 1,048,576 pixels. This is ImageIO, not
+     `sips`: `sips --cropOffset` and a plain `sips -s format png` disagree
+     about the same file, and so do `_cg.crop_to_file` and `_cg.load` --
+     both, by comparable margins, and not in the same direction. Measured on
+     a synthetic 1024x1024 noise JPEG over a 200x150 region: `sips` differs
+     from its own frame decode in 70,202 of 90,000 samples, CoreGraphics in
+     86,167; at 1152x864 (995,328 px) neither differs at all. Noise is the
+     worst case. On four corpus photographs at a 400x300 region the mean
+     absolute error against each tool's own frame decode is 1.038 / 0.314 /
+     1.383 / 0.351 out of 255 for `sips` and 0.934 / 0.332 / 1.256 / 0.417
+     for CoreGraphics. Progressive JPEGs show none of it.
+     So the old and new crops differ on most real JPEG sources, and neither
+     is the better decode. It cost the crop differential its clean run over
+     the corpus sample; test_crop_differential.py accounts for it per file
+     -- given the same DECODED pixels the two implementations agree exactly
+     -- rather than assuming it.
 """
 
 import subprocess
 from pathlib import Path
 
+from . import _cg
+# Re-exported, not redefined. `_cg` is imported BY this module now, so the
+# exception had to move down to break the cycle; this keeps
+# `imaging.ImagingError` the name every existing caller already catches, and
+# the same class object as `_cg.ImagingError`.
+from ._cg import ImagingError                              # noqa: F401
+
 SIPS = "/usr/bin/sips"
 SRGB_PROFILE = "/System/Library/ColorSync/Profiles/sRGB Profile.icc"
-
-
-class ImagingError(RuntimeError):
-    """An imaging operation failed.
-
-    A sips or upscayl-bin invocation that did not succeed, and -- since the
-    CoreGraphics binding layer arrived -- anything `_cg` refuses: a file
-    ImageIO will not decode, a colour space or bit depth no bitmap context
-    accepts, a destination that cannot be written. That layer raises this
-    and nothing else on purpose, so `execute` still catches ONE type per
-    photo, reports that photo failed, and carries on with the run.
-
-    It subclasses RuntimeError for compatibility with callers that predate
-    it. Tests should not use `pytest.raises(RuntimeError)` as a stand-in
-    for an unrelated failure, because this satisfies it.
-    """
 
 
 def _tail(stream) -> str:
@@ -193,80 +218,52 @@ def normalize_to_srgb_png(source, out_path) -> None:
           str(source), "--out", str(out_path)], produces=out_path)
 
 
-# The pad is always cropped away, but it is NOT harmless: on a lossy
-# intermediate its DCT blocks straddle the seam and bleed into the outermost
-# kept pixels -- see fact 7, which is why both branches force PNG.
-PAD_COLOUR = "FF00FF"
-
-
-def _offset_is_ignored(rect, source_height: int) -> bool:
-    """Whether sips would silently drop this --cropOffset -- see fact 6.
-
-    Both shapes need x == 0: the offset `0 0`, which falls back to a centered
-    crop, and an offset flush with the bottom edge, which drops the crop
-    altogether. Every other rect sips handles correctly.
-    """
-    if rect.x != 0:
-        return False
-    return rect.y == 0 or rect.y + rect.height == source_height
-
-
-def _crop_via_padding(source, rect, out_path, width: int, height: int) -> None:
-    """Crop a rect sips would otherwise ignore, by moving it off the edge.
-
-    Padding one pixel on every side makes x == 1 and puts the bottom edge one
-    row short of flush, which is outside both shapes in fact 6. sips centers
-    an even pad, so the original lands at exactly (1, 1) and the rect shifts
-    by the same one pixel. The padding is always cropped away; PAD_COLOUR only
-    matters if this ever stops being true.
-
-    Costs one extra full-image pass. Task 8 crops three slices from one frame
-    and could pad that frame once instead of up to three times.
-    """
-    padded = Path(out_path).with_suffix(".padded.png")
-    try:
-        # -s format png FIRST: after --padColor it is silently dropped, and a
-        # lossy pad bleeds magenta into the pixels we keep. See fact 7.
-        _run([SIPS, "-s", "format", "png",
-              "-p", str(height + 2), str(width + 2), "--padColor", PAD_COLOUR,
-              str(source), "--out", str(padded)], produces=padded)
-        _run([SIPS, "-s", "format", "png",
-              "-c", str(rect.height), str(rect.width),
-              "--cropOffset", str(rect.y + 1), str(rect.x + 1),
-              str(padded), "--out", str(out_path)], produces=out_path)
-    finally:
-        padded.unlink(missing_ok=True)
-
-
 def crop(source, rect, out_path) -> None:
-    """Cut `rect` out of `source`. ALWAYS its own invocation -- see fact 2.
+    """Cut `rect` out of `source`. Always writes PNG.
 
-    Note the argument order sips wants: -c takes HEIGHT then WIDTH, and
-    --cropOffset takes Y then X.
+    One CoreGraphics call, and no branches. The pad-and-shift pass that used
+    to stand between this and fact 6 is gone: CGImageCreateWithImageInRect
+    honours an origin of 0,0 and a rect flush with the bottom edge, which are
+    exactly the two shapes `sips --cropOffset` silently mis-crops. That pass
+    cost a full rewrite of the image -- on the upscale path, of a frame
+    already quadrupled -- to move a rect one pixel.
 
-    The rect must lie entirely within the source -- see fact 5. This is the
-    only layer that can check rather than assume it, because it is the only
-    one holding both the rect and the image it will be cut from: the executor
-    crops the 4x frame using rect.scaled(4), so an enlargement that comes back
-    even a pixel short of exactly 4x overruns, and the user gets a black-edged
-    wallpaper with nothing raising.
+    The rect must lie entirely within the source, and this is the only layer
+    that can check rather than assume it, because it is the only one holding
+    both the rect and the image it will be cut from: the executor crops the
+    4x frame using rect.scaled(4), so an enlargement that comes back even a
+    pixel short of exactly 4x overruns.
 
-    Rects that sips would silently mis-crop go the long way round -- fact 6.
+    The check did not become decorative when `sips` left. It changed which
+    silent wrong answer it prevents. `sips` PADDED an out-of-bounds crop with
+    black at exit 0 -- fact 5. CoreGraphics INTERSECTS instead and returns the
+    overlap: a 120x80 rect at x=350 of a 400x200 source comes back 50x80, and
+    900x900 at the origin comes back as the whole 400x200. Either way the
+    caller gets a plausible file and nothing raises, and `resize_and_encode`
+    then stretches the wrong picture to the right dimensions.
 
     ALWAYS writes PNG, whatever `out_path` is named, and REFUSES a name that
     says otherwise. A crop is an intermediate that something else will resize
     and encode, so spending a lossy generation on it would undo exactly what
     band 2 exists to protect -- measured at about 40.5 dB with a max channel
-    error of 78 for a JPEG source.
+    error of 78 for a JPEG source. The suffix rule is a check rather than a
+    docstring asking callers to pass `.png`, because everything downstream
+    goes by the name.
 
-    The suffix rule used to be a docstring asking callers to pass `.png`, and
-    a docstring is not a check: handed `out.jpg` this writes PNG bytes into
-    it, sips warns `Output file suffix should be jpg` on stderr, and the zero
-    exit discards the warning. Every downstream reader then goes by the name.
-    It is the mirror of the same trap on the way in -- without `-s format`
-    sips keeps the SOURCE's format whatever the `--out` suffix says, so a
-    `.png` name is no guarantee of PNG bytes either, which is why both
-    branches pass `-s format png` explicitly.
+    Two behaviours changed with the implementation, both deliberately:
+
+      * A 16-BIT SOURCE KEEPS ITS DEPTH. `sips` drops one to 8-bit on every
+        path that touches pixels -- the direct crop, the crop at 0,0, the pad
+        alone and a plain resample -- and only a format convert keeps 16.
+        (The design attributes this to the pad and calls it the one defect
+        that was ours rather than Apple's; measured, it is neither.) No
+        corpus file is 16-bit, so this is latent.
+      * A BASELINE JPEG OF A MEGAPIXEL OR MORE gives different pixels, because
+        ImageIO decodes a REGION of one differently from the whole frame and
+        the two implementations land in different places -- see fact 8.
+        Neither is the better decode; the margin is a mean absolute error
+        under 1.4 out of 255 on real photographs. Given the same decoded
+        pixels the two agree exactly, which is what the corpus gate measures.
     """
     out_path = Path(out_path)
     if out_path.suffix.lower() != ".png":
@@ -285,17 +282,10 @@ def crop(source, rect, out_path) -> None:
             or rect.y + rect.height > height):
         raise ImagingError(
             f"crop {rect.width}x{rect.height}+{rect.x}+{rect.y} does not fit "
-            f"inside {width}x{height} -- sips would pad with black"
+            f"inside {width}x{height} -- CoreGraphics would return the overlap"
         )
 
-    if _offset_is_ignored(rect, height):
-        _crop_via_padding(source, rect, out_path, width, height)
-        return
-
-    _run([SIPS, "-s", "format", "png",
-          "-c", str(rect.height), str(rect.width),
-          "--cropOffset", str(rect.y), str(rect.x),
-          str(source), "--out", str(out_path)], produces=out_path)
+    _cg.crop_to_file(source, rect.x, rect.y, rect.width, rect.height, out_path)
 
 
 def resize_and_encode(source, out_width: int, out_height: int, fmt: str,

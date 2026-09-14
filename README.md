@@ -148,13 +148,13 @@ The defaults differ per encoder because each sits at that encoder's own quality-
 
 ## Working around sips
 
-`sips` ships with macOS and needs no install, which is most of why it is here. It also fails silently in seven measured ways, each producing a plausible-looking wrong file at exit 0. They are documented with their measurements at the top of `paperhanger/imaging.py`. Two of them shape the code you will find there:
+`sips` ships with macOS and needs no install, which is most of why it was here. It also fails silently in seven measured ways, each producing a plausible-looking wrong file at exit 0. They are documented with their measurements at the top of `paperhanger/imaging.py`, and they are why the imaging layer is moving to CoreGraphics one operation at a time.
 
-**`--cropOffset 0 0` returns the centred crop, at the correct dimensions.** No error, no warning, nothing in the output to indicate it. Because the dimensions are right, no size check can catch it; only comparing the returned pixels against the region requested will. The workaround pads one pixel on every side and crops at +1.
+**`--cropOffset 0 0` returns the centred crop, at the correct dimensions.** No error, no warning, nothing in the output to indicate it. Because the dimensions are right, no size check can catch it; only comparing the returned pixels against the region requested will. The workaround padded one pixel on every side and cropped at +1 — a full rewrite of an image that, on the upscale path, had already been quadrupled.
 
-**Argument order decides whether `-s format` is honoured.** Placed after `--padColor` it is silently dropped, and a lossy padded intermediate bleeds the pad colour into the pixels being kept: mean absolute error 63.14 at column 0 against 0.33 in the interior.
+**Crop no longer calls `sips` at all.** It is `CGImageCreateWithImageInRect`, which honours any origin, so the pad and its magenta bleed are gone. Two behaviours changed with it: a 16-bit source keeps its depth where `sips` dropped it to 8-bit, and a baseline JPEG of a megapixel or more gives slightly different pixels, because ImageIO decodes a *region* of one differently from the whole frame — a mean absolute error under 1.4 out of 255 on real photographs, in both the old implementation and the new.
 
-Every crop in the tool routes through `imaging.crop` rather than calling `sips` directly, which is what keeps these workarounds from being forgotten at a new call site.
+Every crop in the tool routes through `imaging.crop` rather than calling an imaging API directly, which is what keeps the bounds check — still needed, since CoreGraphics silently returns the overlap where `sips` silently padded with black — from being forgotten at a new call site.
 
 ## Testing
 

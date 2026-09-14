@@ -64,7 +64,28 @@ from ctypes import (CDLL, Structure, c_bool, c_char_p, c_double, c_int32,
                     c_long, c_uint32, c_void_p)
 from pathlib import Path
 
-from .imaging import ImagingError
+
+class ImagingError(RuntimeError):
+    """An imaging operation failed.
+
+    Anything this layer refuses -- a file ImageIO will not decode, a colour
+    space or bit depth no bitmap context accepts, a destination that cannot
+    be written -- and, through `imaging`, a `sips` or `upscayl-bin`
+    invocation that did not succeed. This layer raises this and nothing else
+    on purpose, so `execute` still catches ONE type per photo, reports that
+    photo failed, and carries on with the run.
+
+    It LIVES here rather than in `imaging` because `imaging` now imports this
+    module: crop is a CoreGraphics call, so the arrow between the two
+    modules reversed and the exception had to travel with it. Every existing
+    caller keeps working -- `imaging` re-exports it, and `imaging.ImagingError`
+    is the same class object as `_cg.ImagingError`, so an `except` on either
+    spelling catches a raise from either layer.
+
+    It subclasses RuntimeError for compatibility with callers that predate
+    it. Tests should not use `pytest.raises(RuntimeError)` as a stand-in
+    for an unrelated failure, because this satisfies it.
+    """
 
 
 def _framework(name: str) -> CDLL:
@@ -441,3 +462,49 @@ def write_png(scope, image, out_path, options=None):
             left_behind = (f"; an earlier file is still there and could not "
                            f"be removed ({exc.strerror})")
         raise ImagingError(f"could not write {out_path}{left_behind}")
+
+
+def crop_to_file(source, x: int, y: int, width: int, height: int,
+                 out_path) -> None:
+    """Cut a rect out of `source` and write it as PNG.
+
+    No workaround needed. CGImageCreateWithImageInRect takes its origin at
+    the image's TOP LEFT and honours it, including an origin of 0,0 and a
+    rect flush with the bottom edge -- which are exactly the two shapes
+    `sips --cropOffset` silently mis-crops, and the reason the pad-and-shift
+    pass this replaces existed at all. Measured on a 40x200 greyscale ramp
+    whose value names its own source row: rect y=0 returns rows 0-49, y=150
+    returns rows 150-199, y=75 returns rows 75-124.
+
+    THE RECT IS NOT CLAMPED AND NOT REFUSED. CGImageCreateWithImageInRect
+    INTERSECTS it with the image and hands back the overlap, at no error and
+    no warning. Measured on a 400x200 source: 120x80 at x=350 comes back
+    50x80, 120x80 at x=-10,y=-10 comes back 110x70, and 900x900 at the
+    origin comes back as the whole 400x200. Only a rect with no overlap at
+    all returns NULL. So a caller that got its arithmetic wrong gets a
+    SMALLER PICTURE rather than a failure, and whatever resizes it next
+    stretches the wrong region to the right dimensions.
+
+    Two defences, and they are not the same one twice. `imaging.crop` refuses
+    a rect that does not fit, because it is the layer holding both the rect
+    and the measured source. The post-condition below is for the handles
+    this function was given directly: it costs two Gets, and it turns that
+    silent intersection into the one exception type this layer raises.
+    """
+    with Scope() as scope:
+        image = load(scope, source)
+        rect = CGRect(CGPoint(float(x), float(y)),
+                      CGSize(float(width), float(height)))
+        cut = scope.own(_checked(
+            _CG_LIB.CGImageCreateWithImageInRect(image, rect),
+            f"crop {width}x{height}+{x}+{y}", source), kind="image")
+
+        got = dimensions(cut)
+        if got != (width, height):
+            raise ImagingError(
+                f"crop {width}x{height}+{x}+{y} of {source} came back "
+                f"{got[0]}x{got[1]}; the rect does not lie inside the image "
+                f"and CoreGraphics returned the overlap"
+            )
+
+        write_png(scope, cut, out_path)

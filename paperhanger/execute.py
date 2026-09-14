@@ -13,13 +13,13 @@ Two rules that are easy to get wrong and expensive to get wrong:
     volume TMPDIR is on, and an interrupted run never leaves a truncated file
     where the sorter will see it.
 
-What that does NOT buy is a peak of one frame. `imaging.crop` pads the whole
-image on the two --cropOffset shapes sips ignores (fact 6), so while a padded
-crop runs there are two full-size copies of the 4x frame on disk at once, and
-the pad fires for two of three horizontal slices and one of three vertical
-ones. The peak is two frames plus one slice, not one frame -- measured, not
-inferred. Spec section 7 names the fix, which is to pad each frame once
-instead of once per slice; it is not implemented here.
+The peak used to be worse than one frame plus one slice, and is not any more.
+`imaging.crop` padded the whole image on the two --cropOffset shapes sips
+ignores (fact 6) -- which fired for two of three horizontal slices and one of
+three vertical ones -- so a second full-size copy of the 4x frame sat on disk
+beside the first while the crop ran. The CoreGraphics crop takes the rect
+directly, so that copy is gone and with it the fix spec section 7 proposed for
+it. The frame itself still outlives the slices cut from it.
 """
 
 import shutil
