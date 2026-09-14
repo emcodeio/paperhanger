@@ -12,7 +12,7 @@ fifth that nobody asked for and that matters more than three of the four.
 | 1. EXIF orientation | Clears the way. `sips` and ImageIO agree on geometry; they disagree on whether the tag survives into the output. |
 | 2. Peak memory at 300 Mpx | Clears the way. CoreGraphics peaks 3% higher on the largest reduction and 2.1x higher on an identity resample, which is what 577 of 2734 production calls are. The pixel cap does not move. |
 | 3. HEIC input | Clears the way. Both corpus HEICs decode, dimensions agree exactly. The corpus holds two, not one. |
-| 4. Interpolation exactness | Clears the interpolation itself, and **changes the verification plan**. Vertical reduction is exact to 0.994792 and diverges from 0.995000; enlargement is not reliably exact at any factor; no production plan reaches either region. What does not clear is the JPEG decode: of the **159 plans that resample straight from an original file, 3 diverge**, all three identity resamples of an original JPEG. Task 4's corpus gate cannot be green until those three are pinned. |
+| 4. Interpolation exactness | Clears the interpolation itself, and **changes the verification plan**. Vertical reduction is exact to 0.994792 and diverges from 0.995000; enlargement is not reliably exact at any factor; no production plan reaches either region. What does not clear is the identity case: of the **159 plans that resample straight from an original file, 3 diverge**, all three identity resamples of an original JPEG, and the difference is introduced by `CGContextDrawImage` itself — `sips` and an ImageIO decode that is never drawn write the same bytes. Task 4 skips the draw at identity, or it pins those three. |
 | 5. (unasked) Destination colour space | **Changes the design.** Taking the bitmap context's colour space from the source, with `kCGImageAlphaNoneSkipLast`, renders ten real corpus images entirely black, silently. The same alpha setting composites away the alpha channel of the corpus's 12 RGBA PNGs, where `sips` — including `sips --matchTo`, which is what Task 6 replaces — keeps it. |
 
 **A warning about this document.** Four consecutive reviews found a universal in it that a
@@ -22,7 +22,12 @@ taken over all 894. It was not. **Where a sentence here names no count, assume i
 counted**, including the ones that were already in the document when you read this. A
 claim is a count and a population, or it is a guess: "always", "never", "when and only
 when" and "exactly those" are each a claim about 894 files, and the fourth review found
-seven more of them still standing.
+seven more of them still standing. The fifth found a different shape of the same error and
+it is the one to watch for here: **a counted claim generalised past the population it was
+counted over.** "A 1:1 draw is a pixel no-op" was measured on two PNG fixtures, stated as a
+property of the operation, and is false on 3 of 3 real JPEGs. Counting a sample does not
+make it the population — and a diagnostic that cannot separate two hypotheses has not
+chosen between them, however many files it is run over.
 
 Everything below was measured on macOS 26.6.2 (build 25G83), arm64, 36 GiB. `python3` is
 3.14.7 at `/run/current-system/sw/bin/python3`; `ctypes.util.find_library` resolves all
@@ -35,9 +40,9 @@ can be re-derived. Three of them could report agreement where a tool had in fact
 a decode that produced no bytes compared equal to another decode that produced no bytes,
 and a missing output was returned as a sentinel that one caller read as agreement and
 another filed as a resampler difference. All three are closed, the README says how, and
-every figure quoted here was re-run afterwards. They are measuring tools rather than deliverables — nothing in
-`paperhanger/` imports them, and Task 1 writes the real bindings from the spec rather than
-from these.
+every figure quoted here was re-run afterwards. They are measuring tools rather than
+deliverables — nothing in `paperhanger/` imports them, and Task 1 writes the real bindings
+from the spec rather than from these.
 
 ---
 
@@ -245,8 +250,8 @@ than a formula.** At the cap the resampler's real worst cases are:
   peaks at 709.2 MiB against 332.9 MiB, **2.1x** — and 577 of the 2734 production
   resampler calls are identity resamples, so this is the common case, not a corner. It is
   also where the corpus diverges: see §4, "Three findings, one case: the identity
-  resample", which measures that the draw is a pixel no-op at 1:1, proposes not doing it,
-  and says what would still have to be measured before that is adopted.
+  resample", which measures that at 1:1 the draw is not what `sips` does at all, proposes
+  skipping it, and says what that does not license.
 
 Both are far below what the machine has, and neither is near the ceiling the cap exists to
 defend: the cap bounds the 4x frame at 300 Mpx, and the worst measured CoreGraphics peak
@@ -456,6 +461,11 @@ and that offset is the ICC header's creation `dateTime`:
 sips         run 6 against run 0:  (2026, 9, 13, 19, 13, 21) -> (…, 19, 13, 22)
 CoreGraphics run 5 against run 0:  (2026, 9, 13, 19, 14,  5) -> (…, 19, 14,  6)
 ```
+
+Offset 35 is the low byte of the `dateTime`'s seconds field, and it was the only offset
+that moved in all 23 observations here — but a run pair that straddles a minute boundary
+would move byte 33 as well, since the field is six 16-bit values at offsets 24 to 35. "One
+offset" describes these observations, not the mechanism.
 
 `IDAT` is identical across runs in every case, and so are the decoded pixels. So for the 61
 sources whose output carries an `iCCP`, whole-file identity between the two tools is a
@@ -693,17 +703,27 @@ preserves the interlace where CoreGraphics does not — same picture, different 
 different `IDAT`. So an `IDAT` gate has two container-level ways to fire, not one, and
 neither is a difference in the picture.
 
-Splitting the 25 by cause, by re-running each through a lossless PNG intermediate
-(`divergence_audit.py`, today's run):
+Re-running each of the 25 through a lossless PNG intermediate (`divergence_audit.py`,
+today's run) says whether re-encoding the source removes the difference — and only that:
 
 ```
-decode differences        : 22
-not decode differences    : 0
-not attributable (alpha)  : 3
+shape 800x600, 894 files, 0 unreadable, 0 FAILED to run, 894 examined, 25 diverge
+...
+removed by re-encoding the source : 22
+survives re-encoding              : 0
+not attributable (alpha)          : 3
 ```
 
-- **22 are a JPEG decode difference.** Through the intermediate they agree exactly, so the
-  disagreement came from reading the container, not from resampling.
+- **22 agree exactly through the intermediate.** The document called that "a JPEG decode
+  difference" for three rounds. It is not established, and the test cannot establish it:
+  re-encoding the source as a PNG changes both the decoder's job *and* what
+  `CGContextDrawImage` is handed, so "they agree through the intermediate" is what a decode
+  difference and a draw difference both predict. Measured against the decode reading
+  directly: run `rocky_mountain_range_1569.jpg` and `misty_forest_landscape_2028.jpg` at
+  their own dimensions and `sips`, the draw and a skip-the-draw encode all produce the same
+  `IDAT` — so those two decode identically in both tools, and their 800 x 600 disagreement
+  is not a decode difference. Call it what is measured: it is container-dependent, and
+  where it arises is unresolved.
 - **3 are not attributable by this test**, all three the alpha-bearing PNGs of the next
   subsection: the intermediate flattens their alpha, so it compares a different picture.
   They are a 12-byte difference at four corner pixels, and they are an alpha artefact.
@@ -716,9 +736,9 @@ At an aspect-preserving half-size resize, **all 22 JPEGs agree byte for byte**; 
 alpha PNGs still differ, by 12 to 36 bytes, in the corner pixels and their immediate
 neighbours (`brush_circle_8107.png` at 1440 x 900: 36 bytes over rows 0, 1, 898, 899 and
 columns 0, 1, 1438, 1439). That is worth stating carefully, because an earlier draft turned
-it into a rule — "the decode difference needs a
-distorting shape" — which the three divergent production plans below refute: they are
-identity resamples, and they agree at 800 x 600.
+it into a rule — "the decode difference needs a distorting shape" — which the three
+divergent production plans below refute twice over: they are identity resamples, they agree
+at 800 x 600, and the difference is not in the decode.
 
 ### The alpha channel, which no gate here would have noticed
 
@@ -808,8 +828,16 @@ measurements: **`render` hands the original file to the resampler when the plan 
 rect, needs no upscale and needs a resize.** With no crop, `current` stays `work.source`;
 with no upscale, `scale` is 1, so `resize = target.needs_resize or scale != 1` reduces to
 `needs_resize` — band 1. Everything else either resamples a PNG that the crop or the
-upscaler wrote moments earlier, or does not resample at all, and the divergence at issue
-here is a JPEG decode difference, which a PNG this pipeline wrote cannot carry.
+upscaler wrote moments earlier, or does not resample at all. That is the population
+`render` defines; it is **not** a claim that a pipeline-written PNG is safe, and an earlier
+draft justified it with one — "the divergence is a JPEG decode difference, which a PNG this
+pipeline wrote cannot carry." The population is still the right one and that reason is
+false: the divergence is not a decode difference, as "Three findings, one case" measures
+below.
+Which leaves the other side untested — whether a resample whose input is a PNG the crop or
+the upscaler wrote moments earlier can diverge at a production shape. That is 2,575 of the
+2,734 resampler calls, and this document has not run them. The 159 is where the measured
+divergences are, not a proof that the rest are clean.
 
 Over the corpus that is **159 plans**, not 69:
 
@@ -843,16 +871,19 @@ the divergent plans, by kind:
   sunlight_through_leaves_8375.jpg  identity  53868500 bytes of 117964800 (45.7%), maxdelta 97
 
 the same shapes through a lossless PNG intermediate:
-  green_leaf_closeup_2463.jpg               0 bytes  -> DECODE difference
-  roadside_grass_2121.jpg                   0 bytes  -> DECODE difference
-  sunlight_through_leaves_8375.jpg          0 bytes  -> DECODE difference
+  green_leaf_closeup_2463.jpg       0 bytes  maxd 0  -> agrees once the source is
+                                                        re-encoded as PNG (cause not
+                                                        isolated; run skip_draw.py)
+  roadside_grass_2121.jpg           0 bytes  maxd 0  -> (the same)
+  sunlight_through_leaves_8375.jpg  0 bytes  maxd 0  -> (the same)
 ```
 
 **Three real plans diverge, on a third to a half of the picture.** All three are ordinary
-8-bit sRGB JPEGs, orientation 1, and the difference is a decode difference: through a
-lossless PNG intermediate all three agree exactly, which puts them in the same class as the
-22 JPEGs above. It is deterministic on both sides, and it is spread over the whole frame
-rather than structured the way the interpolation divergence is:
+8-bit sRGB JPEGs, orientation 1. Re-encoding the source as a lossless PNG makes all three
+agree — which was read for one revision as "so it is a decode difference", and is not:
+"Three findings, one case" below isolates it to the **draw**, and the intermediate test
+cannot tell the two apart. The difference is deterministic on both sides, and it is spread
+over the whole frame rather than structured the way the interpolation divergence is:
 
 ```
 $ python3 dig.py ~/Pictures/wallpaper/green_leaf_closeup_2463.jpg 7680 5120
@@ -866,9 +897,10 @@ cg   run1 == cg   run2: True
 ```
 
 Every row and every column is touched, 45% of the differing bytes are off by one level and
-the tail reaches 87 — the shape of two JPEG decoders disagreeing, not of a resampling phase
-error, which the enlargement case earlier in this section shows as every ninth row at full
-width.
+the tail reaches 87. That is not the shape of the interpolation divergence, which the
+enlargement case earlier in this section shows as every ninth row at full width; beyond that
+the distribution was read as evidence for a decoder disagreement, and it is not evidence for
+anything — the same picture is what a whole-frame difference of any origin produces.
 
 **All three are identity resamples, and every original-JPEG identity plan in the corpus
 diverges: 3 of 3.** There are four identity plans that read an original — these three and
@@ -877,11 +909,13 @@ diverges: 3 of 3.** There are four identity plans that read an original — thes
 Three sentences from earlier rounds fall with this, and each of them is the same mistake:
 
 - *"So Task 4's gate can be green on the corpus, and no image needs pinning for this."*
-  Three images need pinning.
-- *"The decode difference needs a distorting shape."* These three need no distortion at all;
-  they are 1.0 on both axes. And all three **agree** at 800 x 600, the distorting shape this
-  section uses to provoke the divergence. The trigger is the pair (source, scale), and this
-  document has not isolated it.
+  Three images diverge. Whether they need pinning turns out to depend on how Task 4 draws —
+  see "Three findings, one case" below — but not on anything this sentence knew.
+- *"The decode difference needs a distorting shape."* Two errors in one sentence. These
+  three need no distortion at all — they are 1.0 on both axes, and all three **agree** at
+  800 x 600, the distorting shape this section uses to provoke the divergence. And it is
+  not a decode difference: at these dimensions `sips` and an ImageIO decode that is never
+  drawn produce the same bytes, so the disagreement enters at the draw.
 - *"The production anisotropies are four orders of magnitude smaller than the ones that
   provoke the divergence."* Measured rather than estimated: the smallest anisotropy that
   provokes a divergence at 800 x 600 is 0.0145 (`mountain_peaks_9739.jpg` and
@@ -901,15 +935,13 @@ re-running the 159, not for a test that asserts 69 particular shapes still agree
 
 ### Three findings, one case: the identity resample
 
-Three findings in this document are the same case. One change to Task 4 would address two
-of them, and measurably would not address the third — which is worth spelling out, because
-the reasoning that says it would is the same shape as the claims this document has had to
-withdraw four times.
+Three findings in this document are the same case, and one change to Task 4 addresses all
+three. Getting that wrong twice is why the passage below shows its working.
 
 1. **§2 — identity is where CoreGraphics is most expensive.** On the largest identity
    resample the planner asks for, 10000 x 4780, it peaks at 709.2 MiB against `sips`'s
-   332.9 MiB: **2.1x**. On the largest *reduction* it is 3.1%. And the draw that costs it
-   is a pixel no-op, measured below.
+   332.9 MiB: **2.1x**. On the largest *reduction* it is 3.1%. And the draw it pays for is
+   one `sips` does not perform at all, measured below.
 2. **§4 — identity is where production diverges.** All three divergent plans are identity
    resamples; the other 156 plans that read an original agree.
 3. **The planner asks for a great many of them.** 577 of the 2734 resamples are identity on
@@ -938,42 +970,71 @@ An identity draw arises two ways, and neither is a mistake in the planner:
   of the 577; the other 10 are band 1 plans whose governing dimension already equals the
   target's ideal, 6 of them fed by a crop and the 4 above reading the original.
 
-**If Task 4 skips the draw when the source's dimensions already equal the target's, the
-2.1x peak and 577 resamples that resample nothing go away. The three divergences do not.**
+**If Task 4 skips the draw when the source's dimensions already equal the target's, all
+three go away together** — the 2.1x peak, the 577 resamples that resample nothing, and the
+three divergences.
 
-The tempting inference is that skipping removes all three, and it is wrong. A 1:1
-`CGContextDrawImage` is a **pixel no-op** on an RGB source — measured on two, a 400 x 300
-synthetic gradient and the 7680 x 5120 lossless frame of `green_leaf_closeup_2463.jpg`
-itself:
+That is the opposite of what this document said a revision ago, and the wrong version is
+worth keeping visible. It ran two fixtures — a synthetic gradient and a lossless PNG frame —
+found that a 1:1 draw reproduced their pixels exactly, and generalised: *a 1:1
+`CGContextDrawImage` is a pixel no-op*. On that footing the three divergences had to come
+from somewhere else, the decode was the only candidate left, and the conclusion was that no
+choice in `_cg.py` could touch them. Every step followed, and the first one was a counted
+claim taken past its population.
+
+**Measured instead of inferred.** `skip_draw.py` writes all three outputs — `sips`, the
+draw, and a skip that hands `CGImageSourceCreateImageAtIndex`'s image straight to the
+destination — and compares the concatenated `IDAT` streams, with no `magick` in the loop:
 
 ```
-$ python3 resize.py smoke.png smoke_1to1.png 400 300 3
-1:1 CoreGraphics draw of a PNG equals the source pixels: True
-$ python3 resize.py leaf.png leaf_1to1.png 7680 5120 3
-1:1 draw of the 7680x5120 lossless frame equals its source pixels: True
+$ python3 skip_draw.py ~/Pictures/wallpaper/roadside_grass_2121.jpg
+source roadside_grass_2121.jpg  7680x5120 -> 7680x5120   (identity)
+  sips vs draw : IDAT DIFFER   pixels differ 37495832 of 117964800 (31.8%), maxdelta 61
+  sips vs skip : IDAT SAME     pixels IDENTICAL
+  draw vs skip : IDAT DIFFER   pixels differ 37495832 of 117964800 (31.8%), maxdelta 61
 ```
 
-So drawing at 1:1 and skipping the draw write the same pixels, and the three divergent
-plans differ from `sips` for a reason the draw has no part in: the two tools **decode the
-JPEG** differently. That is what the lossless-intermediate test says — hand both the same
-PNG and they agree exactly. Skipping the draw leaves ImageIO's decode in place, and
-ImageIO's decode is the half that differs. Those three still need pinning either way.
+**The draw is what differs. On 3 of 3, the skip is byte-identical to `sips`** — the same
+compressed stream, not merely the same pixels. And it is not a property of those three
+files: run the identity case over the corpus in two slices, 60 sources from the start and
+60 from offset 400 (`--sweep`, which compares `IDAT` only, so it is cheap):
 
-**What has not been measured is whether skipping is byte-identical to drawing in the
-finished file, and that is Task 4's first job.** The pixel measurement above covers RGB
-sources only, and the draw is not only a resample:
+| | first 60 | from offset 400 |
+|---|---|---|
+| all three agree | 11 | 20 |
+| **draw differs from skip** | **49** | **40** |
+| **`sips` differs from skip** | **0** | **0** |
 
-- **A grayscale or alpha-bearing source is a different question.** The draw is where the
-  destination bitmap's colour space and alpha are imposed — that is what §5 is about, and
-  what composites away the alpha of the 12 RGBA PNGs. A skip inherits none of it, so for
-  those sources skipping and drawing produce genuinely different files. "Skip the draw"
-  must not quietly become "skip the normalisation".
-- **The encoded file may differ even where the pixels do not.** A skip hands the
-  destination the `CGImage` that came out of `CGImageSourceCreateImageAtIndex`, which
-  carries the source's own colour space and properties; the draw hands it one built by
-  `CGBitmapContextCreateImage`. What each writes into the PNG or HEIC was not compared.
-- **It has to be measured against `sips` as well as against the draw**, because `sips` is
-  the equivalence bar and it resamples at 1:1 rather than skipping.
+**120 of 120: `sips` at 1:1 writes exactly what skipping writes.** The draw disagrees with
+both on 89 of the 120. So at identity the skip is not merely as good as the draw, it is
+closer to the bar the design sets. Two qualifications on the 89: the sweep caps sources at
+9 Mpx to stay cheap, so the three production plans (39 Mpx each) are not in it and were
+measured separately above; and the differing set includes alpha-bearing PNGs, where the
+draw differs for the reason the alpha subsection gives rather than for whatever it is doing
+to these JPEGs. Neither touches the 120 of 120, which is the number that matters.
+
+Two things this does not license, and the second is where §5 comes back:
+
+- **The condition is the dimensions, and nothing else.** A skip is only equivalent where
+  the plan asks for the pixels unchanged. Any plan that reduces still draws, and the
+  equivalence measured above says nothing about those shapes.
+- **Where the draw IS the conversion, skipping it skips the conversion.** The draw is where
+  the destination colour space and alpha are imposed: it is what renders a grayscale source
+  through the fix in §5, and what composites away the alpha of the 12 RGBA PNGs. Task 6's
+  `normalize_to_srgb_png` exists to do exactly that conversion, so a skip there would not
+  be an optimisation, it would delete the step. "Skip the draw at identity" belongs in Task
+  4's resize and must not be carried into Task 6.
+
+What is still unmeasured, and belongs in Task 4 rather than here: **the whole file.** The
+comparison above is `IDAT` and pixels. The skip's output is not file-identical to `sips`'s —
+for `green_leaf_closeup_2463.jpg` the two differ by about 5.8 KB of metadata, 77,106,022
+bytes against 77,111,822 — because a skip hands the destination the `CGImage` ImageIO
+produced, with the source's own colour space and properties riding along, where the draw
+hands it one built by `CGBitmapContextCreateImage`. §4's chunk census describes what
+ImageIO writes from a *drawn* image; what it writes from a passed-through one was not
+censused. Every comparison here is also PNG to PNG, because that is what makes the pixel
+stream inspectable; production's final encode is HEIC, and a skip's behaviour through the
+HEIC encoder was not measured.
 
 ### What this means for the design
 
@@ -1022,15 +1083,16 @@ catch drift — a target table edited, or an upscale factor changed, could walk 
 it — but nothing in the corpus reaches it today, and the equivalence bar is reachable as
 written.
 
-Four things change.
+Five things change.
 
 **How the gate compares depends on the tier.** Tier 1, on `tests/pixels.write_png`
 fixtures, may compare whole files: those sources carry nothing `sips` can synthesise from
 and the two tools produce identical SHA-256. That holds only because those outputs carry no
 `iCCP` — both tools write the current second into an ICC profile header, so a whole-file
-comparison of any profile-carrying source is unstable run to run, measured above. Tier 2, on corpus images, must compare decoded
-pixels, because `sips` synthesises chunks ImageIO does not — and because for 14 PNG sources
-CoreGraphics writes a chunk `sips` does not, so the difference is not one-sided. Not the
+comparison of any profile-carrying source is unstable run to run, measured above. Tier 2,
+on corpus images, must compare decoded pixels, because `sips` synthesises chunks ImageIO
+does not — and because for 14 PNG sources CoreGraphics writes a chunk `sips` does not, so
+the difference is not one-sided. Not the
 `IDAT` stream: it fires on ten files whose picture is identical, nine for a colour type and
 one for an interlace, and pinning ten images for a container choice buys nothing. See the
 top of this section.
@@ -1039,19 +1101,41 @@ top of this section.
 bit depth and channel count, because a comparison of decoded RGB passes while an alpha
 channel is silently gone, which is exactly what happens to the corpus's 12 RGBA PNGs.
 
-**The tier-2 sample is the 159 plans that read an original file, and three of them must be
-pinned.** Not a sample chosen by a rule about what provokes the divergence — three rules of
-that kind have now been refuted by counts. The population is mechanical, `at_risk.py` runs
-it in three minutes, and today it prints `3 of 159`. `green_leaf_closeup_2463.jpg`,
-`roadside_grass_2121.jpg` and `sunlight_through_leaves_8375.jpg` are pinned exceptions with
-the decode difference named, or the constraint has to admit a tolerance — and a maximum
-channel delta of 97 over a third of the frame is not a tolerance anyone should write.
+**The tier-2 sample is the 159 plans that read an original file, and what happens to the
+three that diverge depends on one implementation choice.** Not a sample chosen by a rule
+about what provokes the divergence — three rules of that kind have now been refuted by
+counts. The population is mechanical, `at_risk.py` runs it in three minutes, and against a
+`_cg.py` that draws at 1:1 it prints `3 of 159`. Against one that skips the draw when the
+dimensions already match, all 159 agree, because the difference is the draw's.
 
-**No choice inside `_cg.py` can make those three agree**, which is worth knowing before
-someone tries. The difference is in the decode, and at 1:1 the draw is a pixel no-op
-(measured, two sources), so any path that reads those JPEGs through ImageIO ends up with
-ImageIO's pixels. Interpolation constants, context construction and skipping the draw all
-leave it exactly where it is.
+**One choice inside `_cg.py` does make those three agree: not drawing them.** An earlier
+version of this paragraph said the opposite — that the difference was in the decode and
+nothing in `_cg.py` could touch it — and that was wrong in the way most likely to stop
+someone trying the thing that works. Measured on all three at their real dimensions, with
+no `magick` in the loop (`skip_draw.py`, comparing the concatenated `IDAT` streams):
+
+```
+$ python3 skip_draw.py ~/Pictures/wallpaper/green_leaf_closeup_2463.jpg
+source green_leaf_closeup_2463.jpg  7680x5120 -> 7680x5120   (identity)
+  sips  IDAT 61f282d0553cb933      draw  IDAT 84d5e24dd1718c80      skip  IDAT 61f282d0553cb933
+  sips vs draw : IDAT DIFFER   pixels differ 55159573 of 117964800 (46.8%), maxdelta 87
+  sips vs skip : IDAT SAME     pixels IDENTICAL
+  draw vs skip : IDAT DIFFER   pixels differ 55159573 of 117964800 (46.8%), maxdelta 87
+```
+
+| plan | `sips` vs draw | `sips` vs skip | draw vs skip |
+|---|---|---|---|
+| `green_leaf_closeup_2463.jpg` 7680 x 5120 | 46.8%, maxdelta 87 | **identical** | 46.8%, maxdelta 87 |
+| `roadside_grass_2121.jpg` 7680 x 5120 | 31.8%, maxdelta 61 | **identical** | 31.8%, maxdelta 61 |
+| `sunlight_through_leaves_8375.jpg` 7680 x 5120 | 45.7%, maxdelta 97 | **identical** | 45.7%, maxdelta 97 |
+| `purple_nebula_glow_0312_x.heic` 7680 x 4800 | identical | identical | identical |
+
+**The draw introduces the divergence; the decode does not carry it.** ImageIO's decoded
+image, encoded without ever being drawn, is byte-identical to what `sips` writes — the same
+compressed `IDAT`, not merely the same pixels, on 3 of 3. So if Task 4 skips the draw when
+the source's dimensions already equal the target's, these three agree and **nothing needs
+pinning for them**. If it does not skip, they need pinning, and a maximum channel delta of
+97 over a third of the frame is not a tolerance anyone should write.
 
 **The gate must not assert exactness on enlargement.** A fixture that enlarges will pass
 or fail depending on where its vertical scale lands, and the safe factors differ from one
@@ -1198,6 +1282,11 @@ refused by name with an `ImagingError` rather than a NULL dereference.
 or the tier-2 differential includes one of the ten named files above. Without one, the
 same defect can return under a later edit and the suite will stay green.
 
+**Skipping the draw does not retire this rule.** §4 recommends not drawing at all when the
+source's dimensions already equal the target's, and a skip has no bitmap context, so it
+cannot get the alpha info wrong — for that one shape. Every reducing plan still builds a
+context, and 2157 of the 2734 resamples reduce. The rule is for those.
+
 **§5's mutation discipline should add the question it would have caught** — would a test
 notice if every grayscale wallpaper came out black? — alongside the ones about `CFRelease`
 and NULL.
@@ -1232,6 +1321,17 @@ the alpha twelve, the interlaced one, and the grayscale one that §5 is about.
 the ICC profile header of any `iCCP` chunk they emit, so a whole-file comparison is unstable
 for the 61 corpus sources whose output carries one. Pixels and `IDAT` are unaffected.
 Counted in §4, with the instrument that finds it (`determinism.py`).
+
+**Nothing observable predicts which sources the draw alters.** `probe.py` reports
+`green_leaf_closeup_2463.jpg`, the lossless PNG cut from it, and a synthetic gradient
+identically — 8 bits per component, 32 bits per pixel, `model=RGB name=kCGColorSpaceSRGB` —
+and the draw alters the first and neither of the others. The JPEG container does not
+separate them either: 601 of the 841 corpus JPEGs are baseline and 240 progressive, 553
+carry the 4:2:0 sampling factors of the three divergent files, and two files that agree at
+identity sit on either side of both splits (`rocky_mountain_range_1569.jpg` progressive
+4:2:0, `misty_forest_landscape_2028.jpg` baseline 4:4:4). Whatever decides it is not in the
+properties either tool exposes, which is the argument for measuring on the real source
+rather than on a fixture that looks the same.
 
 **Three fixtures the plan names do not exist.** `photo_fixture`, `png_fixture` and
 `gradient_fixture` appear throughout Tasks 1 through 4; `tests/conftest.py` defines none

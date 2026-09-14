@@ -29,14 +29,17 @@ Run them with the project's own interpreter (`python3`, 3.14) from anywhere;
 | `at_risk.py` | runs every plan that resamples straight from an original file, at its real size |
 | `alpha_audit.py` | what each tool does with an alpha channel, over every corpus PNG |
 | `determinism.py` | whether either tool writes the same bytes twice, over every corpus source |
-| `divergence_audit.py` | every source whose decoded pixels differ, and whether a lossless intermediate settles it |
+| `skip_draw.py` | at 1:1, sips against drawing against not drawing — which two agree |
+| `divergence_audit.py` | every source whose decoded pixels differ, and whether re-encoding the source removes it |
 | `plan_scales.py` | every resampling scale factor the real planner asks for over the corpus |
 
-**Every pixel comparison goes through `cgbase.raw_pixels`, which checks the length of
-what it decoded.** These instruments all compare `magick ... RGB:-` output, and `magick`
-writes nothing to stdout when it cannot read a file — so two failed decodes used to
-compare equal and report SAME, which is agreement claimed where nothing was measured. The
-expected length is known from the shape, so it is checked, and a short decode raises
+**Every pixel comparison goes through `cgbase.raw_pixels`, which checks the length of what
+it decoded** — eleven modules import it: `alpha_audit`, `at_risk`, `boundary`,
+`determinism`, `dig`, `divergence_audit`, `interp_levels`, `interp_test`, `skip_draw`,
+`sourcecensus` and `sweep`. These instruments all compare `magick ... RGB:-` output, and
+`magick` writes nothing to stdout when it cannot read a file — so two failed decodes used
+to compare equal and report SAME, which is agreement claimed where nothing was measured.
+The expected length is known from the shape, so it is checked, and a short decode raises
 `DecodeFailed`. For the same reason `at_risk.py` and `divergence_audit.py` raise rather
 than returning a sentinel when either tool produces no output, and `at_risk.py` counts
 only the jobs that ran in `N of M diverge`.

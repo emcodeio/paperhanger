@@ -3,10 +3,14 @@
 Resizes all 894 to one shape, collects the sources whose pixels disagree, then
 for each one separates the two possible causes:
 
-  * a DECODE difference -- the same shape through a lossless PNG intermediate
-    agrees, so the disagreement came from reading the original container;
-  * a RESAMPLER difference -- it disagrees through the intermediate too, so
-    the shape itself is in one of the divergent scale regions.
+  * the difference DISAPPEARS when the source is re-encoded as a lossless PNG;
+  * or it survives that, so the shape itself is in one of the divergent scale
+    regions.
+
+Read the first narrowly. Re-encoding changes both what the decoder has to do
+and what `CGContextDrawImage` is handed, so "agrees through the intermediate"
+is what a decode difference and a draw difference both predict -- it does not
+choose between them. `skip_draw.py` does, on the real source.
 
 It also re-runs each at an aspect-preserving shape, which is what the
 production planner mostly asks for.
@@ -132,7 +136,7 @@ def main(root, w, h):
                  cnt, mx))
 
     print("\nsame shape through a lossless PNG intermediate "
-          "(isolates the container read from the resize):")
+          "(says whether re-encoding removes it, NOT what causes it):")
     decode, other, unattributable = [], [], []
     for n, p, (sw, sh), uti, _ in bad:
         mid = os.path.join(SCRATCH, "mid.png")
@@ -162,15 +166,15 @@ def main(root, w, h):
             continue
         if res[0] == 0:
             decode.append(n)
-            print("  %-44s agrees -> DECODE difference" % n[:44])
+            print("  %-44s agrees once re-encoded as PNG" % n[:44])
         else:
             other.append(n)
             print("  %-44s still differs -> not a decode difference, "
                   "%d bytes" % (n[:44], res[0]))
 
-    print("\ndecode differences        : %d" % len(decode))
-    print("not decode differences    : %d" % len(other))
-    print("not attributable (alpha)  : %d" % len(unattributable))
+    print("\nremoved by re-encoding the source : %d" % len(decode))
+    print("survives re-encoding              : %d" % len(other))
+    print("not attributable (alpha)         : %d" % len(unattributable))
 
     print("\nthe same sources at an aspect-PRESERVING shape (half size):")
     for n, p, (sw, sh), uti, _ in bad:

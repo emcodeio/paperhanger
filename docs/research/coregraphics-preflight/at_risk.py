@@ -14,8 +14,12 @@ what provokes the divergence. That was 69 of 159, and the 90 it left out
 contain all three of the divergences in the corpus. The theory was wrong and
 the predicate is now mechanical: if the resampler reads the original, run it.
 
-Each divergent plan is then re-run through a lossless PNG intermediate, which
-separates a container-read difference from a resize difference.
+Each divergent plan is then re-run through a lossless PNG intermediate. Read
+that result narrowly: re-encoding the source as a PNG changes both what the
+decoder has to do AND what `CGContextDrawImage` is handed, so agreement through
+the intermediate is what a decode difference and a draw difference both
+predict. It does not say where the difference arises. `skip_draw.py` does, by
+comparing sips against drawing against not drawing on the real source.
 
 Usage: python3 at_risk.py <corpus dir> [--list] [--jobs N]
 
@@ -109,7 +113,11 @@ def compare(src, w, h):
 
 
 def via_png(src, w, h):
-    """The same resize, but through a lossless PNG intermediate."""
+    """The same resize, but through a lossless PNG intermediate.
+
+    Diagnostic only, and a confounded one -- see the module docstring. It says
+    whether the difference survives re-encoding the source, not what causes it.
+    """
     mid = os.path.join(SCRATCH, "mid_%s.png" % _slot())
     if os.path.exists(mid):
         os.remove(mid)
@@ -222,8 +230,9 @@ def main(root, list_only=False, workers=4):
                 continue
             print("  %-46s %10d bytes  maxd %d  -> %s"
                   % (j["name"][:46], got[0], got[1],
-                     "DECODE difference" if got[0] == 0
-                     else "not a decode difference"))
+                     "agrees once the source is re-encoded as PNG "
+                     "(cause not isolated; run skip_draw.py)" if got[0] == 0
+                     else "still differs through the intermediate"))
     return 1 if failed else 0
 
 
