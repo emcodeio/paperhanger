@@ -293,9 +293,9 @@ DO-NOT-DELETE header saying why.
 
 ## Lineage
 
-The original scripts live in `~/.dotfiles/bin/shell_scripts/make_wallpaper/`. paperhanger has replaced them: the author's library was rebuilt with it in the tier-4 run. See `legacy/README.md` for what each file was.
+The original scripts lived in `~/.dotfiles/bin/shell_scripts/make_wallpaper/` until 2026-09-30, when they were removed; verbatim copies are in `legacy/`, and `legacy/README.md` says what each file was. paperhanger has replaced them: the author's library was rebuilt with it in the tier-4 run.
 
-The legacy aliases map to paperhanger as follows, offered as the intended replacement rather than installed by anything here. Editing `~/.dotfiles` to point them at `paperhanger` is left to the author:
+The legacy aliases were remapped to paperhanger in the author's shell configuration on the same day. Nothing in this repository installs them:
 
 | Alias | Maps to |
 |---|---|
@@ -304,7 +304,7 @@ The legacy aliases map to paperhanger as follows, offered as the intended replac
 | `mkwphone` | `paperhanger -p` |
 | `mkwproc` | no successor |
 
-`mkwproc` is left unmapped rather than guessed at. All four aliases pointed at the same script, so what is missing is not which program `mkwproc` invoked but the arguments it passed, and the alias bodies live in the dotfiles at `shell/old/aliases_shared.zsh` rather than in `legacy/`. The script parses only `getopts ":dpb"` (`legacy/make_wallpaper.zsh:383`), so `mkwproc` was not a fourth mode. It wrapped one of these three, and nothing kept here says which.
+`mkwproc` was retired rather than guessed at. All four aliases pointed at the same script, so what is missing is not which program `mkwproc` invoked but the arguments it passed, and the alias bodies live in the dotfiles at `shell/old/aliases_shared.zsh` rather than in `legacy/`. The script parses only `getopts ":dpb"` (`legacy/make_wallpaper.zsh:383`), so `mkwproc` was not a fourth mode. It wrapped one of these three, and nothing kept here says which.
 
 See also:
 
