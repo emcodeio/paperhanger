@@ -262,7 +262,7 @@ def corpus_or_skip() -> Path:
     module-scoped -- 192 MB of photographs and five to six minutes of work,
     4:58 and 5:52 on two runs of 2026-09-14 -- and a module-scoped fixture
     cannot depend on a function-scoped one. It is no longer "minutes of
-    sips": the 894-file `sips` cross-check is 2.4 s of that, and what costs
+    sips": the whole-corpus `sips` cross-check (894 files when measured) is 2.4 s of that, and what costs
     the minutes is the sample run itself.
     """
     if not CORPUS.is_dir():
