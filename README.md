@@ -191,10 +191,10 @@ Four tiers. Only the first three are part of "implemented". The full-corpus run 
 
 | Tier | What | Cost | When |
 |---|---|---|---|
-| 1 | generated fixtures, pure functions, stubbed upscaler | 723 tests, ~1m35s | every commit |
+| 1 | generated fixtures, pure functions, stubbed upscaler, `library/` | 802 tests, ~1m40s | every commit |
 | 2 | 27 real corpus images, stubbed upscaler | 21 tests, ~5-6 min | before every push |
 | 3 | the same 27 images, real upscaler (21 model calls) | 6 tests, ~41 min | once, before calling the tool done |
-| 4 | all 894 images in the real corpus | ~24 h | the author's acceptance pass, not a gate |
+| 4 | every image in the real corpus (894 at the first run) | 20h43m on the first run | the author's acceptance pass, not a gate; done 2026-09-28 |
 
 Tiers 1 and 2 are measured on every run and the numbers above are current. Tier 3's cost
 is one measurement, from its first run against the CoreGraphics pipeline.
@@ -221,7 +221,40 @@ Either slow tier on its own:
 
 Tier 2 tests are marked `corpus` and skip cleanly on a machine that has never seen `~/Pictures/wallpaper`. That corpus is read-only: nothing in this repo writes to it, and the images are never committed. `tests/corpus_sample.txt` names 27 filenames, copied to scratch at test time.
 
-Tier 4 is not a pytest run at all. It is the author processing all 894 images once, on purpose, to judge what no assertion covers: whether the crops are worth keeping, whether HEIC 80 was the right call, whether `below_target/` is a useful distinction in practice.
+Tier 4 is not a pytest run at all. It is the author processing the whole corpus once, on purpose, to judge what no assertion covers: whether the crops are worth keeping, whether HEIC 80 was the right call, whether `below_target/` is a useful distinction in practice. The first one ran on 2026-09-26 to 28; `docs/research/2026-09-28-tier-4-full-corpus-run.md` has what it found.
+
+The corpus is expected to grow as batches are added, so no test pins its size. The format and dimension checks compare every file against `sips` live.
+
+## Adding a batch to a library
+
+`library/` holds the tools that take a finished paperhanger batch into a wallpaper library:
+a library of rendition folders, an originals corpus a rebuild starts from, and optionally a
+second copy of the originals on another machine. They are not part of the `paperhanger`
+package. Run them from the repository root as modules, e.g.
+`uv run python -m library.integrate_batch --help`.
+
+They read their paths from the environment and default nothing personal:
+
+| Variable | Meaning |
+|---|---|
+| `PAPERHANGER_LIBRARY` | library root (required) |
+| `PAPERHANGER_ORIGINALS` | originals corpus (required) |
+| `PAPERHANGER_LIBRARY_FOLDERS` | four folders under the root, in the order desktop, desktop-secondary, phone, phone-secondary (default `desktop/primary,desktop/secondary,phone/primary,phone/secondary`) |
+| `PAPERHANGER_NAS` | `host:/path` of a second originals copy, reached with `ssh` and `scp -O` (optional) |
+| `PAPERHANGER_EXTRA_STEM_DIRS` | more directories whose filenames count as taken (optional) |
+| `PAPERHANGER_ICLOUD_CHECK` | `1` if the library is in iCloud Drive: `verify` then also requires it to have finished syncing (optional) |
+
+A batch, start to finish:
+
+1. Run paperhanger on the new images, using a processing directory that is **not** inside the corpus (originals are moved, not copied). For a long run, `library/run_paperhanger.sh <run-dir> <input> <log>` in tmux.
+2. Copy the processing directory to a batch directory, and record a manifest of the source as `<batch>/source.sha256`, one `<sha256>  ./<relative path>` line per file, leaving out `.DS_Store` (`find . -type f ! -name .DS_Store -print0 | xargs -0 shasum -a 256`). If paperhanger put anything in `error/`, deal with it first: `cleanup` only accounts for `originals/` and `to_sort_*`, so it will refuse.
+3. `python -m library.rename_batch --batch B --words B/words.json`. `words.json` maps each original to content words. The tool adds an unused 4-digit suffix, checks the result against every stem already in use, and prints the table. Add `--apply` to rename the originals and every output; each output keeps its position, size and factor token.
+4. `python -m library.integrate_batch stage-review --batch B`, then curate `B/review/`.
+5. `python -m library.integrate_batch apply --batch B --to library`, then `--to originals`, then `--to nas`. Each is add-only and hash-checked. A name already present with the same bytes counts as done, so an interrupted step can simply be re-run; a different file of the same name is a refusal.
+6. `python -m library.integrate_batch verify --batch B`; then `cleanup --batch B --source <processing dir>`. It deletes only after the source is unchanged since staging, every file in it has reached the batch, and verify passes. It writes its record beside the batch as `B.cleanup.json`.
+
+`python -m library.verify_outputs --sources DIR --processing DIR` checks that every planned
+output exists at its planned size at any point.
 
 ## Troubleshooting
 
@@ -234,21 +267,24 @@ Tier 4 is not a pytest run at all. It is the author processing all 894 images on
 ## Status
 
 Complete and reviewed, in two stages. Sixteen tasks built the tool. Eight more moved its
-imaging layer off `sips` and onto CoreGraphics, which is the section above. 750 tests
-pass across the three gating tiers: 723 in tier 1, 21 against the real corpus, 6 driving
-the real upscaler.
+imaging layer off `sips` and onto CoreGraphics, which is the section above. 829 tests
+pass across the three gating tiers: 802 in tier 1 (79 of them for `library/`), 21 against
+the real corpus, 6 driving the real upscaler.
 
-Nothing is known to be wrong, and nothing is known to be slow on purpose. The one
+Nothing is known to produce a wrong wallpaper, and nothing is known to be slow on purpose. The one
 optimisation this section used to list, padding each 4x frame once instead of once per
 slice, is gone rather than done: `CGImageCreateWithImageInRect` crops at any origin, so
 there is no extra pass left to amortise.
 
-What has never happened is tier 4. No run has processed the whole 894-image library end
-to end, and a full run takes about a day, so the longest thing this code has done is a
-27-image sample. Nothing in the test suite covers what only volume reveals: a filename
-collision in the archive after four hundred moves, a single corrupt file eight hours in,
-disk filling partway through. Start with `--dry-run`, then a directory of twenty, before
-pointing it at everything.
+Tier 4 has now happened. On 2026-09-26 to 28 the whole library went through the tool
+once: 881 photos after a 16-photo pilot, 3,392 outputs, 20 hours 43 minutes against an
+estimate of 24.1 hours, with no failures, no archive collisions and every output at its
+planned size. It found no defect in the output. It found two operational gaps: progress
+lines are not flushed, so a piped log lags, and SIGHUP is not handled, so only Ctrl-C stops
+a run cleanly. It also found that the time estimate is pessimistic on fast machines while
+under-charging photos over the whole-frame cap. `library/run_paperhanger.sh` works around
+the operational gaps. The report is
+`docs/research/2026-09-28-tier-4-full-corpus-run.md`.
 
 Six tests are the only thing standing between a specific silent defect and a wrong
 wallpaper, and they are named as such in
@@ -257,7 +293,7 @@ DO-NOT-DELETE header saying why.
 
 ## Lineage
 
-The original scripts live in `~/.dotfiles/bin/shell_scripts/make_wallpaper/` and remain in use until paperhanger replaces them. See `legacy/README.md` for what each file was.
+The original scripts live in `~/.dotfiles/bin/shell_scripts/make_wallpaper/`. paperhanger has replaced them: the author's library was rebuilt with it in the tier-4 run. See `legacy/README.md` for what each file was.
 
 The legacy aliases map to paperhanger as follows, offered as the intended replacement rather than installed by anything here. Editing `~/.dotfiles` to point them at `paperhanger` is left to the author:
 
@@ -278,6 +314,7 @@ See also:
 - `docs/research/2026-09-13-final-branch-review.md` — the merge-readiness review of the original sixteen tasks.
 - `docs/superpowers/specs/2026-09-13-coregraphics-imaging-design.md` — the design for moving the imaging layer off `sips`.
 - `docs/research/2026-09-13-coregraphics-preflight-measurements.md` — the four unknowns that had to be settled before that design could be implemented, and the twenty-one instruments that settled them.
+- `docs/research/2026-09-28-tier-4-full-corpus-run.md` — the first whole-library run: timings, what it found, and how its output became a library; its instruments sit in the directory of the same name.
 - `docs/research/2026-09-14-coregraphics-branch-review.md` — the merge-readiness review of that migration, including the line-by-line ownership audit of `_cg.py` and the mutation evidence for what the suite guards.
 - `docs/research/coregraphics-task-reports/` — the nine implementation reports, kept as the provenance for the measured numbers in the docstrings.
 
