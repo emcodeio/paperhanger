@@ -8,13 +8,13 @@ paperhanger turns a folder of images into desktop and phone wallpapers on macOS:
 
 ## Status
 
-Implemented and reviewed. `paperhanger/` holds the working tool (classification, cropping, execution, CLI, reporting) with a full test suite under `tests/`. All sixteen planned tasks (Task 0 through Task 15) are complete, Tier 3 included, and the imaging layer has since been moved off `sips` onto CoreGraphics in a further eight tasks. **750 tests pass across all three tiers — 723 in tier 1 (~1m40s), 21 against the real corpus (~6m), 6 against the real upscaler (~41m).**
+Implemented and reviewed. `paperhanger/` holds the working tool (classification, cropping, execution, CLI, reporting) with a full test suite under `tests/`. All sixteen planned tasks (Task 0 through Task 15) are complete, Tier 3 included, and the imaging layer has since been moved off `sips` onto CoreGraphics in a further eight tasks. **829 tests pass across all three tiers — 802 in tier 1 (~1m40s, 79 of them for `library/`), 21 against the real corpus (~6m), 6 against the real upscaler (~41m).**
 
 The differential gates that carried that migration are retired: each operation was accepted on a comparison against the `sips` implementation it replaced, over generated fixtures and over the 27-image sample, and the last run of all four was green at 116 tier-1 comparisons plus 8 over the corpus. Those modules are deleted; the 70 assertions in them that were about *our* behaviour rather than about `sips` moved into `tests/test_imaging.py` and `tests/test_cg.py`.
 
 Tier 3's open question is settled. Whether enlarging a whole frame and then cutting it differs from cutting first was measured against ground-truth original pixels, not by comparing the two methods to each other — 56 comparisons over two window sizes and both slice positions. They are interchangeable, so section 7 keeps the whole-frame path and a full run stays near 24 hours rather than 37. Section 7 carries the numbers.
 
-See `README.md` for install, usage, output layout, and the testing tiers. The full 894-image corpus run (tier 4) is the author's acceptance pass and is not a gate on "implemented".
+See `README.md` for install, usage, output layout, and the testing tiers. The full-corpus run (tier 4) is the author's acceptance pass and is not a gate on "implemented". It first ran on 2026-09-26 to 28 (the 894-file corpus, 20h43m, no failures): `docs/research/2026-09-28-tier-4-full-corpus-run.md`. `library/` holds the tools that add later batches to the author's library; they are not part of the package and read their paths from the environment.
 
 ## Read first
 

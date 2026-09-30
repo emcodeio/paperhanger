@@ -199,30 +199,57 @@ def test_probe_runs_no_subprocess(tmp_path, monkeypatch):
 
 # The census the `sips` probe returned for the whole corpus, recorded BEFORE
 # the ImageIO one was written, by running the old body over all 894
-# photographs. It is the only check in this project that can catch a format
-# string changing, because `probe` writes no file for a differential to
-# compare -- so it is pinned as counts rather than as a set, and a photograph
-# whose format were read differently would move one count and fail.
-CORPUS_FORMATS = {"jpeg": 841, "png": 47, "webp": 3, "heic": 2, "gif": 1}
+# photographs: {"jpeg": 841, "png": 47, "webp": 3, "heic": 2, "gif": 1}, plus
+# one non-image (.DS_Store). `probe` reproduced it exactly. It is the only check
+# in this project that can catch a format string changing, because `probe`
+# writes no file for a differential to compare.
+#
+# 2026-09-30: the census stopped being a pinned table. The corpus grows every
+# time a batch is added to the library (48 photographs since the census), and a
+# table of counts would fail on every addition while proving nothing new. The
+# test below asks `sips -g format` about every file instead, the way the
+# dimensions test after it always has, so the comparison stays against an
+# independent reader and the corpus is free to grow. The census itself stays, as floors.
+CENSUS_2026_09_14 = {"jpeg": 841, "png": 47, "webp": 3, "heic": 2, "gif": 1}
+
+
+def _sips_format(sips: str, path):
+    """`sips -g format`, parsed; None when sips reports none (the .DS_Store)."""
+    proc = subprocess.run([sips, "-g", "format", str(path)], capture_output=True, text=True)
+    for line in proc.stdout.splitlines():
+        key, sep, value = line.strip().partition(":")
+        if sep and key.strip() == "format":
+            return value.strip() or None
+    return None
 
 
 @pytest.mark.corpus
-def test_probe_reproduces_the_sips_format_census_over_the_whole_corpus(corpus):
-    """Tier 2: all 894, against what `sips -g format` said for each.
+def test_probe_agrees_with_sips_on_every_corpus_format(corpus, sips):
+    """Tier 2: every file in the corpus, probe's format against `sips -g format`.
 
-    `cli.scan` is what the tool actually calls, so this goes through it rather
-    than through `probe` directly -- the non-image count it returns is the
-    other half of the answer, and `.DS_Store` is the one file that has to land
-    there.
+    `cli.scan` is what the tool actually calls, so the images and the non-image
+    count come from it rather than from `probe` directly; `.DS_Store` is the one
+    file that has to land on the non-image side, for both readers.
     """
-    from collections import Counter
+    from concurrent.futures import ThreadPoolExecutor
 
+    candidates = sorted(p for p in corpus.iterdir() if p.is_file())
     images, non_images = cli.scan(corpus)
+    ours = {p: fmt for p, _w, _h, fmt in images}
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        theirs = dict(zip(candidates, pool.map(lambda p: _sips_format(sips, p), candidates)))
 
-    assert Counter(fmt for _p, _w, _h, fmt in images) == CORPUS_FORMATS
-    assert sum(CORPUS_FORMATS.values()) == 894
-    assert non_images == 1, \
-        "the corpus holds exactly one non-image, its .DS_Store"
+    disagreements = [(p.name, ours.get(p), theirs[p]) for p in candidates
+                     if ours.get(p) != theirs[p]]
+    assert disagreements == []
+    assert non_images == sum(1 for p in candidates if theirs[p] is None)
+    # sips and probe both read through ImageIO, so an OS update that changed how ImageIO
+    # names a format would move them together. The 894-file census still bounds that:
+    # the corpus only grows, so no format can have fewer files than it did then.
+    from collections import Counter
+    counts = Counter(ours.values())
+    for fmt, floor in CENSUS_2026_09_14.items():
+        assert counts[fmt] >= floor, f"{fmt}: {counts[fmt]} files, fewer than the census's {floor}"
 
 
 def _sips_dimensions(sips: str, path):
@@ -250,7 +277,7 @@ def _sips_dimensions(sips: str, path):
 
 @pytest.mark.corpus
 def test_probe_agrees_with_sips_on_every_corpus_dimension(corpus):
-    """The other half of the triple, over the same 894 files.
+    """The other half of the triple, over every corpus file.
 
     Runs the old `sips -g` parse here rather than trusting the recorded
     census, because dimensions are 894 pairs and a table of them in this file
@@ -1535,8 +1562,8 @@ def _write_progressive_jpeg(source, out_path):
 # formats upscayl-bin cannot read. `upscayl-bin` emits PNG with no ICC chunk,
 # so without the conversion the encode step tags sRGB over numbers that were
 # never in sRGB. The corpus census behind that, over all 895 entries of
-# ~/Pictures/wallpaper: 714 sRGB IEC61966-2.1, 96 `c2`, 23 GIMP built-in
-# sRGB, 21 untagged, 19 Adobe RGB (1998), 9 Generic Gray Gamma 2.2, 3 sRGB
+# ~/Pictures/wallpaper at the time (it has grown since): 714 sRGB
+# IEC61966-2.1, 96 `c2`, 23 GIMP built-in sRGB, 21 untagged, 19 Adobe RGB (1998), 9 Generic Gray Gamma 2.2, 3 sRGB
 # IEC61966-2-1 black scaled, 3 ProPhoto RGB, 2 Generic RGB, 2 sRGB, 1
 # Calibrated RGB Colorspace, 1 iMac, and one entry that is not an image.
 # Every one of them is a JPEG or a PNG, so a condition on the FORMAT would

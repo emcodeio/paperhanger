@@ -39,7 +39,7 @@ What it cannot see, and where to look instead:
     thing measured, so a probe that misreported every file would agree with
     itself all the way through. Tier 1 measures it against PNGs of known
     size, and `test_imaging.py` carries two Tier 2 tests that measure it
-    against `sips` over all 894 corpus files -- dimensions and format
+    against `sips` over every corpus file -- dimensions and format
     strings both -- which is the check this file cannot make.
   * Anything about encoder quality: `-s formatOptions 80` is checked where it
     is passed, not in the bytes that come back.
